@@ -13,7 +13,7 @@ import logger from './utils/logger.js';
 import { sleep } from './utils/retry.js';
 import { fetchClosedCandles, isCandleFresh } from './collector/binance.js';
 import { buildSignal } from './strategy/reversalContinuation.js';
-import { findCurrentCycleMarket, isPriceAcceptable, pollUntilResolved } from './market/polymarket.js';
+import { findCurrentCycleMarket, isPriceAcceptable } from './market/polymarket.js';
 import { getBalance, placeOrder, recordLoss, isDailyLossExceeded } from './trader/executor.js';
 import * as martingale from './martingale/manager.js';
 
@@ -151,19 +151,59 @@ async function runCycle(cycleStartTs) {
 
   logger.info('[main] order submitted', { orderId: orderResult.orderId, actualBet });
 
-  // ── FR-5.8: Async settlement polling ──
-  // Fire-and-forget — does NOT block the next cycle
-  pollUntilResolved(
-    market.conditionId,
-    signalObj.signal,
-    (won) => {
-      martingale.onSettled(won);
-      if (!won) recordLoss(actualBet);
-    },
-    { pollIntervalMs: 20_000, timeoutMs: (config.cycleMinutes + 2) * 60_000 }
-  ).catch((err) =>
-    logger.error('[main] pollUntilResolved threw', { error: err?.message })
+  // ── Settlement by candle ──
+  // Fire-and-forget — does NOT block the next cycle. The window we bet on
+  // (open = cycleStartTs) is judged purely by its own 5m candle: UP wins if it
+  // closes >= open, DOWN wins if it closes < open (mirrors Polymarket's rule).
+  settleByCandle(cycleStartTs, signalObj.signal, (won) => {
+    martingale.onSettled(won);
+    if (!won) recordLoss(actualBet);
+  }).catch((err) =>
+    logger.error('[main] settleByCandle threw', { error: err?.message })
   );
+}
+
+// ─────────────────────────────────────────
+// Settlement by candle direction
+// ─────────────────────────────────────────
+
+/**
+ * Wait for the bet window's 5m candle to close, then decide win/loss by its
+ * direction. UP wins if close >= open; DOWN wins if close < open.
+ *
+ * @param {number} cycleStartTs  – open time (ms) of the window we bet on
+ * @param {'UP'|'DOWN'} signal
+ * @param {(won: boolean) => void} onSettled
+ */
+async function settleByCandle(cycleStartTs, signal, onSettled) {
+  const closeTs = cycleStartTs + CYCLE_MS;
+  const waitMs = (closeTs + config.signalDelayMs) - Date.now();
+  if (waitMs > 0) await sleep(waitMs);
+
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    try {
+      const candles = await fetchClosedCandles(Math.max(config.candleLimit, 3));
+      const c = candles.find((k) => k.t === cycleStartTs);
+      if (c) {
+        const direction = c.close >= c.open ? 'UP' : 'DOWN';
+        const won = direction === signal;
+        logger.info('[settle] candle result', {
+          window: new Date(cycleStartTs).toISOString(),
+          open: c.open, close: c.close, direction, signal, won,
+        });
+        onSettled(won);
+        return;
+      }
+      logger.debug('[settle] bet candle not available yet', { attempt });
+    } catch (err) {
+      logger.warn('[settle] candle fetch error', { attempt, error: err?.message });
+    }
+    await sleep(10_000);
+  }
+
+  logger.warn('[settle] could not resolve by candle — martingale left unchanged', {
+    window: new Date(cycleStartTs).toISOString(),
+  });
 }
 
 // ─────────────────────────────────────────

@@ -167,47 +167,5 @@ function parseUpDownTokens(market) {
   return { upTokenId, downTokenId, upPrice };
 }
 
-/**
- * Poll until market resolves; calls onSettled(won).
- */
-export async function pollUntilResolved(conditionId, signal, onSettledCb, {
-  pollIntervalMs = 30_000,
-  timeoutMs = 10 * 60 * 1000,
-} = {}) {
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, pollIntervalMs));
-
-    try {
-      const url = `${GAMMA_API}/markets?condition_id=${conditionId}`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-      if (!res.ok) continue;
-
-      const data = await res.json();
-      const m = Array.isArray(data) ? data[0] : data;
-      if (!m?.closed && !m?.resolved) continue;
-
-      let outcomes = m.outcomes;
-      let prices = m.outcomePrices;
-      if (typeof outcomes === 'string') outcomes = JSON.parse(outcomes);
-      if (typeof prices === 'string') prices = JSON.parse(prices);
-
-      const winnerIdx = prices
-        ?.map((p, i) => ({ p: Number(p), outcome: outcomes?.[i] }))
-        ?.sort((a, b) => b.p - a.p)?.[0];
-
-      const winning = String(winnerIdx?.outcome ?? '').toUpperCase();
-      const betSide = signal === 'UP' ? 'UP' : 'DOWN';
-      const won = winning === betSide || winning === (betSide === 'UP' ? 'YES' : 'NO');
-
-      logger.info('[market] resolved', { conditionId, winning, signal, won });
-      onSettledCb(won);
-      return;
-    } catch (err) {
-      logger.debug('[market] poll error', { conditionId, error: err?.message });
-    }
-  }
-
-  logger.warn('[market] resolution polling timed out', { conditionId });
-}
+// Settlement is now done by candle direction in src/index.js (settleByCandle),
+// so the Polymarket resolution poller is no longer needed.
