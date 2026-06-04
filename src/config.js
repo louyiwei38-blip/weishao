@@ -1,5 +1,16 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
+import { existsSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { resolvePrivateKey } from './utils/secrets.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const envPath = join(__dirname, '..', '.env');
+if (existsSync(envPath)) {
+  dotenv.config({ path: envPath });
+} else {
+  dotenv.config();
+}
 
 function required(name) {
   const v = process.env[name];

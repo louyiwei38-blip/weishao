@@ -27,11 +27,14 @@ async function getClobClient() {
   const pk = config.poly.privateKey;
   if (!pk) throw new Error('POLY_PRIVATE_KEY is not set (check encrypted key + POLY_KEY_PASSWORD)');
 
-  const { key, apiSecret, passphrase } = config.poly;
-  if (!key || !apiSecret || !passphrase) {
+  const { apiKey: key, apiSecret, passphrase } = config.poly;
+  const missing = [];
+  if (!key) missing.push('POLY_API_KEY');
+  if (!apiSecret) missing.push('POLY_API_SECRET');
+  if (!passphrase) missing.push('POLY_PASSPHRASE');
+  if (missing.length) {
     throw new Error(
-      'Polymarket API credentials incomplete. Set POLY_API_KEY, POLY_API_SECRET, POLY_PASSPHRASE in .env. ' +
-        'Run: node scripts/create-api-key.js'
+      `Polymarket API missing: ${missing.join(', ')}. Run: node scripts/create-api-key.js`
     );
   }
 
