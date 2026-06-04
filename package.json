@@ -1,0 +1,25 @@
+{
+  "name": "polymarket-reversal-bot",
+  "version": "1.0.0",
+  "description": "BTC/USDT 5m Reversal Continuation strategy on Polymarket (CLOB V2)",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dry": "DRY_RUN=true node src/index.js",
+    "encrypt-key": "node scripts/encrypt-key.js",
+    "test-cycle": "node scripts/test-cycle.js",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:live": "pm2 start ecosystem.config.cjs --env live"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@polymarket/clob-client": "^5.8.1",
+    "ccxt": "^4.5.51",
+    "dotenv": "^16.4.5",
+    "viem": "^2.21.0",
+    "winston": "^3.13.0"
+  }
+}
