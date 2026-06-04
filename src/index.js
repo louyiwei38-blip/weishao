@@ -13,7 +13,7 @@ import logger from './utils/logger.js';
 import { sleep } from './utils/retry.js';
 import { fetchClosedCandles, isCandleFresh } from './collector/binance.js';
 import { buildSignal } from './strategy/reversalContinuation.js';
-import { findNextCycleMarket, isPriceAcceptable, pollUntilResolved } from './market/polymarket.js';
+import { findCurrentCycleMarket, isPriceAcceptable, pollUntilResolved } from './market/polymarket.js';
 import { getBalance, placeOrder, recordLoss, isDailyLossExceeded } from './trader/executor.js';
 import * as martingale from './martingale/manager.js';
 
@@ -97,7 +97,7 @@ async function runCycle(cycleStartTs) {
   }
 
   // ── FR-3: Market discovery ──
-  const market = await findNextCycleMarket(cycleStartTs);
+  const market = await findCurrentCycleMarket(cycleStartTs);
   if (!market) {
     logger.warn('[main] no Polymarket BTC 5M market found — skipping trade');
     return;

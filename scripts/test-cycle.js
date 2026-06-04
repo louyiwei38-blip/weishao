@@ -7,7 +7,7 @@
 import 'dotenv/config';
 import { fetchClosedCandles } from '../src/collector/binance.js';
 import { buildSignal } from '../src/strategy/reversalContinuation.js';
-import { findNextCycleMarket, isPriceAcceptable } from '../src/market/polymarket.js';
+import { findCurrentCycleMarket, isPriceAcceptable } from '../src/market/polymarket.js';
 import { placeOrder } from '../src/trader/executor.js';
 import * as martingale from '../src/martingale/manager.js';
 import config from '../src/config.js';
@@ -32,7 +32,7 @@ async function main() {
     return;
   }
 
-  const market = await findNextCycleMarket(cycleStartTs);
+  const market = await findCurrentCycleMarket(cycleStartTs);
   console.log('\n[2] Market:', market ? market.slug : 'NOT FOUND');
   if (!market) process.exit(1);
 

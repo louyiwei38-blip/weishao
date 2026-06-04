@@ -3,25 +3,28 @@ import logger from '../utils/logger.js';
 import { withRetry } from '../utils/retry.js';
 
 const GAMMA_API = config.poly.gammaApi;
-const CYCLE_MS = config.cycleMinutes * 60 * 1000;
 
 /** Simple in-memory cache per cycle boundary */
 let cache = { cycleTs: 0, market: null };
 
 /**
- * Fetch the BTC 5-minute Up/Down market for the NEXT window.
+ * Fetch the BTC 5-minute Up/Down market for the CURRENT window.
  * Polymarket slug format: btc-updown-5m-{windowStartUnixSec}
  *
- * @param {number} cycleStartTs – UTC ms of the 5m boundary that just closed
+ * The signal is derived from the two just-closed candles and predicts the
+ * direction of the window that just opened, so we trade THAT window — the one
+ * starting exactly at cycleStartTs (resolves cycleStartTs + 5m).
+ *
+ * @param {number} cycleStartTs – UTC ms of the 5m boundary that just opened
  */
-export async function findNextCycleMarket(cycleStartTs) {
+export async function findCurrentCycleMarket(cycleStartTs) {
   if (cache.cycleTs === cycleStartTs && cache.market) {
     logger.debug('[market] using cached market', { slug: cache.market.slug });
     return cache.market;
   }
 
-  // Next window starts one cycle after the boundary we triggered on
-  const windowStartMs = cycleStartTs + CYCLE_MS;
+  // Trade the window that just opened (the one the signal predicts)
+  const windowStartMs = cycleStartTs;
   const windowStartSec = Math.floor(windowStartMs / 1000);
   const slug = `btc-updown-5m-${windowStartSec}`;
 
