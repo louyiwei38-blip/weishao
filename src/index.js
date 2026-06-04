@@ -16,6 +16,7 @@ import { buildSignal } from './strategy/reversalContinuation.js';
 import { findCurrentCycleMarket, isPriceAcceptable } from './market/polymarket.js';
 import { getBalance, placeOrder, recordLoss, isDailyLossExceeded } from './trader/executor.js';
 import * as martingale from './martingale/manager.js';
+import { notifyTelegram } from './utils/telegram.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOGS_DIR   = join(__dirname, '..', 'logs');
@@ -150,6 +151,17 @@ async function runCycle(cycleStartTs) {
   }
 
   logger.info('[main] order submitted', { orderId: orderResult.orderId, actualBet });
+
+  // ── Telegram notification: direction + balance ──
+  const side = signalObj.signal === 'UP' ? '📈 买涨 UP' : '📉 买跌 DOWN';
+  notifyTelegram(
+    `🤖 <b>开单</b>\n` +
+    `方向: <b>${side}</b> (${signalObj.signalId})\n` +
+    `金额: <b>$${actualBet}</b>  (连败 ${mgState.consecutiveLosses})\n` +
+    `余额: <b>$${balance.toFixed(2)}</b>\n` +
+    `盘口: ${market.slug}\n` +
+    `时间: ${new Date(cycleStartTs).toISOString()}`
+  );
 
   // ── Settlement by candle ──
   // Fire-and-forget — does NOT block the next cycle. The window we bet on

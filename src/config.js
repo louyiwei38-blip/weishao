@@ -78,6 +78,12 @@ const config = {
   martingaleMultiplier: num('MARTINGALE_MULTIPLIER', 2),
   martingaleMaxLosses: num('MARTINGALE_MAX_LOSSES', 4),
 
+  // Telegram notifications
+  telegram: {
+    botToken: optional('TELEGRAM_BOT_TOKEN', ''),
+    chatId: optional('TELEGRAM_CHAT_ID', ''),
+  },
+
   // Risk
   skipIfYesPriceOutOfRange: bool('SKIP_IF_YES_PRICE_OUT_OF_RANGE', true),
   yesPriceMin: num('YES_PRICE_MIN', 0.05),
