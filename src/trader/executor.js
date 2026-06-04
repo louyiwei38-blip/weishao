@@ -253,11 +253,15 @@ export async function placeOrder(params) {
   const success = orderResp?.success === true;
   const makingAmount = Number(orderResp?.makingAmount ?? 0); // USDC spent
   const takingAmount = Number(orderResp?.takingAmount ?? 0); // shares received
-  const errorMsg = orderResp?.errorMsg ?? '';
+  // On HTTP error the client returns { error, status }; the real reason is in `error`.
+  const rawError = orderResp?.error ?? orderResp?.errorMsg ?? '';
+  const errorMsg = typeof rawError === 'string' ? rawError : JSON.stringify(rawError);
 
   logger.info('[executor] order response', {
     orderId, success, status, errorMsg,
-    makingAmount, takingAmount, ...logBase,
+    makingAmount, takingAmount,
+    raw: JSON.stringify(orderResp)?.slice(0, 600),
+    ...logBase,
   });
 
   // A FOK market order is killed if it cannot fill immediately; the API still
