@@ -107,7 +107,7 @@ async function resolveWalletSetup(walletClient, signerAddress, creds) {
   return { funderAddress, signatureType: SignatureTypeV2.POLY_1271, signatureLabel: 'POLY_1271' };
 }
 
-async function getClobClient() {
+export async function getClobClient() {
   if (clobClient) return clobClient;
 
   const pk = config.poly.privateKey;
