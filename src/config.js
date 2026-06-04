@@ -37,6 +37,7 @@ const config = {
   // Polymarket
   poly: {
     address: optional('POLY_ADDRESS', ''),
+    funderAddress: optional('POLY_FUNDER_ADDRESS', ''), // Polymarket proxy wallet (auto-detected if empty)
     privateKey: resolvePrivateKey(),
     apiKey: optional('POLY_API_KEY', ''),
     apiSecret: optional('POLY_API_SECRET', ''),

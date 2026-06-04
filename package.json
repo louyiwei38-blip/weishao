@@ -17,7 +17,9 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@polymarket/builder-relayer-client": "^0.0.10",
     "@polymarket/clob-client": "^5.8.1",
+    "@polymarket/clob-client-v2": "^1.0.6",
     "ccxt": "^4.5.51",
     "dotenv": "^16.4.5",
     "viem": "^2.21.0",

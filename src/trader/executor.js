@@ -1,6 +1,14 @@
 import { createWalletClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { polygon } from 'viem/chains';
+import { RelayClient } from '@polymarket/builder-relayer-client';
+import {
+  AssetType,
+  ClobClient,
+  OrderType,
+  Side,
+  SignatureTypeV2,
+} from '@polymarket/clob-client-v2';
 import { appendFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -10,19 +18,97 @@ import logger from '../utils/logger.js';
 import { withRetry } from '../utils/retry.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const LOGS_DIR  = join(__dirname, '..', '..', 'logs');
+const LOGS_DIR = join(__dirname, '..', '..', 'logs');
 const TRADE_LOG = join(LOGS_DIR, 'trades.jsonl');
+const RELAYER_URL = 'https://relayer-v2.polymarket.com';
 
 let clobClient = null;
+let walletMeta = null;
 
-// ─────────────────────────────────────────
-// CLOB client initialisation
-// ─────────────────────────────────────────
+const SIGNATURE_TYPES = [
+  { type: SignatureTypeV2.POLY_1271, label: 'POLY_1271' },
+  { type: SignatureTypeV2.POLY_PROXY, label: 'POLY_PROXY' },
+  { type: SignatureTypeV2.POLY_GNOSIS_SAFE, label: 'POLY_GNOSIS_SAFE' },
+  { type: SignatureTypeV2.EOA, label: 'EOA' },
+];
+
+function parseRawBalance(resp) {
+  return Number(resp?.balance ?? 0) / 1_000_000;
+}
+
+async function resolveFunderAddress(walletClient, signerAddress) {
+  if (config.poly.funderAddress) return config.poly.funderAddress;
+
+  try {
+    const relayer = new RelayClient(RELAYER_URL, config.poly.chainId, walletClient);
+    const depositWallet = await relayer.deriveDepositWalletAddress();
+    logger.info('[executor] derived deposit wallet', { signer: signerAddress, funder: depositWallet });
+    return depositWallet;
+  } catch (err) {
+    logger.warn('[executor] deposit wallet derive failed, trying gamma profile', { error: err?.message });
+  }
+
+  const url = `${config.poly.gammaApi}/public-profile?address=${signerAddress}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+  if (!res.ok) throw new Error(`Gamma public-profile ${res.status}`);
+
+  const data = await res.json();
+  const proxy = data?.proxyWallet;
+  if (!proxy) {
+    throw new Error(
+      `No Polymarket funder wallet for ${signerAddress}. Deposit on polymarket.com first.`
+    );
+  }
+  logger.info('[executor] resolved funder from gamma', { signer: signerAddress, funder: proxy });
+  return proxy;
+}
+
+function buildClobClient(walletClient, creds, signatureType, funderAddress) {
+  const useFunder = signatureType !== SignatureTypeV2.EOA ? funderAddress : undefined;
+  return new ClobClient({
+    host: config.poly.clobHost,
+    chain: config.poly.chainId,
+    signer: walletClient,
+    creds,
+    signatureType,
+    funderAddress: useFunder,
+  });
+}
+
+async function probeBalance(walletClient, creds, funderAddress, signatureType) {
+  const client = buildClobClient(walletClient, creds, signatureType, funderAddress);
+  const resp = await client.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+  return parseRawBalance(resp);
+}
+
+async function resolveWalletSetup(walletClient, signerAddress, creds) {
+  const funderAddress = await resolveFunderAddress(walletClient, signerAddress);
+
+  const explicit = process.env.POLY_SIGNATURE_TYPE;
+  if (explicit !== undefined && explicit !== '') {
+    const signatureType = Number(explicit);
+    const label = SIGNATURE_TYPES.find((s) => s.type === signatureType)?.label ?? String(signatureType);
+    return { funderAddress, signatureType, signatureLabel: label };
+  }
+
+  for (const { type, label } of SIGNATURE_TYPES) {
+    try {
+      const balance = await probeBalance(walletClient, creds, funderAddress, type);
+      if (balance > 0) {
+        logger.info('[executor] auto-detected signature type', { label, balance, funder: funderAddress });
+        return { funderAddress, signatureType: type, signatureLabel: label };
+      }
+    } catch (err) {
+      logger.debug('[executor] signature probe failed', { label, error: err?.message });
+    }
+  }
+
+  // New polymarket.com accounts use deposit wallets (POLY_1271).
+  return { funderAddress, signatureType: SignatureTypeV2.POLY_1271, signatureLabel: 'POLY_1271' };
+}
 
 async function getClobClient() {
   if (clobClient) return clobClient;
-
-  const { ClobClient, SignatureType } = await import('@polymarket/clob-client');
 
   const pk = config.poly.privateKey;
   if (!pk) throw new Error('POLY_PRIVATE_KEY is not set (check encrypted key + POLY_KEY_PASSWORD)');
@@ -45,73 +131,57 @@ async function getClobClient() {
     transport: http(),
   });
 
-  // constructor(host, chainId, signer, creds, signatureType, ...)
-  clobClient = new ClobClient(
-    config.poly.clobHost,
-    config.poly.chainId,
+  const creds = {
+    key: config.poly.apiKey,
+    secret: config.poly.apiSecret,
+    passphrase: config.poly.passphrase,
+  };
+
+  walletMeta = await resolveWalletSetup(walletClient, account.address, creds);
+  clobClient = buildClobClient(
     walletClient,
-    {
-      key: config.poly.apiKey,
-      secret: config.poly.apiSecret,
-      passphrase: config.poly.passphrase,
-    },
-    SignatureType.EOA
+    creds,
+    walletMeta.signatureType,
+    walletMeta.funderAddress
   );
 
   logger.info('[executor] ClobClient initialised', {
     host: config.poly.clobHost,
-    address: account.address,
+    signer: account.address,
+    funder: walletMeta.funderAddress,
+    signatureType: walletMeta.signatureLabel,
   });
+
+  try {
+    await clobClient.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+  } catch (err) {
+    logger.warn('[executor] balance cache sync failed', { error: err?.message });
+  }
+
   return clobClient;
 }
 
-// ─────────────────────────────────────────
-// Balance
-// ─────────────────────────────────────────
-
-/**
- * Return the pUSD / USDC balance.
- * @returns {Promise<number>}
- */
 export async function getBalance() {
   if (config.dryRun) return 9999;
 
   const client = await getClobClient();
   const resp = await withRetry(
-    () => client.getBalanceAllowance({ asset_type: 'COLLATERAL' }),
+    () => client.getBalanceAllowance({ asset_type: AssetType.COLLATERAL }),
     { label: 'getBalance' }
   );
 
-  // resp shape: { balance: string, allowance: string }
-  const balance = Number(resp?.balance ?? 0);
-  logger.debug('[executor] balance', { balance });
+  const balance = parseRawBalance(resp);
+  logger.debug('[executor] balance', {
+    balance,
+    raw: resp?.balance,
+    funder: walletMeta?.funderAddress,
+    signatureType: walletMeta?.signatureLabel,
+  });
   return balance;
 }
 
-// ─────────────────────────────────────────
-// Order placement
-// ─────────────────────────────────────────
-
-/** Dedup guard: set of "conditionId:cycleTs" strings already ordered this run */
 const orderedThisCycle = new Set();
 
-/**
- * Place a market (FOK) or limit (GTC) order on Polymarket.
- *
- * @param {{
- *   signal: 'UP' | 'DOWN',
- *   signalId: string,
- *   yesTokenId: string,
- *   noTokenId: string,
- *   conditionId: string,
- *   cycleStartTs: number,
- *   actualBet: number,
- *   baseBet: number,
- *   consecutiveLosses: number,
- *   yesPrice: number | null,
- * }} params
- * @returns {Promise<{ orderId: string | null, skipped: boolean, skipReason?: string }>}
- */
 export async function placeOrder(params) {
   const {
     signal, signalId,
@@ -137,7 +207,6 @@ export async function placeOrder(params) {
     yesPrice, dryRun: config.dryRun,
   };
 
-  // ── DRY RUN ──
   if (config.dryRun) {
     const dryId = `dry-${Date.now()}`;
     logger.info('[executor] DRY RUN — order simulated', { ...logBase, orderId: dryId });
@@ -146,14 +215,14 @@ export async function placeOrder(params) {
     return { orderId: dryId, skipped: false };
   }
 
-  // ── Real order ──
   const client = await getClobClient();
-  const balance = await getBalance();
+  const negRisk = await client.getNegRisk(tokenID);
+  const tickSize = await client.getTickSize(tokenID);
+  const orderOpts = { tickSize, negRisk };
 
   let orderResp;
 
   if (config.orderType === 'GTC') {
-    // Limit order
     const price = signal === 'UP'
       ? (yesPrice ?? 0.5)
       : (yesPrice != null ? +(1 - yesPrice).toFixed(4) : 0.5);
@@ -162,19 +231,19 @@ export async function placeOrder(params) {
 
     orderResp = await withRetry(
       () => client.createAndPostOrder(
-        client.createOrder({ tokenID, price, size, side: 'BUY' })
+        { tokenID, price, size, side: Side.BUY },
+        orderOpts,
+        OrderType.GTC
       ),
       { label: 'createOrder (GTC)' }
     );
   } else {
-    // FOK market order
     orderResp = await withRetry(
-      () => client.createAndPostMarketOrder({
-        tokenID,
-        amount: actualBet,
-        side: 'BUY',
-        feeRateBps: undefined,  // resolved internally
-      }, { tickSize: undefined, negRisk: false }),
+      () => client.createAndPostMarketOrder(
+        { tokenID, amount: actualBet, side: Side.BUY },
+        orderOpts,
+        OrderType.FOK
+      ),
       { label: 'createMarketOrder (FOK)' }
     );
   }
@@ -186,10 +255,6 @@ export async function placeOrder(params) {
 
   return { orderId, skipped: false };
 }
-
-// ─────────────────────────────────────────
-// Daily loss tracking
-// ─────────────────────────────────────────
 
 let dailyLossUsd = 0;
 let dailyLossDate = '';
@@ -207,10 +272,6 @@ export function recordLoss(amount) {
 export function isDailyLossExceeded() {
   return dailyLossUsd >= config.maxDailyLossUsd;
 }
-
-// ─────────────────────────────────────────
-// Internal
-// ─────────────────────────────────────────
 
 function writeTradelog(entry) {
   try {
