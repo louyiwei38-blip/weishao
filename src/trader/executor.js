@@ -15,7 +15,7 @@ import { fileURLToPath } from 'url';
 
 import config from '../config.js';
 import logger from '../utils/logger.js';
-import { withRetry } from '../utils/retry.js';
+import { withRetry, sleep } from '../utils/retry.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOGS_DIR = join(__dirname, '..', '..', 'logs');
@@ -216,78 +216,82 @@ export async function placeOrder(params) {
   }
 
   const client = await getClobClient();
-  const negRisk = await client.getNegRisk(tokenID);
-  const tickSize = await client.getTickSize(tokenID);
-  const orderOpts = { tickSize, negRisk };
 
-  let orderResp;
+  // Right after a 5m window opens the order book is often empty, so a FOK
+  // market order can't be priced/matched and the API returns 400. Retry a few
+  // times to let market makers populate the book. Safe to retry only because an
+  // unfilled order spends nothing (makingAmount = 0).
+  let orderResp = null;
+  let parsed = null;
+  for (let attempt = 1; attempt <= config.orderFillAttempts; attempt++) {
+    const negRisk = await client.getNegRisk(tokenID).catch(() => false);
+    const tickSize = await client.getTickSize(tokenID).catch(() => undefined);
+    const orderOpts = { tickSize, negRisk };
 
-  if (config.orderType === 'GTC') {
-    const price = signal === 'UP'
-      ? (yesPrice ?? 0.5)
-      : (yesPrice != null ? +(1 - yesPrice).toFixed(4) : 0.5);
+    try {
+      if (config.orderType === 'GTC') {
+        const price = signal === 'UP'
+          ? (yesPrice ?? 0.5)
+          : (yesPrice != null ? +(1 - yesPrice).toFixed(4) : 0.5);
+        const size = +(actualBet / price).toFixed(2);
+        orderResp = await client.createAndPostOrder(
+          { tokenID, price, size, side: Side.BUY }, orderOpts, OrderType.GTC
+        );
+      } else {
+        orderResp = await client.createAndPostMarketOrder(
+          { tokenID, amount: actualBet, side: Side.BUY }, orderOpts, OrderType.FOK
+        );
+      }
+    } catch (err) {
+      orderResp = { error: err?.message ?? String(err) };
+    }
 
-    const size = +(actualBet / price).toFixed(2);
+    parsed = parseOrderResponse(orderResp);
+    logger.info('[executor] order response', {
+      attempt, ...parsed, raw: JSON.stringify(orderResp)?.slice(0, 600), ...logBase,
+    });
 
-    orderResp = await withRetry(
-      () => client.createAndPostOrder(
-        { tokenID, price, size, side: Side.BUY },
-        orderOpts,
-        OrderType.GTC
-      ),
-      { label: 'createOrder (GTC)' }
-    );
-  } else {
-    orderResp = await withRetry(
-      () => client.createAndPostMarketOrder(
-        { tokenID, amount: actualBet, side: Side.BUY },
-        orderOpts,
-        OrderType.FOK
-      ),
-      { label: 'createMarketOrder (FOK)' }
-    );
+    if (parsed.filled) break;
+
+    if (attempt < config.orderFillAttempts) {
+      logger.warn('[executor] order not filled — retrying after delay', {
+        attempt, status: parsed.status, errorMsg: parsed.errorMsg,
+        retryInMs: config.orderRetryDelayMs,
+      });
+      await sleep(config.orderRetryDelayMs);
+    }
   }
 
+  if (!parsed?.filled) {
+    logger.warn('[executor] order NOT filled after all attempts — skipping', {
+      ...parsed, attempts: config.orderFillAttempts,
+    });
+    writeTradelog({ ...logBase, orderId: parsed?.orderId ?? null, status: 'unfilled', ...parsed });
+    orderedThisCycle.add(dedupKey);
+    return {
+      orderId: parsed?.orderId ?? null, skipped: true,
+      skipReason: `unfilled:${parsed?.status}${parsed?.errorMsg ? ` (${parsed.errorMsg})` : ''}`,
+    };
+  }
+
+  logger.info('[executor] order filled', { ...parsed, ...logBase });
+  writeTradelog({ ...logBase, orderId: parsed.orderId, status: 'filled', ...parsed });
+  orderedThisCycle.add(dedupKey);
+
+  return { orderId: parsed.orderId, skipped: false, makingAmount: parsed.makingAmount, takingAmount: parsed.takingAmount };
+}
+
+/** Normalise the CLOB order response (success path or { error, status }). */
+function parseOrderResponse(orderResp) {
   const orderId = orderResp?.orderID ?? orderResp?.id ?? null;
   const status = orderResp?.status ?? 'unknown';
   const success = orderResp?.success === true;
   const makingAmount = Number(orderResp?.makingAmount ?? 0); // USDC spent
   const takingAmount = Number(orderResp?.takingAmount ?? 0); // shares received
-  // On HTTP error the client returns { error, status }; the real reason is in `error`.
   const rawError = orderResp?.error ?? orderResp?.errorMsg ?? '';
   const errorMsg = typeof rawError === 'string' ? rawError : JSON.stringify(rawError);
-
-  logger.info('[executor] order response', {
-    orderId, success, status, errorMsg,
-    makingAmount, takingAmount,
-    raw: JSON.stringify(orderResp)?.slice(0, 600),
-    ...logBase,
-  });
-
-  // A FOK market order is killed if it cannot fill immediately; the API still
-  // returns an orderID. Treat "no fill" / failure as a skip so we neither claim
-  // a position nor track a phantom win/loss in the martingale.
   const filled = success && (status === 'matched' || takingAmount > 0);
-  if (!filled) {
-    logger.warn('[executor] order NOT filled — treating as skipped', {
-      orderId, success, status, errorMsg, makingAmount, takingAmount,
-    });
-    writeTradelog({
-      ...logBase, orderId, status: 'unfilled',
-      apiStatus: status, success, errorMsg, makingAmount, takingAmount,
-    });
-    orderedThisCycle.add(dedupKey);
-    return { orderId, skipped: true, skipReason: `unfilled:${status}${errorMsg ? ` (${errorMsg})` : ''}` };
-  }
-
-  logger.info('[executor] order filled', { orderId, status, makingAmount, takingAmount, ...logBase });
-  writeTradelog({
-    ...logBase, orderId, status: 'filled',
-    apiStatus: status, makingAmount, takingAmount,
-  });
-  orderedThisCycle.add(dedupKey);
-
-  return { orderId, skipped: false, makingAmount, takingAmount };
+  return { orderId, status, success, makingAmount, takingAmount, errorMsg, filled };
 }
 
 let dailyLossUsd = 0;

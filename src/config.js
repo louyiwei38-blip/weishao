@@ -69,6 +69,8 @@ const config = {
   minBalanceUsd: num('MIN_BALANCE_USD', 20),
   maxBetUsd: num('MAX_BET_USD', 200),
   orderType: optional('ORDER_TYPE', 'FOK'),
+  orderFillAttempts: num('ORDER_FILL_ATTEMPTS', 4),
+  orderRetryDelayMs: num('ORDER_RETRY_DELAY_MS', 8000),
   dryRun: bool('DRY_RUN', false),
   logLevel: optional('LOG_LEVEL', 'INFO'),
 
