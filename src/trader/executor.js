@@ -248,12 +248,42 @@ export async function placeOrder(params) {
     );
   }
 
-  const orderId = orderResp?.orderID ?? orderResp?.id ?? String(Date.now());
-  logger.info('[executor] order placed', { orderId, ...logBase });
-  writeTradelog({ ...logBase, orderId, status: 'placed' });
+  const orderId = orderResp?.orderID ?? orderResp?.id ?? null;
+  const status = orderResp?.status ?? 'unknown';
+  const success = orderResp?.success === true;
+  const makingAmount = Number(orderResp?.makingAmount ?? 0); // USDC spent
+  const takingAmount = Number(orderResp?.takingAmount ?? 0); // shares received
+  const errorMsg = orderResp?.errorMsg ?? '';
+
+  logger.info('[executor] order response', {
+    orderId, success, status, errorMsg,
+    makingAmount, takingAmount, ...logBase,
+  });
+
+  // A FOK market order is killed if it cannot fill immediately; the API still
+  // returns an orderID. Treat "no fill" / failure as a skip so we neither claim
+  // a position nor track a phantom win/loss in the martingale.
+  const filled = success && (status === 'matched' || takingAmount > 0);
+  if (!filled) {
+    logger.warn('[executor] order NOT filled — treating as skipped', {
+      orderId, success, status, errorMsg, makingAmount, takingAmount,
+    });
+    writeTradelog({
+      ...logBase, orderId, status: 'unfilled',
+      apiStatus: status, success, errorMsg, makingAmount, takingAmount,
+    });
+    orderedThisCycle.add(dedupKey);
+    return { orderId, skipped: true, skipReason: `unfilled:${status}${errorMsg ? ` (${errorMsg})` : ''}` };
+  }
+
+  logger.info('[executor] order filled', { orderId, status, makingAmount, takingAmount, ...logBase });
+  writeTradelog({
+    ...logBase, orderId, status: 'filled',
+    apiStatus: status, makingAmount, takingAmount,
+  });
   orderedThisCycle.add(dedupKey);
 
-  return { orderId, skipped: false };
+  return { orderId, skipped: false, makingAmount, takingAmount };
 }
 
 let dailyLossUsd = 0;
