@@ -28,6 +28,7 @@ const config = {
     address: optional('POLY_ADDRESS', ''),
     privateKey: resolvePrivateKey(),
     apiKey: optional('POLY_API_KEY', ''),
+    apiSecret: optional('POLY_API_SECRET', ''),
     passphrase: optional('POLY_PASSPHRASE', ''),
     builderCode: optional('POLY_BUILDER_CODE', ''),
     clobHost: 'https://clob.polymarket.com',

@@ -25,7 +25,15 @@ async function getClobClient() {
   const { ClobClient, SignatureType } = await import('@polymarket/clob-client');
 
   const pk = config.poly.privateKey;
-  if (!pk) throw new Error('POLY_PRIVATE_KEY is not set');
+  if (!pk) throw new Error('POLY_PRIVATE_KEY is not set (check encrypted key + POLY_KEY_PASSWORD)');
+
+  const { key, apiSecret, passphrase } = config.poly;
+  if (!key || !apiSecret || !passphrase) {
+    throw new Error(
+      'Polymarket API credentials incomplete. Set POLY_API_KEY, POLY_API_SECRET, POLY_PASSPHRASE in .env. ' +
+        'Run: node scripts/create-api-key.js'
+    );
+  }
 
   const account = privateKeyToAccount(pk);
   const walletClient = createWalletClient({
@@ -41,10 +49,10 @@ async function getClobClient() {
     walletClient,
     {
       key: config.poly.apiKey,
-      secret: '',
+      secret: config.poly.apiSecret,
       passphrase: config.poly.passphrase,
     },
-    SignatureType.POLY_GNOSIS_SAFE  // L1 EOA-compatible
+    SignatureType.EOA
   );
 
   logger.info('[executor] ClobClient initialised', {
