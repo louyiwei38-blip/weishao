@@ -22,11 +22,11 @@ module.exports = {
       // env: { POLY_KEY_PASSWORD: 'your-password' },
       env: {
         NODE_ENV: 'production',
-        DRY_RUN: 'true',
-      },
-      env_live: {
-        NODE_ENV: 'production',
         DRY_RUN: 'false',
+      },
+      env_dry: {
+        NODE_ENV: 'production',
+        DRY_RUN: 'true',
       },
     },
   ],
