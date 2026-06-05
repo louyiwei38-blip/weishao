@@ -4,7 +4,7 @@
  */
 
 import 'dotenv/config';
-import { appendFileSync, existsSync, mkdirSync } from 'fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -19,10 +19,16 @@ import * as martingale from './martingale/manager.js';
 import { notifyTelegram } from './utils/telegram.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const LOGS_DIR   = join(__dirname, '..', 'logs');
-const SIGNAL_LOG = join(LOGS_DIR, 'signals.jsonl');
+const LOGS_DIR    = join(__dirname, '..', 'logs');
+const SIGNAL_LOG  = join(LOGS_DIR, 'signals.jsonl');
+const PENDING_FILE = join(LOGS_DIR, 'pending-bet.json');
 
 const CYCLE_MS = config.cycleMinutes * 60 * 1000;
+
+// The bet placed in a previous cycle that is awaiting candle-based settlement.
+// Persisted to disk so a restart still settles it. Shape:
+//   { cycleStartTs: number, signal: 'UP'|'DOWN', actualBet: number }
+let pendingBet = null;
 
 // ─────────────────────────────────────────
 // Startup
@@ -37,6 +43,33 @@ function writeSignalLog(entry) {
     appendFileSync(SIGNAL_LOG, JSON.stringify(entry) + '\n', 'utf8');
   } catch (err) {
     logger.error('[main] failed to write signal log', { error: err?.message });
+  }
+}
+
+// ─────────────────────────────────────────
+// Pending-bet persistence (for crash/restart safety)
+// ─────────────────────────────────────────
+
+function loadPending() {
+  try {
+    if (existsSync(PENDING_FILE)) {
+      pendingBet = JSON.parse(readFileSync(PENDING_FILE, 'utf8'));
+      logger.info('[settle] restored pending bet', { pendingBet });
+    }
+  } catch {
+    pendingBet = null;
+  }
+}
+
+function savePending() {
+  try {
+    if (pendingBet) {
+      writeFileSync(PENDING_FILE, JSON.stringify(pendingBet), 'utf8');
+    } else if (existsSync(PENDING_FILE)) {
+      rmSync(PENDING_FILE);
+    }
+  } catch (err) {
+    logger.warn('[settle] failed to persist pending bet', { error: err?.message });
   }
 }
 
@@ -66,6 +99,12 @@ async function runCycle(cycleStartTs) {
     logger.warn('[main] not enough candles', { got: candles.length });
     return;
   }
+
+  // ── Settle the PREVIOUS cycle's bet FIRST (synchronously) ──
+  // Its 5m candle has now closed, so we can judge win/loss and update the
+  // martingale BEFORE sizing this cycle's bet. This removes the old race where
+  // settlement and the next bet's sizing ran concurrently (martingale lagged a cycle).
+  settlePendingWithCandles(candles);
 
   const kMinus2 = candles.at(-2);
   const kMinus1 = candles.at(-1);
@@ -152,6 +191,11 @@ async function runCycle(cycleStartTs) {
 
   logger.info('[main] order submitted', { orderId: orderResult.orderId, actualBet });
 
+  // ── Record this bet as pending; it will be settled at the start of a later
+  // cycle once its 5m candle (open = cycleStartTs) has closed. ──
+  pendingBet = { cycleStartTs, signal: signalObj.signal, actualBet };
+  savePending();
+
   // ── Telegram notification: direction + balance ──
   const side = signalObj.signal === 'UP' ? '📈 买涨 UP' : '📉 买跌 DOWN';
   notifyTelegram(
@@ -162,17 +206,6 @@ async function runCycle(cycleStartTs) {
     `盘口: ${market.slug}\n` +
     `时间: ${new Date(cycleStartTs).toISOString()}`
   );
-
-  // ── Settlement by candle ──
-  // Fire-and-forget — does NOT block the next cycle. The window we bet on
-  // (open = cycleStartTs) is judged purely by its own 5m candle: UP wins if it
-  // closes >= open, DOWN wins if it closes < open (mirrors Polymarket's rule).
-  settleByCandle(cycleStartTs, signalObj.signal, (won) => {
-    martingale.onSettled(won);
-    if (!won) recordLoss(actualBet);
-  }).catch((err) =>
-    logger.error('[main] settleByCandle threw', { error: err?.message })
-  );
 }
 
 // ─────────────────────────────────────────
@@ -180,42 +213,44 @@ async function runCycle(cycleStartTs) {
 // ─────────────────────────────────────────
 
 /**
- * Wait for the bet window's 5m candle to close, then decide win/loss by its
- * direction. UP wins if close >= open; DOWN wins if close < open.
+ * Settle the pending bet (placed in an earlier cycle) using already-fetched
+ * closed candles. Runs synchronously at the start of a cycle, BEFORE the new
+ * bet is sized, so the martingale state is always up to date.
  *
- * @param {number} cycleStartTs  – open time (ms) of the window we bet on
- * @param {'UP'|'DOWN'} signal
- * @param {(won: boolean) => void} onSettled
+ * The window we bet on (open = pendingBet.cycleStartTs) is judged by its own 5m
+ * candle: UP wins if close >= open, DOWN wins if close < open.
+ *
+ * @param {Array<{t:number,open:number,close:number}>} candles – closed candles
  */
-async function settleByCandle(cycleStartTs, signal, onSettled) {
-  const closeTs = cycleStartTs + CYCLE_MS;
-  const waitMs = (closeTs + config.signalDelayMs) - Date.now();
-  if (waitMs > 0) await sleep(waitMs);
+function settlePendingWithCandles(candles) {
+  if (!pendingBet) return;
 
-  for (let attempt = 1; attempt <= 6; attempt++) {
-    try {
-      const candles = await fetchClosedCandles(Math.max(config.candleLimit, 3));
-      const c = candles.find((k) => k.t === cycleStartTs);
-      if (c) {
-        const direction = c.close >= c.open ? 'UP' : 'DOWN';
-        const won = direction === signal;
-        logger.info('[settle] candle result', {
-          window: new Date(cycleStartTs).toISOString(),
-          open: c.open, close: c.close, direction, signal, won,
-        });
-        onSettled(won);
-        return;
-      }
-      logger.debug('[settle] bet candle not available yet', { attempt });
-    } catch (err) {
-      logger.warn('[settle] candle fetch error', { attempt, error: err?.message });
-    }
-    await sleep(10_000);
+  const { cycleStartTs, signal, actualBet } = pendingBet;
+
+  // Only settle once the bet window has actually closed.
+  if (cycleStartTs + CYCLE_MS > Date.now()) return;
+
+  const c = candles.find((k) => k.t === cycleStartTs);
+  if (!c) {
+    // Candle not in the fetched window yet — keep pending, retry next cycle.
+    logger.warn('[settle] pending bet candle not found yet — will retry', {
+      window: new Date(cycleStartTs).toISOString(),
+    });
+    return;
   }
 
-  logger.warn('[settle] could not resolve by candle — martingale left unchanged', {
+  const direction = c.close >= c.open ? 'UP' : 'DOWN';
+  const won = direction === signal;
+  logger.info('[settle] candle result', {
     window: new Date(cycleStartTs).toISOString(),
+    open: c.open, close: c.close, direction, signal, won,
   });
+
+  martingale.onSettled(won);
+  if (!won) recordLoss(actualBet);
+
+  pendingBet = null;
+  savePending();
 }
 
 // ─────────────────────────────────────────
@@ -237,6 +272,7 @@ async function scheduler() {
   });
 
   martingale.init();
+  loadPending();
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
