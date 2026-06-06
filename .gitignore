@@ -1,5 +1,11 @@
 node_modules/
 __pycache__/
 *.pyc
-logs/*
+logs/*.jsonl
+logs/*.jsonl.*
+logs/martingale-state.json
+logs/daily-loss.json
+logs/heartbeat.json
+logs/bot.log
+logs/bot.log.*
 .env
