@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * Generate Polymarket CLOB API credentials (key + secret + passphrase).
- * Requires POLY_PRIVATE_KEY or POLY_PRIVATE_KEY_ENCRYPTED + POLY_KEY_PASSWORD in .env
+ * Optional: bot can auto createOrDeriveApiKey() at startup if these are omitted.
+ * Requires POLY_PRIVATE_KEY or POLY_PRIVATE_KEY_ENCRYPTED + POLY_KEY_PASSWORD
  *
  * Usage: node scripts/create-api-key.js
  */

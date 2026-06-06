@@ -1,5 +1,6 @@
 import config from '../config.js';
 import logger from '../utils/logger.js';
+import { formatBeijingTime } from '../utils/datetime.js';
 import { withRetry } from '../utils/retry.js';
 
 const GAMMA_API = config.poly.gammaApi;
@@ -16,10 +17,11 @@ let cache = { cycleTs: 0, market: null };
  * starting exactly at cycleStartTs (resolves cycleStartTs + 5m).
  *
  * @param {number} cycleStartTs – UTC ms of the 5m boundary that just opened
+ * @param {number} [deadlineMs] – abort retries after this timestamp
  */
-export async function findCurrentCycleMarket(cycleStartTs) {
+export async function findCurrentCycleMarket(cycleStartTs, deadlineMs) {
   if (cache.cycleTs === cycleStartTs && cache.market) {
-    logger.debug('[market] using cached market', { slug: cache.market.slug });
+    logger.debug('[market] 使用缓存市场', { slug: cache.market.slug });
     return cache.market;
   }
 
@@ -28,9 +30,9 @@ export async function findCurrentCycleMarket(cycleStartTs) {
   const windowStartSec = Math.floor(windowStartMs / 1000);
   const slug = `btc-updown-5m-${windowStartSec}`;
 
-  logger.info('[market] fetching event by slug', {
+  logger.info('[market] 按 slug 拉取事件', {
     slug,
-    windowStart: new Date(windowStartMs).toISOString(),
+    windowStart: formatBeijingTime(windowStartMs),
   });
 
   let parsed;
@@ -43,10 +45,11 @@ export async function findCurrentCycleMarket(cycleStartTs) {
         label: 'gamma-event',
         maxAttempts: config.gammaFetchAttempts,
         baseDelayMs: config.gammaFetchRetryDelayMs,
+        deadlineMs,
       }
     );
   } catch (err) {
-    logger.error('[market] failed to fetch event', { slug, error: err?.message });
+    logger.error('[market] 拉取事件失败', { slug, error: err?.message });
     return null;
   }
 
@@ -64,7 +67,7 @@ export async function findCurrentCycleMarket(cycleStartTs) {
     noPrice: upPrice != null ? +(1 - upPrice).toFixed(4) : null,
   };
 
-  logger.info('[market] matched market', {
+  logger.info('[market] 匹配到市场', {
     slug: result.slug,
     conditionId: result.conditionId,
     upPrice: result.yesPrice,
@@ -100,7 +103,7 @@ async function fetchEventBySlug(slug) {
   const data = await res.json();
   const list = Array.isArray(data) ? data : [data];
   const event = list[0] ?? null;
-  logger.debug('[market] gamma fetch', { slug, ms: Date.now() - t0, found: Boolean(event) });
+  logger.debug('[market] Gamma 请求', { slug, ms: Date.now() - t0, found: Boolean(event) });
   return event;
 }
 
@@ -173,5 +176,5 @@ function parseUpDownTokens(market) {
   return { upTokenId, downTokenId, upPrice };
 }
 
-// Settlement is now done by candle direction in src/index.js (settleByCandle),
-// so the Polymarket resolution poller is no longer needed.
+// Settlement uses Chainlink RTDS in src/trader/chainlinkSettle.js;
+// exchange OHLCV is kept for signal generation and cross-check only.

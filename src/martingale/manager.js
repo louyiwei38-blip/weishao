@@ -22,9 +22,9 @@ function loadState() {
   if (existsSync(STATE_FILE)) {
     try {
       state = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
-      logger.info('[martingale] state restored', { state });
+      logger.info('[martingale] 状态已恢复', { state });
     } catch {
-      logger.warn('[martingale] failed to parse state file, starting fresh');
+      logger.warn('[martingale] 状态文件解析失败，从头开始');
       state = {};
     }
   }
@@ -67,7 +67,7 @@ export function prepareOrder(availableBalance) {
   const s = state[MARTINGALE_KEY];
 
   if (s.isHalted) {
-    logger.warn('[martingale] halted — skipping this signal and resetting', {
+    logger.warn('[martingale] 已触发止损 — 跳过本信号并重置', {
       key: MARTINGALE_KEY,
     });
     s.isHalted = false;
@@ -98,7 +98,7 @@ export function onSettled(won) {
   const s = state[MARTINGALE_KEY];
 
   if (won) {
-    logger.info('[martingale] WIN — resetting bet', {
+    logger.info('[martingale] 赢 — 重置下注', {
       key: MARTINGALE_KEY,
       prev: { consecutiveLosses: s.consecutiveLosses, currentBet: s.currentBet },
     });
@@ -109,7 +109,7 @@ export function onSettled(won) {
     s.consecutiveLosses += 1;
 
     if (s.consecutiveLosses >= config.martingaleMaxLosses) {
-      logger.warn('[martingale] stop-loss triggered', {
+      logger.warn('[martingale] 连亏止损触发', {
         key: MARTINGALE_KEY,
         consecutiveLosses: s.consecutiveLosses,
       });
@@ -118,7 +118,7 @@ export function onSettled(won) {
       s.currentBet = config.tradeBudgetUsd;
     } else {
       s.currentBet = s.currentBet * config.martingaleMultiplier;
-      logger.info('[martingale] LOSS — doubling bet', {
+      logger.info('[martingale] 输 — 加倍下注', {
         key: MARTINGALE_KEY,
         consecutiveLosses: s.consecutiveLosses,
         nextBet: s.currentBet,

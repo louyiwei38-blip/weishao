@@ -1,5 +1,9 @@
 # 服务器部署指南
 
+> 架构与运行逻辑见 [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)
+
+---
+
 ## 一、服务器要求
 
 | 项目 | 要求 |
@@ -7,60 +11,35 @@
 | 系统 | Linux（Ubuntu 22.04+ 推荐）或 Windows Server |
 | Node.js | **18+**（推荐 20 LTS） |
 | 内存 | ≥ 512MB |
-| 网络 | 能访问 `gamma-api.polymarket.com`、`clob.polymarket.com`、**OKX**（国内服务器勿依赖币安） |
+| 网络 | 见下方「网络连通性」 |
 | 钱包 | Polymarket 已充值 pUSD，建议 ≥ $30 |
+
+### 网络连通性
+
+| 端点 | 用途 |
+|------|------|
+| `https://gamma-api.polymarket.com` | 5m 盘口发现 |
+| `https://clob.polymarket.com` | 下单、余额、成交查询 |
+| `wss://ws-live-data.polymarket.com` | **Chainlink RTDS 结算**（必需） |
+| OKX REST API | CCXT K 线（国内推荐，勿依赖币安） |
 
 ---
 
-## 二、上传项目到服务器
+## 二、上传项目
 
-**不要上传** `node_modules/`、`.env`（在服务器单独创建）。
-
-### 方式 A：压缩包
-
-本地打包（排除依赖）后上传：
-
-```powershell
-# 本地 PowerShell（在项目目录）
-Compress-Archive -Path src,scripts,package.json,package-lock.json,ecosystem.config.cjs,DEPLOY.md,README.md,PRD.md,.env.example -DestinationPath bot.zip
-```
-
-上传到服务器后：
-
-```bash
-unzip bot.zip -d ~/polymarket-bot
-cd ~/polymarket-bot
-```
-
-### 方式 B：Git（推荐）
+**不要上传** `node_modules/`、`.env`。
 
 ```bash
 git clone <你的仓库> ~/polymarket-bot
 cd ~/polymarket-bot
-```
-
----
-
-## 三、安装 Node.js（Linux）
-
-```bash
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
-node -v   # 应 >= v18
-```
-
----
-
-## 四、安装依赖
-
-```bash
-cd ~/polymarket-bot
 npm install --production
 ```
 
+依赖含 `ws` 包（Node 18 无内置 WebSocket 时使用）。
+
 ---
 
-## 五、配置 `.env`（服务器上新建）
+## 三、配置 `.env`
 
 ```bash
 cp .env.example .env
@@ -68,47 +47,67 @@ chmod 600 .env
 nano .env
 ```
 
-### 必填项
+### 必填项（实盘 DRY_RUN=false）
 
 ```env
-POLY_ADDRESS=0x你的地址
-POLY_API_KEY=你的key
-POLY_PASSPHRASE=你的passphrase
-POLY_PRIVATE_KEY_ENCRYPTED=本地 encrypt-key 生成的密文
-
-# 解密密码（仅服务器，不要提交 git）
-POLY_KEY_PASSWORD=你加密私钥时设的密码
+POLY_PRIVATE_KEY_ENCRYPTED=...    # 或 POLY_PRIVATE_KEY
+POLY_KEY_PASSWORD=...             # 加密私钥时必填
 
 OHLCV_EXCHANGE=okx
 TRADE_BUDGET_USD=1
 MIN_BALANCE_USD=5
-DRY_RUN=true
+ORDER_TYPE=GTC
+DRY_RUN=false
 ```
 
-### 上线实盘时
+`POLY_API_KEY` / `POLY_API_SECRET` / `POLY_PASSPHRASE` **可选**——留空时启动会自动 `createOrDeriveApiKey()`；也可 `npm run create-api-key` 预写入以加快启动。
+
+> 空跑 `DRY_RUN=true` 时私钥与 API 凭证均可省略。
+
+### 推荐一并配置
+
+```env
+# Chainlink 结算
+CHAINLINK_SETTLE_BUFFER_MS=3000
+CHAINLINK_BUFFER_MINUTES=30
+
+# 限价成交监视
+FILL_SYNC_POLL_MS=500
+FILL_SYNC_MAX_WAIT_MS=8000
+LIMIT_PRICE_OFFSET_TICKS=0
+
+# Telegram（可选）
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+```
+
+### 上线实盘
 
 ```env
 DRY_RUN=false
 ```
 
-### 国内服务器注意
-
-- **必须** `OHLCV_EXCHANGE=okx`（币安 `api.binance.com` 常被墙）
-- 若 `MIN_BALANCE_USD=20` 而账户不足 $20，会一直跳过下单，小资金建议 `5`
-
 ---
 
-## 六、先空跑验证
+## 四、空跑验证
 
 ```bash
-cd ~/polymarket-bot
 export POLY_KEY_PASSWORD="你的解密密码"
 DRY_RUN=true node src/index.js
 ```
 
-看到 `━━━ cycle start` 且无 `OHLCV fetch failed` 即正常。`Ctrl+C` 停止。
+**正常日志应包含：**
 
-或一键测试：
+```
+[chainlink] RTDS connected ...
+[chainlink] RTDS buffer ready (BTC/USDT=...ticks)
+[settle] Chainlink settler started
+━━━ cycle start
+```
+
+不应持续出现 `OHLCV fetch failed` 或 `WebSocket unavailable`。
+
+单次周期测试：
 
 ```bash
 DRY_RUN=true node scripts/test-cycle.js
@@ -116,112 +115,84 @@ DRY_RUN=true node scripts/test-cycle.js
 
 ---
 
-## 七、用 PM2 常驻运行（推荐）
+## 五、PM2 常驻
 
 ```bash
 sudo npm install -g pm2
-
 cd ~/polymarket-bot
 mkdir -p logs
 
-# 空跑（确认稳定后再切实盘）
 export POLY_KEY_PASSWORD="你的解密密码"
 pm2 start ecosystem.config.cjs
-
-# 查看日志
 pm2 logs polymarket-bot
-
-# 开机自启
-pm2 save
-pm2 startup
+pm2 save && pm2 startup
 ```
 
-### 切换实盘
-
-1. 编辑 `ecosystem.config.cjs`，在 `env` 中设置 `DRY_RUN: 'false'`，或：
-2. 编辑 `.env` 中 `DRY_RUN=false`，然后：
-
-```bash
-export POLY_KEY_PASSWORD="你的解密密码"
-pm2 restart polymarket-bot --update-env
-```
-
-或使用 `env_live` 配置：
-
-```bash
-export POLY_KEY_PASSWORD="你的解密密码"
-pm2 start ecosystem.config.cjs --env live
-```
-
-### 常用命令
-
-| 命令 | 说明 |
-|------|------|
-| `pm2 status` | 进程状态 |
-| `pm2 logs polymarket-bot` | 实时日志 |
-| `pm2 restart polymarket-bot` | 重启 |
-| `pm2 stop polymarket-bot` | 停止 |
+切换实盘：`.env` 设 `DRY_RUN=false` 后 `pm2 restart polymarket-bot --update-env`。
 
 ---
 
-## 八、不用 PM2：systemd（可选）
-
-创建 `/etc/systemd/system/polymarket-bot.service`：
-
-```ini
-[Unit]
-Description=Polymarket Reversal Bot
-After=network.target
-
-[Service]
-Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/polymarket-bot
-Environment=POLY_KEY_PASSWORD=你的解密密码
-ExecStart=/usr/bin/node src/index.js
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable polymarket-bot
-sudo systemctl start polymarket-bot
-sudo journalctl -u polymarket-bot -f
-```
-
----
-
-## 九、日志与状态文件
+## 六、日志与状态文件
 
 | 路径 | 内容 |
 |------|------|
-| `logs/bot.log` | 主日志 |
+| `logs/bot.log` | Winston 主日志 |
 | `logs/signals.jsonl` | 每轮信号 |
-| `logs/trades.jsonl` | 下单记录 |
-| `logs/martingale-state.json` | 马丁状态（重启后恢复） |
+| `logs/trades.jsonl` | 下单（filled / resting / unfilled） |
+| `logs/settlements.jsonl` | Chainlink 结算 + 交叉校验 |
+| `logs/pending-bet.json` | 待结算注单（重启恢复） |
+| `logs/martingale-state.json` | 马丁状态 |
+| `logs/daily-loss.json` | 当日 UTC 累计亏损 |
+| `logs/heartbeat.json` | 最近一轮快照 |
+
+### 排查结算
+
+```bash
+# 最近结算
+tail -5 logs/settlements.jsonl | jq .
+
+# 是否有 pending 卡住
+cat logs/pending-bet.json
+
+# Chainlink 是否就绪
+grep chainlink logs/bot.log | tail -20
+```
 
 ---
 
-## 十、安全检查清单
+## 七、安全检查清单
 
-- [ ] `.env` 权限 `chmod 600`
-- [ ] `.env` 未提交到 Git
-- [ ] `POLY_KEY_PASSWORD` 仅存在于服务器环境变量或受保护的 `.env`
-- [ ] 先 `DRY_RUN=true` 跑至少 1 小时无报错
-- [ ] 确认 Polymarket 钱包有足够 pUSD
-- [ ] `OHLCV_EXCHANGE=okx`（国内服务器）
+- [ ] `.env` 权限 `chmod 600`，未提交 Git
+- [ ] `POLY_KEY_PASSWORD` 仅存在于服务器
+- [ ] `DRY_RUN=true` 空跑 ≥1 小时无报错
+- [ ] 日志有 `RTDS buffer ready`
+- [ ] pUSD 余额 ≥ `MIN_BALANCE_USD`
+- [ ] `OHLCV_EXCHANGE=okx`（国内）
+- [ ] `ORDER_TYPE=GTC` 时已理解限价可能周期内未成交（马丁不变）
 
 ---
 
-## 十一、常见问题
+## 八、常见问题
 
 | 现象 | 处理 |
 |------|------|
 | `POLY_KEY_PASSWORD is missing` | `export POLY_KEY_PASSWORD=...` 后重启 |
 | `OHLCV fetch failed` | 设 `OHLCV_EXCHANGE=okx` |
+| `WebSocket unavailable` | `npm install` 确保 `ws` 已装；Node ≥ 18 |
+| `[chainlink] RTDS disconnected` | 检查到 `ws-live-data.polymarket.com` 的网络；会自动重连 |
 | `pUSD balance below minimum` | 充值或降低 `MIN_BALANCE_USD` |
-| `no BTC 5M market found` | 等待下一 5 分钟周期，或检查网络到 Gamma API |
+| `no BTC 5M market found` | 等下一 5m 周期；检查 Gamma API |
+| 限价挂单未成交 | 正常；周期结束未成交不计马丁；可调 `LIMIT_PRICE_OFFSET_TICKS` |
+| `Chainlink vs exchange OHLCV mismatch` | 告警 only；结算以 Chainlink 为准 |
+| FOK `425 service not ready` | 新盘口流动性未就绪；Bot 会自动重试 |
+
+---
+
+## 九、systemd（可选）
+
+见原文 `/etc/systemd/system/polymarket-bot.service` 配置，`Environment=POLY_KEY_PASSWORD=...` 必填。
+
+```bash
+sudo systemctl enable polymarket-bot
+sudo journalctl -u polymarket-bot -f
+```

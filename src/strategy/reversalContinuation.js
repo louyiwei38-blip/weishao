@@ -31,9 +31,13 @@ export function classifyCandle(candle) {
  *   reason: string
  * }}
  */
+const TYPE_ZH = { BULL: '阳线', BEAR: '阴线', DOJI: '十字星' };
+
 export function evaluateReversalContinuation(kMinus2, kMinus1) {
   const prevType = classifyCandle(kMinus2);
   const currType = classifyCandle(kMinus1);
+  const prev = TYPE_ZH[prevType];
+  const curr = TYPE_ZH[currType];
 
   if (prevType === 'BULL' && currType === 'BEAR') {
     return {
@@ -41,7 +45,7 @@ export function evaluateReversalContinuation(kMinus2, kMinus1) {
       signalId: 'S1',
       prevType,
       currType,
-      reason: `prev=${prevType}, curr=${currType} → predict next BEAR`,
+      reason: `前根=${prev}, 当前=${curr} → 预测下一根阴线`,
     };
   }
 
@@ -51,7 +55,7 @@ export function evaluateReversalContinuation(kMinus2, kMinus1) {
       signalId: 'S2',
       prevType,
       currType,
-      reason: `prev=${prevType}, curr=${currType} → predict next BULL`,
+      reason: `前根=${prev}, 当前=${curr} → 预测下一根阳线`,
     };
   }
 
@@ -60,7 +64,7 @@ export function evaluateReversalContinuation(kMinus2, kMinus1) {
     signalId: null,
     prevType,
     currType,
-    reason: `prev=${prevType}, curr=${currType} → no reversal signal`,
+    reason: `前根=${prev}, 当前=${curr} → 无反转信号`,
   };
 }
 

@@ -15,8 +15,8 @@ function deriveKey(password, salt) {
  */
 export function encryptSecret(plaintext, password) {
   if (!plaintext) throw new Error('plaintext is empty');
-  if (!password || password.length < 8) {
-    throw new Error('password must be at least 8 characters');
+  if (!password || password.length < 2) {
+    throw new Error('password must be longer than 1 character');
   }
 
   const salt = randomBytes(SALT_LEN);

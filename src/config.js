@@ -71,9 +71,19 @@ const config = {
   orderType: optional('ORDER_TYPE', 'FOK'),
   orderFillAttempts: num('ORDER_FILL_ATTEMPTS', 8),
   orderRetryDelayMs: num('ORDER_RETRY_DELAY_MS', 10000),
+  /** Limit order: tick offset from best ask (0 = at best ask) */
+  limitPriceOffsetTicks: num('LIMIT_PRICE_OFFSET_TICKS', 0),
+  /** Short poll after order post (ms) */
+  fillSyncPollMs: num('FILL_SYNC_POLL_MS', 500),
+  /** Max wait for fill sync after limit/market post (ms) */
+  fillSyncMaxWaitMs: num('FILL_SYNC_MAX_WAIT_MS', 8000),
   gammaFetchTimeoutMs: num('GAMMA_FETCH_TIMEOUT_MS', 30_000),
   gammaFetchAttempts: num('GAMMA_FETCH_ATTEMPTS', 6),
   gammaFetchRetryDelayMs: num('GAMMA_FETCH_RETRY_DELAY_MS', 3000),
+  /** Max ms for market discovery + order placement per cycle (after signal) */
+  cycleTimeoutMs: num('CYCLE_TIMEOUT_MS', 90_000),
+  /** Rotate signals.jsonl / trades.jsonl when file exceeds this size */
+  jsonlMaxBytes: num('JSONL_MAX_BYTES', 10 * 1024 * 1024),
   dryRun: bool('DRY_RUN', false),
   logLevel: optional('LOG_LEVEL', 'INFO'),
 
@@ -91,6 +101,15 @@ const config = {
   skipIfYesPriceOutOfRange: bool('SKIP_IF_YES_PRICE_OUT_OF_RANGE', true),
   yesPriceMin: num('YES_PRICE_MIN', 0.05),
   yesPriceMax: num('YES_PRICE_MAX', 0.95),
+
+  // Chainlink RTDS settlement (Polymarket official oracle)
+  chainlink: {
+    settleBufferMs: num('CHAINLINK_SETTLE_BUFFER_MS', 3000),
+    settleMaxWaitMs: num('CHAINLINK_SETTLE_MAX_WAIT_MS', 15000),
+    openWindowMs: num('CHAINLINK_OPEN_WINDOW_MS', 5000),
+    bufferMinutes: num('CHAINLINK_BUFFER_MINUTES', 30),
+    safetyIntervalMs: num('CHAINLINK_SAFETY_INTERVAL_MS', 60_000),
+  },
 };
 
 export default config;

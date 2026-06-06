@@ -10,7 +10,7 @@ import logger from './logger.js';
 export async function notifyTelegram(text) {
   const { botToken, chatId } = config.telegram;
   if (!botToken || !chatId) {
-    logger.debug('[telegram] not configured — skipping notification');
+    logger.debug('[telegram] 未配置 — 跳过通知');
     return;
   }
 
@@ -30,9 +30,9 @@ export async function notifyTelegram(text) {
 
     if (!res.ok) {
       const body = await res.text();
-      logger.warn('[telegram] sendMessage failed', { status: res.status, body: body.slice(0, 200) });
+      logger.warn('[telegram] sendMessage 失败', { status: res.status, body: body.slice(0, 200) });
     }
   } catch (err) {
-    logger.warn('[telegram] notification error', { error: err?.message });
+    logger.warn('[telegram] 通知发送异常', { error: err?.message });
   }
 }

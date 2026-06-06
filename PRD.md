@@ -1,9 +1,11 @@
 # PRD - Polymarket 趋势反转延续交易机器人
 
-**版本号：** 2.2  
-**日期：** 2026-06-03  
-**技术栈：** Node.js + CCXT + Polymarket CLOB V2  
+**版本号：** 2.4  
+**日期：** 2026-06-06  
+**技术栈：** Node.js + CCXT + Polymarket CLOB V2 + Chainlink RTDS  
 **策略代号：** Reversal Continuation（反转延续）
+
+> **v2.4 变更：** Chainlink RTDS 结算；GTC 限价 + fillSync + restingFillWatcher。详见 [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)。
 
 ---
 
@@ -156,6 +158,16 @@ Polymarket 托管与现货周期对齐的 **5 分钟 BTC 涨跌**二元预测市
 | FR-1.5 | 将 OHLCV 标准化为结构化 JSON，供信号模块使用 |
 | FR-1.6 | 使用 `enableRateLimit: true`；网络异常时指数退避重试，最多 3 次 |
 
+### FR-1B：Chainlink RTDS 数据采集（结算用）
+
+| 编号 | 需求描述 |
+|------|----------|
+| FR-1B.1 | 启动时连接 `wss://ws-live-data.polymarket.com`，订阅 `crypto_prices_chainlink`（btc/usd） |
+| FR-1B.2 | 内存缓冲 tick，供目标价 / 收盘价查询 |
+| FR-1B.3 | `getChainlinkOpenPrice`：周期开始目标价 |
+| FR-1B.4 | `getChainlinkPriceAt`：周期结束收盘价（<= endMs 最近 tick） |
+| FR-1B.5 | CCXT OHLCV **仅用于信号**；结算不使用交易所 K 线方向 |
+
 ### FR-2：信号引擎模块（规则，替代 AI）
 
 | 编号 | 需求描述 |
@@ -205,10 +217,11 @@ Polymarket 托管与现货周期对齐的 **5 分钟 BTC 涨跌**二元预测市
 | FR-4.4 | `signal=UP` → 买入 YES；`signal=DOWN` → 买入 NO；`signal=NONE` → 不下单 |
 | FR-4.5 | 下单金额 = `martingale.getBetSize("BTC/USDT:5m")`，受 `MAX_BET_USD` 与 pUSD 余额约束 |
 | FR-4.6 | 下单前若该轨 `isHalted=true`（刚触发马丁止损），本周期跳过下单，下一周期以重置后的基础注重新开始 |
-| FR-4.7 | 默认使用 `OrderType.FOK`，可通过 `ORDER_TYPE=GTC` 切换为限价单 |
-| FR-4.8 | 市价买单传入 `userUSDCBalance`，用于计算含手续费的实际成交量 |
-| FR-4.9 | 同一 `(conditionId, cycleStartTs)` 防止重复下单 |
-| FR-4.10 | 订单日志记录：`orderId`、`signal`、`signalId`、`baseBet`、`actualBet`、`consecutiveLosses`、时间戳 |
+| FR-4.7 | 默认 `ORDER_TYPE=GTC`（限价，best ask 挂单）；`FOK` 为市价全成或撤销 |
+| FR-4.8 | 成交检测：`fillSync` 短时轮询 + GTC `restingFillWatcher` 周期内补偿轮询 |
+| FR-4.9 | 结算前 `confirmOrderFilled(getOrder)`；未成交 void，不更新马丁 |
+| FR-4.10 | 同一 `(conditionId, cycleStartTs)` 防止重复下单 |
+| FR-4.11 | 订单日志：`orderId`、`status`（filled/resting/unfilled）、`usdcSpent`、`limitPrice` |
 
 ### FR-5：Bot 调度与编排
 
@@ -505,19 +518,30 @@ State {
 | 有信号但风控跳过 | 不下单，**不计**连亏 |
 | 触发 `isHalted` 后首个有信号周期 | 跳过下单并重置为基础注 |
 
-### 11.7 结算判断逻辑
+### 11.7 结算判断逻辑（已实现：Chainlink RTDS）
 
-以币安对应 5m 窗口为准（开发前核对 Polymarket resolution 文案是否一致）：
+**官方规则**（Polymarket Up/Down oracle）：
 
-| 持仓 | 该 5m `close` vs `open` | 结果 |
-|------|--------------------------|------|
-| YES（signal=UP） | `close > open` | **赢** → 重置马丁 |
-| YES | `close < open` | **输** → 翻倍/止损 |
-| NO（signal=DOWN） | `close < open` | **赢** |
-| NO | `close > open` | **输** |
-| 任意 | `close === open` | **平** → 马丁状态**不变**（不计赢不计亏） |
+| 条件 | 结果 |
+|------|------|
+| 周期结束 Chainlink 价 `close >= target` | **UP 赢** |
+| `close < target` | **DOWN 赢** |
 
-- 通过轮询 `GET /markets/{conditionId}` 的 `resolved` 字段检测 Polymarket 结算，并与币安 OHLCV 交叉校验
+- **target**：周期开始 Chainlink 价（`CHAINLINK_OPEN_WINDOW_MS` 内首 tick，或 <= 周期开始最近 tick）
+- **close**：周期结束时刻 Chainlink 价（`CHAINLINK_SETTLE_BUFFER_MS` 后取 tick）
+- 结算触发：定时器 + 下一周期补结算 + 60s 安全网
+- 结算前验 CLOB 成交；未成交 void pending，马丁不变
+- 交易所 5m K 线方向与 Chainlink 不一致时 **WARN**（`settlements.jsonl` 记 `crossMismatch`），不影响 payout 判定
+
+~~旧方案（已废弃）~~：以交易所 K 线 open/close 判定；~~Polymarket resolution 轮询~~。
+
+| 持仓 | Chainlink 结果 | 马丁 |
+|------|----------------|------|
+| YES（UP） | winningOutcome=UP | 赢 → 重置 |
+| YES | winningOutcome=DOWN | 输 → 翻倍/止损 |
+| NO（DOWN） | winningOutcome=DOWN | 赢 |
+| NO | winningOutcome=UP | 输 |
+| 未成交 | void | **不变** |
 
 ---
 
@@ -556,7 +580,8 @@ State {
 | **Phase 2** | 数据采集 | BTC 5m OHLCV、收盘校验、单元测试 |
 | **Phase 3** | 信号引擎 | `reversalContinuation.js`、S1/S2/无信号/十字测试 |
 | **Phase 4** | 市场发现 | Gamma BTC 5M、窗口绑定、CLOB 缓存 |
-| **Phase 5** | 交易执行 | CLOB V2 鉴权、pUSD 检查、FOK 下单 |
+| **Phase 5** | 交易执行 | CLOB V2、GTC 限价、fillSync、FOK 可选 |
+| **Phase 5B** | Chainlink 结算 | RTDS 缓冲、定时结算、交叉校验、验成交 |
 | **Phase 6** | 风控与编排 | 每日亏损上限、DRY_RUN、调度器、优雅退出 |
 | **Phase 6a** | 马丁格尔引擎 | `manager.js`、状态持久化、结算轮询 |
 | **Phase 7** | 测试与加固 | 历史回测脚本、测试网空跑 |
@@ -588,11 +613,11 @@ State {
 |------|------|-------------|
 | ~~Q1~~ | 目标市场？ | **✅** Polymarket **BTC 5 分钟**涨跌市场 |
 | ~~Q2~~ | 是否保留马丁格尔？ | **✅ 保留**；单轨 `BTC/USDT:5m`；**4 连亏止损**（`MARTINGALE_MAX_LOSSES=4`） |
-| ~~Q3~~ | 限价还是市价？ | **✅** 默认 `FOK`，可 `ORDER_TYPE=GTC` |
+| ~~Q3~~ | 限价还是市价？ | **✅** 推荐 `GTC` 限价 + fillSync；`FOK` 可选 |
 | ~~Q4~~ | 是否主动平仓？ | **✅ 否**；持有至自动结算 |
 | **Q5** | K 收盘后延迟多久拉 OHLCV？ | 默认 `SIGNAL_DELAY_MS=10000` |
 | **Q6** | 5m 平盘（十字）结算？ | 默认：**马丁不变**，不计赢不计亏 |
-| **Q7** | Polymarket resolution 与币安 OHLCV 是否完全一致？ | 开发前核对 market 文案 |
+| **Q7** | Polymarket resolution 与币安 OHLCV 是否完全一致？ | **✅** 结算已改 Chainlink oracle；CCXT 仅交叉校验 |
 
 ---
 

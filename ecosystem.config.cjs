@@ -7,7 +7,7 @@
 module.exports = {
   apps: [
     {
-      name: 'polymarket-bot',
+      name: 'polymarket-bot-v2',
       script: 'src/index.js',
       cwd: __dirname,
       instances: 1,

@@ -48,7 +48,7 @@ async function main() {
   }
 
   if (!password) {
-    password = await promptHidden('Enter encryption password (min 8 chars): ');
+    password = await promptHidden('Enter encryption password (>1 char): ');
     const confirm = await promptHidden('Confirm password: ');
     if (password !== confirm) {
       console.error('\nError: passwords do not match.');

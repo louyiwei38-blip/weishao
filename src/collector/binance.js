@@ -1,6 +1,7 @@
 import ccxt from 'ccxt';
 import config from '../config.js';
 import logger from '../utils/logger.js';
+import { formatBeijingTime } from '../utils/datetime.js';
 import { withRetry } from '../utils/retry.js';
 
 /** Exchanges to try, in order (binance often blocked in CN) */
@@ -55,13 +56,13 @@ export async function fetchClosedCandles(limit = config.candleLimit) {
       }));
 
       if (exchangeId !== EXCHANGE_CHAIN[0]) {
-        logger.warn('[collector] using fallback exchange', {
+        logger.warn('[collector] 使用备用交易所', {
           exchange: exchangeId,
           primary: EXCHANGE_CHAIN[0],
         });
       }
 
-      logger.debug('[collector] fetched candles', {
+      logger.debug('[collector] K 线已拉取', {
         exchange: exchangeId,
         count: candles.length,
         last: candles.at(-1),
@@ -70,7 +71,7 @@ export async function fetchClosedCandles(limit = config.candleLimit) {
       return candles;
     } catch (err) {
       lastErr = err;
-      logger.warn(`[collector] ${exchangeId} failed`, { error: err?.message });
+      logger.warn(`[collector] ${exchangeId} 拉取失败`, { error: err?.message });
     }
   }
 
@@ -86,9 +87,9 @@ export function isCandleFresh(candle, cycleMs) {
     Math.floor((nowMs - config.signalDelayMs) / cycleMs) * cycleMs - cycleMs;
   const diff = Math.abs(candle.t - expectedOpenMs);
   if (diff > cycleMs) {
-    logger.warn('[collector] candle timestamp mismatch', {
-      candleT: new Date(candle.t).toISOString(),
-      expectedT: new Date(expectedOpenMs).toISOString(),
+    logger.warn('[collector] K 线时间戳不匹配', {
+      candleT: formatBeijingTime(candle.t),
+      expectedT: formatBeijingTime(expectedOpenMs),
       diffMs: diff,
     });
     return false;
