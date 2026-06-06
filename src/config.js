@@ -69,8 +69,11 @@ const config = {
   minBalanceUsd: num('MIN_BALANCE_USD', 20),
   maxBetUsd: num('MAX_BET_USD', 200),
   orderType: optional('ORDER_TYPE', 'FOK'),
-  orderFillAttempts: num('ORDER_FILL_ATTEMPTS', 4),
-  orderRetryDelayMs: num('ORDER_RETRY_DELAY_MS', 8000),
+  orderFillAttempts: num('ORDER_FILL_ATTEMPTS', 8),
+  orderRetryDelayMs: num('ORDER_RETRY_DELAY_MS', 10000),
+  gammaFetchTimeoutMs: num('GAMMA_FETCH_TIMEOUT_MS', 30_000),
+  gammaFetchAttempts: num('GAMMA_FETCH_ATTEMPTS', 6),
+  gammaFetchRetryDelayMs: num('GAMMA_FETCH_RETRY_DELAY_MS', 3000),
   dryRun: bool('DRY_RUN', false),
   logLevel: optional('LOG_LEVEL', 'INFO'),
 

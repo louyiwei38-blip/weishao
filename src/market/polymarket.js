@@ -33,42 +33,24 @@ export async function findCurrentCycleMarket(cycleStartTs) {
     windowStart: new Date(windowStartMs).toISOString(),
   });
 
-  let event;
+  let parsed;
   try {
-    event = await withRetry(
-      () => fetchEventBySlug(slug),
-      { label: 'gamma-event', maxAttempts: 3, baseDelayMs: 1000 }
+    // Retry when Gamma is slow, times out, or the new 5m event is not indexed yet
+    // (empty slug response is common in the first seconds after a window opens).
+    parsed = await withRetry(
+      async () => fetchAndValidateEvent(slug),
+      {
+        label: 'gamma-event',
+        maxAttempts: config.gammaFetchAttempts,
+        baseDelayMs: config.gammaFetchRetryDelayMs,
+      }
     );
   } catch (err) {
     logger.error('[market] failed to fetch event', { slug, error: err?.message });
     return null;
   }
 
-  if (!event) {
-    logger.warn('[market] no BTC 5M event for slug', { slug });
-    return null;
-  }
-
-  if (event.closed || !event.active) {
-    logger.warn('[market] event not tradeable', {
-      slug,
-      active: event.active,
-      closed: event.closed,
-    });
-    return null;
-  }
-
-  const m = event.markets?.[0];
-  if (!m) {
-    logger.warn('[market] event has no markets array', { slug });
-    return null;
-  }
-
-  const { upTokenId, downTokenId, upPrice } = parseUpDownTokens(m);
-  if (!upTokenId || !downTokenId) {
-    logger.warn('[market] could not parse Up/Down token IDs', { slug, outcomes: m.outcomes });
-    return null;
-  }
+  const { event, m, upTokenId, downTokenId, upPrice } = parsed;
 
   const result = {
     conditionId: m.conditionId,
@@ -108,15 +90,39 @@ export function isPriceAcceptable(yesPrice) {
 
 async function fetchEventBySlug(slug) {
   const url = `${GAMMA_API}/events?slug=${encodeURIComponent(slug)}`;
+  const t0 = Date.now();
   const res = await fetch(url, {
     headers: { 'Content-Type': 'application/json' },
-    signal: AbortSignal.timeout(15_000),
+    signal: AbortSignal.timeout(config.gammaFetchTimeoutMs),
   });
 
   if (!res.ok) throw new Error(`Gamma API ${res.status}: ${await res.text()}`);
   const data = await res.json();
   const list = Array.isArray(data) ? data : [data];
-  return list[0] ?? null;
+  const event = list[0] ?? null;
+  logger.debug('[market] gamma fetch', { slug, ms: Date.now() - t0, found: Boolean(event) });
+  return event;
+}
+
+/** Fetch slug and validate trade readiness; throws to trigger withRetry. */
+async function fetchAndValidateEvent(slug) {
+  const event = await fetchEventBySlug(slug);
+  if (!event) {
+    throw new Error('event not found for slug (may not be indexed yet)');
+  }
+  if (event.closed || !event.active) {
+    throw new Error(`event not tradeable: active=${event.active} closed=${event.closed}`);
+  }
+
+  const m = event.markets?.[0];
+  if (!m) throw new Error('event has no markets array');
+
+  const { upTokenId, downTokenId, upPrice } = parseUpDownTokens(m);
+  if (!upTokenId || !downTokenId) {
+    throw new Error(`could not parse Up/Down token IDs: ${m.outcomes}`);
+  }
+
+  return { event, m, upTokenId, downTokenId, upPrice };
 }
 
 function parseUpDownTokens(market) {
