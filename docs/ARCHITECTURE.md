@@ -75,7 +75,7 @@
 | 时刻 | 动作 |
 |------|------|
 | T = 边界 + `SIGNAL_DELAY_MS` | 拉 CCXT K 线；若有 pending bet 尝试补结算 |
-| 同上 | 拉 1m K 线 → 计算 rv → **波动率择向**（高波动反转 / 低波动延续） |
+| 同上 | 拉 1m K 线 → 计算 rv → **波动率择向**（高波动延续 / 低波动反转） |
 | 同上 | `buildSignal(K[-2], K[-1], volRegime)` |
 | 有信号 | Gamma 找当前 5m 盘口 → **价格封顶** → 马丁取注 → CLOB 下单 |
 | 成交 / 挂单 | 见 §4 |
@@ -187,8 +187,8 @@ rv = sampleStd( ln(close_i / close_{i-1}) )   # 窗口内逐 bar
 
 | 条件 | 模式 | S1（阳→阴） | S2（阴→阳） |
 |------|------|------------|------------|
-| `rv_5m >= 阈值` 或 `rv_15m >= 阈值` | 高波动·反转 | DOWN | UP |
-| `rv_5m < 阈值` 且 `rv_15m < 阈值` | 低波动·延续 | UP | DOWN |
+| `rv_5m >= 阈值` 或 `rv_15m >= 阈值` | 高波动·延续 | DOWN | UP |
+| `rv_5m < 阈值` 且 `rv_15m < 阈值` | 低波动·反转 | UP | DOWN |
 
 **不拦截下单**；rv 写入信号日志、heartbeat、Telegram。实现：`src/utils/volatility.js` + `src/strategy/reversalContinuation.js`。
 

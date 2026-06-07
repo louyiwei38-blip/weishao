@@ -103,7 +103,7 @@ export function classifyVolatilityRegime(signalVol) {
   if (highBy5 || highBy15) {
     return {
       regime: 'high',
-      reason: `rv_5m=${formatRvValue(rv5)} / rv_15m=${formatRvValue(rv15)} 不低于 ${threshold} → 高波动反转`,
+      reason: `rv_5m=${formatRvValue(rv5)} / rv_15m=${formatRvValue(rv15)} 不低于 ${threshold} → 高波动延续`,
     };
   }
 
@@ -113,18 +113,18 @@ export function classifyVolatilityRegime(signalVol) {
   if (lowBy5 && lowBy15) {
     return {
       regime: 'low',
-      reason: `rv_5m=${formatRvValue(rv5)} 且 rv_15m=${formatRvValue(rv15)} 低于 ${threshold} → 低波动延续`,
+      reason: `rv_5m=${formatRvValue(rv5)} 且 rv_15m=${formatRvValue(rv15)} 低于 ${threshold} → 低波动反转`,
     };
   }
 
   return {
     regime: 'high',
-    reason: `rv 样本不完整 (rv_5m=${formatRvValue(rv5)}, rv_15m=${formatRvValue(rv15)})，默认高波动反转`,
+    reason: `rv 样本不完整 (rv_5m=${formatRvValue(rv5)}, rv_15m=${formatRvValue(rv15)})，默认高波动延续`,
     partial: true,
   };
 }
 
-const REGIME_ZH = { high: '高波动·反转', low: '低波动·延续' };
+const REGIME_ZH = { high: '高波动·延续', low: '低波动·反转' };
 
 /** Structured fields for logger / heartbeat / jsonl */
 export function formatLogFields(volCtx) {

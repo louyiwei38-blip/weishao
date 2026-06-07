@@ -106,7 +106,7 @@ const config = {
   /** Finer OHLCV for realized-volatility regime (independent of signal timeframe) */
   volatilityBarTimeframe: optional('VOLATILITY_BAR_TIMEFRAME', '1m'),
   volatilityCandleLimit: num('VOLATILITY_CANDLE_LIMIT', 20),
-  /** rv_5m/15m threshold: high vol → reversal; both below → continuation */
+  /** rv_5m/15m threshold: high vol → continuation; both below → reversal */
   rvStrategyThreshold: num('RV_STRATEGY_THRESHOLD', 0.0005),
 
   // Chainlink RTDS settlement (Polymarket official oracle)

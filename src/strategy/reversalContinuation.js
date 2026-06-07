@@ -1,11 +1,11 @@
 /**
  * Volatility-regime reversal / continuation strategy
  *
- * High vol (rv_5m >= threshold OR rv_15m >= threshold) — reversal:
+ * High vol (rv_5m >= threshold OR rv_15m >= threshold) — continuation:
  *   S1: K[-2]=BULL, K[-1]=BEAR  → signal DOWN  (buy NO)
  *   S2: K[-2]=BEAR, K[-1]=BULL  → signal UP    (buy YES)
  *
- * Low vol (rv_5m < threshold AND rv_15m < threshold) — continuation:
+ * Low vol (rv_5m < threshold AND rv_15m < threshold) — reversal:
  *   S1: K[-2]=BULL, K[-1]=BEAR  → signal UP    (buy YES)
  *   S2: K[-2]=BEAR, K[-1]=BULL  → signal DOWN  (buy NO)
  *
@@ -46,7 +46,7 @@ export function evaluateReversalContinuation(kMinus2, kMinus1, volRegime = 'high
   const currType = classifyCandle(kMinus1);
   const prev = TYPE_ZH[prevType];
   const curr = TYPE_ZH[currType];
-  const mode = volRegime === 'low' ? '低波动延续' : '高波动反转';
+  const mode = volRegime === 'low' ? '低波动反转' : '高波动延续';
 
   if (prevType === 'BULL' && currType === 'BEAR') {
     const signal = volRegime === 'low' ? 'UP' : 'DOWN';

@@ -125,7 +125,7 @@ async function fetchVolatilityContext() {
   try {
     volCandles = await fetchVolatilityCandles();
   } catch (err) {
-    logger.error('[main] 波动率 K 线拉取失败 — 默认高波动反转', { error: err?.message });
+    logger.error('[main] 波动率 K 线拉取失败 — 默认高波动延续', { error: err?.message });
     return {
       rv: null,
       regime: 'high',
@@ -371,6 +371,7 @@ async function runCycle(cycleStartTs) {
       await notifyTelegram(
         `🤖 <b>开单成交</b>\n` +
         `方向: <b>${side}</b> (${signalObj.signalId})\n` +
+        `原因: ${escapeHtml(signalObj.reason)}\n` +
         capNote +
         priceOdds +
         `金额: <b>${escapeHtml(fillNote || `$${spent.toFixed(2)}`)}</b>  (连败 ${mgState.consecutiveLosses})\n` +
@@ -393,6 +394,7 @@ async function runCycle(cycleStartTs) {
         cycleStartTs,
         signal: signalObj.signal,
         signalId: signalObj.signalId,
+        signalReason: signalObj.reason,
         cycleEndMs,
         limitPrice: orderResult.limitPrice,
         ...snapshotForPending(volCtx),
@@ -412,6 +414,7 @@ async function runCycle(cycleStartTs) {
       await notifyTelegram(
         `⏳ <b>限价挂单</b>\n` +
         `方向: <b>${side}</b> (${signalObj.signalId})\n` +
+        `原因: ${escapeHtml(signalObj.reason)}\n` +
         capNote +
         priceOdds +
         `预算: $${actualBet}  (连败 ${mgState.consecutiveLosses})\n` +
@@ -736,6 +739,7 @@ async function scheduler() {
     await notifyTelegram(
       `🤖 <b>限价单成交</b>\n` +
       `方向: <b>${side}</b> (${ctx.signalId ?? '—'})\n` +
+      (ctx.signalReason ? `原因: ${escapeHtml(ctx.signalReason)}\n` : '') +
       priceOdds +
       `金额: <b>${escapeHtml(fillNote || `$${ctx.actualBet.toFixed(2)}`)}</b>\n` +
       `窗口: ${formatBeijingTime(ctx.cycleStartTs)}\n` +
