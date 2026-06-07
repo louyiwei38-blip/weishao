@@ -222,6 +222,13 @@ async function runCycle(cycleStartTs) {
     if (signalObj.signal === 'NONE') {
       cycleStatus = 'no_signal';
       logger.info('[main] 无信号 — 跳过下单');
+      await notifyTelegram(
+        `⏭ <b>无信号 — 跳过本周期</b>\n` +
+        `窗口: ${formatBeijingTime(cycleStartTs)}\n` +
+        `标的: ${config.symbol}\n` +
+        `原因: ${signalObj.reason}` +
+        stats.formatTelegramBlock()
+      );
       return;
     }
 
