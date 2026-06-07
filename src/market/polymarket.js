@@ -87,12 +87,61 @@ export async function findCurrentCycleMarket(cycleStartTs, deadlineMs) {
 }
 
 /**
- * Validate that the Up token price is within the acceptable range.
+ * Symmetric price cap: buy YES or NO at most ORDER_PRICE_CAP when market price exceeds cap.
+ * No range skip — always proceeds.
+ * @param {{ yesPrice: number|null, noPrice: number|null }} market
+ * @param {'UP' | 'DOWN'} signal
+ * @returns {{
+ *   proceed: true,
+ *   priceCapped: boolean,
+ *   yesPrice: number|null,
+ *   noPrice: number|null,
+ *   originalYesPrice?: number|null,
+ *   originalNoPrice?: number|null,
+ *   maxLimitPrice?: number
+ * }}
  */
-export function isPriceAcceptable(yesPrice) {
-  if (!config.skipIfYesPriceOutOfRange) return true;
-  if (yesPrice === null) return true;
-  return yesPrice >= config.yesPriceMin && yesPrice <= config.yesPriceMax;
+export function resolveOrderPricePolicy(market, signal) {
+  const originalYesPrice = market.yesPrice;
+  const originalNoPrice = market.noPrice ?? (
+    originalYesPrice != null ? +(1 - originalYesPrice).toFixed(4) : null
+  );
+  const cap = config.orderPriceCap;
+
+  const base = {
+    proceed: true,
+    priceCapped: false,
+    yesPrice: originalYesPrice,
+    noPrice: originalNoPrice,
+  };
+
+  if (!(cap > 0)) return base;
+
+  if (signal === 'UP' && originalYesPrice != null && originalYesPrice > cap) {
+    return {
+      ...base,
+      priceCapped: true,
+      yesPrice: cap,
+      noPrice: +(1 - cap).toFixed(4),
+      originalYesPrice,
+      originalNoPrice,
+      maxLimitPrice: cap,
+    };
+  }
+
+  if (signal === 'DOWN' && originalNoPrice != null && originalNoPrice > cap) {
+    return {
+      ...base,
+      priceCapped: true,
+      yesPrice: originalYesPrice,
+      noPrice: cap,
+      originalYesPrice,
+      originalNoPrice,
+      maxLimitPrice: cap,
+    };
+  }
+
+  return base;
 }
 
 // ─────────────────────────────────────────

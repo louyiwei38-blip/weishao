@@ -77,9 +77,10 @@ FILL_SYNC_POLL_MS=500
 FILL_SYNC_MAX_WAIT_MS=8000
 LIMIT_PRICE_OFFSET_TICKS=0
 
-# 波动率下限（可选；0=关闭；低于阈值跳过有信号轮次）
+# 波动率择向 + 价格封顶（可选）
+# RV_STRATEGY_THRESHOLD=0.0005
+# ORDER_PRICE_CAP=0.95
 # VOLATILITY_BAR_TIMEFRAME=1m
-# MIN_RV_1M=0.00015
 
 # Telegram（可选）
 TELEGRAM_BOT_TOKEN=...
@@ -191,7 +192,8 @@ grep chainlink logs/bot.log | tail -20
 | `[chainlink] RTDS disconnected` | 检查到 `ws-live-data.polymarket.com` 的网络；会自动重连 |
 | `pUSD balance below minimum` | 充值或降低 `MIN_BALANCE_USD` |
 | `no BTC 5M market found` / `market_not_found` | 检查 `TRADING_SYMBOL` 与 Polymarket 是否有对应 5m 盘口；等下一周期 |
-| `volatility_limit` / 波动率过低 | `MIN_RV_*` 阈值过高或市场横盘；调低下限或设为 0 关闭 |
+| 信号方向与预期不符 | 检查 `RV_STRATEGY_THRESHOLD`；高波动反转 / 低波动延续见 README 策略表 |
+| 盘口超阈值未成交 | 按 `ORDER_PRICE_CAP` 限价挂单，等价格回落；周期内未成交马丁不变 |
 | 限价挂单未成交 | 正常；周期结束未成交不计马丁；可调 `LIMIT_PRICE_OFFSET_TICKS` |
 | `Chainlink vs exchange OHLCV mismatch` | 告警 only；结算以 Chainlink 为准 |
 | FOK `425 service not ready` | 新盘口流动性未就绪；Bot 会自动重试 |

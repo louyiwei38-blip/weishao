@@ -5,9 +5,10 @@
  */
 
 import 'dotenv/config';
-import { fetchClosedCandles } from '../src/collector/binance.js';
+import { fetchClosedCandles, fetchVolatilityCandles } from '../src/collector/binance.js';
 import { buildSignal } from '../src/strategy/reversalContinuation.js';
-import { findCurrentCycleMarket, isPriceAcceptable } from '../src/market/polymarket.js';
+import { computeSignalVolatility, classifyVolatilityRegime } from '../src/utils/volatility.js';
+import { findCurrentCycleMarket, resolveOrderPricePolicy } from '../src/market/polymarket.js';
 import { placeOrder } from '../src/trader/executor.js';
 import * as martingale from '../src/martingale/manager.js';
 import config from '../src/config.js';
@@ -24,7 +25,12 @@ async function main() {
   const kMinus2 = candles.at(-2);
   const kMinus1 = candles.at(-1);
 
-  const signalObj = buildSignal(kMinus2, kMinus1, config.symbol, config.timeframe);
+  const volCandles = await fetchVolatilityCandles();
+  const rv = computeSignalVolatility(volCandles);
+  const { regime, reason } = classifyVolatilityRegime(rv);
+  console.log('\n[0] Volatility:', { regime, reason, rv_5m: rv.rv_5m, rv_15m: rv.rv_15m });
+
+  const signalObj = buildSignal(kMinus2, kMinus1, config.symbol, config.timeframe, regime);
   console.log('\n[1] Signal:', signalObj.signal, signalObj.signalId, '-', signalObj.reason);
 
   if (signalObj.signal === 'NONE') {
@@ -39,11 +45,13 @@ async function main() {
   console.log('    conditionId:', market.conditionId);
   console.log('    upPrice:', market.yesPrice);
 
-  if (!isPriceAcceptable(market.yesPrice)) {
-    console.log('[3] Price check FAILED');
-    process.exit(1);
-  }
-  console.log('[3] Price check OK');
+  const pricePolicy = resolveOrderPricePolicy(market, signalObj.signal);
+  console.log(
+    '[3] Price policy:',
+    pricePolicy.priceCapped
+      ? `capped @ ${pricePolicy.maxLimitPrice} (${signalObj.signal === 'UP' ? 'YES' : 'NO'})`
+      : 'no cap'
+  );
 
   martingale.init();
   const { actualBet, skipReason } = martingale.prepareOrder(9999);
@@ -64,7 +72,11 @@ async function main() {
     actualBet,
     baseBet: config.tradeBudgetUsd,
     consecutiveLosses: martingale.getState().consecutiveLosses,
-    yesPrice: market.yesPrice,
+    yesPrice: pricePolicy.yesPrice ?? market.yesPrice,
+    noPrice: pricePolicy.noPrice ?? market.noPrice,
+    maxLimitPrice: pricePolicy.maxLimitPrice,
+    priceCapped: pricePolicy.priceCapped,
+    originalYesPrice: pricePolicy.originalYesPrice,
   });
 
   console.log('\n[5] Order:', order);

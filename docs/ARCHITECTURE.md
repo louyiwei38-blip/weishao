@@ -9,8 +9,8 @@
 
 | 模块 | 数据源 | 用途 |
 |------|--------|------|
-| **信号** | CCXT 交易所 5m OHLCV（OKX → Bybit → Binance） | S1/S2 反转延续规则 |
-| **下单** | Polymarket CLOB V2 | GTC 限价 / FOK 市价 |
+| **信号** | CCXT 交易所 5m OHLCV + 1m rv | K 线形态 + 波动率择向 → S1/S2 |
+| **下单** | Polymarket CLOB V2 | GTC 限价 / FOK 市价；超阈值按 `ORDER_PRICE_CAP` 限价 |
 | **结算** | Polymarket RTDS Chainlink | 官方 oracle：`close >= target → UP` |
 | **交叉校验** | 交易所 K 线 vs Chainlink | 仅 WARN / Telegram，不影响结算 |
 
@@ -30,14 +30,19 @@
         UTC 5m 边界 + SIGNAL_DELAY_MS
                               ▼
 ┌──────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│ CCXT fetchOHLCV  │───▶│ S1/S2 信号       │───▶│ 波动率下限检查    │
-│ (已收盘 K 线)     │    │ reversalCont.    │    │ MIN_RV_* (1m rv)  │
+│ CCXT fetchOHLCV  │    │ 1m rv 波动率择向  │    │ S1/S2 信号       │
+│ (已收盘 K 线)     │───▶│ classifyRegime   │───▶│ reversalCont.    │
 └──────────────────┘    └──────────────────┘    └────────┬────────┘
-                                                         │ rv 足够
+                                                         │ 有信号
                                                          ▼
                                                 ┌─────────────────┐
                                                 │ Gamma 市场发现   │
                                                 │ {base}-updown-* │
+                                                └────────┬────────┘
+                                                         ▼
+                                                ┌─────────────────┐
+                                                │ 价格封顶检查     │
+                                                │ ORDER_PRICE_CAP │
                                                 └────────┬────────┘
                                                          ▼
                                                 ┌──────────────────┐
@@ -70,9 +75,9 @@
 | 时刻 | 动作 |
 |------|------|
 | T = 边界 + `SIGNAL_DELAY_MS` | 拉 CCXT K 线；若有 pending bet 尝试补结算 |
-| 同上 | `buildSignal(K[-2], K[-1])` |
-| 有信号 | 拉 1m K 线 → 计算 rv_1m/5m/15m → **低于 MIN_RV_* 则跳过** |
-| rv 通过 | Gamma 找当前 5m 盘口 → 马丁取注 → CLOB 下单 |
+| 同上 | 拉 1m K 线 → 计算 rv → **波动率择向**（高波动反转 / 低波动延续） |
+| 同上 | `buildSignal(K[-2], K[-1], volRegime)` |
+| 有信号 | Gamma 找当前 5m 盘口 → **价格封顶** → 马丁取注 → CLOB 下单 |
 | 成交 / 挂单 | 见 §4 |
 | T = 周期结束 + buffer | Chainlink 定时结算 |
 | 下一周期开始 | 结算安全网 + OHLCV 交叉校验 |
@@ -89,6 +94,8 @@
 | `FOK` | 市价 | `createAndPostMarketOrder` | 全成或撤销，失败重试 |
 
 限价定价：`getOrderBook` → 最优卖价 + `LIMIT_PRICE_OFFSET_TICKS × tickSize`。
+
+**超阈值封顶**：买 YES 或 NO 时，若对应盘口价 > `ORDER_PRICE_CAP`，强制按阈值挂限价单（`ORDER_TYPE=FOK` 时亦改用限价）。
 
 ### 4.2 成交检测（三层）
 
@@ -116,7 +123,6 @@
 |------|-------------|------|----------|
 | `usdcSpent > 0` | 立即写入 | 等结算 | 开单成交 + 波动率 + 统计 |
 | `resting`（GTC 挂单） | 等补偿轮询 | 等成交后 | 限价挂单 + 波动率 + 统计 |
-| rv 过低 / 跳过 | 无 | **不变** | 波动率过低 + 统计 |
 | `skipped` | 无 | **不变** | 无 |
 | 周期内未成交 | 无 | **不变** | 无 |
 
@@ -163,9 +169,9 @@ won = (bet signal == winningOutcome)
 
 ---
 
-## 5.5 波动率风控
+## 5.5 波动率择向
 
-参照 Polymarket-Martin-Bot，对**独立 1m K 线**（`VOLATILITY_BAR_TIMEFRAME`）计算 log return 样本标准差 rv：
+对**独立 1m K 线**（`VOLATILITY_BAR_TIMEFRAME`）计算 log return 样本标准差 rv：
 
 ```
 rv = sampleStd( ln(close_i / close_{i-1}) )   # 窗口内逐 bar
@@ -177,19 +183,31 @@ rv = sampleStd( ln(close_i / close_{i-1}) )   # 窗口内逐 bar
 | rv_5m | 5 | ~5 分钟 |
 | rv_15m | 15 | ~15 分钟 |
 
-**拦截规则**（`MIN_RV_* > 0` 时启用；旧 env 名 `MAX_RV_*` 仍兼容，语义为下限）：
+**择向规则**（`RV_STRATEGY_THRESHOLD`，默认 `0.0005`）：
 
-```
-min > 0 且 (rv == null 或 rv < min) → 跳过本周期，Telegram 通知
-```
+| 条件 | 模式 | S1（阳→阴） | S2（阴→阳） |
+|------|------|------------|------------|
+| `rv_5m >= 阈值` 或 `rv_15m >= 阈值` | 高波动·反转 | DOWN | UP |
+| `rv_5m < 阈值` 且 `rv_15m < 阈值` | 低波动·延续 | UP | DOWN |
 
-策略假设：**波动率越大越好**，横盘/低波动时不交易。未配置下限（全为 0）时仍拉 rv 并展示在 Telegram，但不拦截。
-
-实现：`src/utils/volatility.js`；有信号后、市场发现前执行。
+**不拦截下单**；rv 写入信号日志、heartbeat、Telegram。实现：`src/utils/volatility.js` + `src/strategy/reversalContinuation.js`。
 
 ---
 
-## 5.6 盈亏统计
+## 5.6 价格封顶
+
+`ORDER_PRICE_CAP`（默认 `0.95`；`0` = 不限制；旧名 `YES_PRICE_MAX` 仍兼容）：
+
+| 方向 | 判断 | 盘口价 ≤ 阈值 | 盘口价 > 阈值 |
+|------|------|---------------|---------------|
+| 买涨 UP | YES 价 | 正常下单 | 按阈值挂限价 |
+| 买跌 DOWN | NO 价 | 正常下单 | 按阈值挂限价 |
+
+**不因价格跳过本周期**。实现：`src/market/polymarket.js` → `resolveOrderPricePolicy()`。
+
+---
+
+## 5.7 盈亏统计
 
 | 指标 | 说明 |
 |------|------|
@@ -199,7 +217,7 @@ min > 0 且 (rv == null 或 rv < min) → 跳过本周期，Telegram 通知
 
 - 持久化：`logs/stats-state.json`
 - **启动回填**：从 `logs/settlements.jsonl`（含 `.1`~`.5` 轮转）按 `cycleStartTs` 去重重建，避免重启归零
-- 展示：结算 / 开单 / 波动率跳过 Telegram 底部统计块；`settlements.jsonl` / `heartbeat.json` / 主日志含 `stats` 字段
+- 展示：结算 / 开单 / 无信号 Telegram 均附带波动率与统计块；`settlements.jsonl` / `heartbeat.json` / 主日志含 `stats` 与 rv 字段
 
 实现：`src/stats/manager.js`
 
@@ -209,14 +227,14 @@ min > 0 且 (rv == null 或 rv < min) → 跳过本周期，Telegram 通知
 
 | 文件 | 内容 |
 |------|------|
-| `logs/signals.jsonl` | 每轮信号（含 NONE） |
-| `logs/trades.jsonl` | 下单记录（filled / resting / unfilled） |
-| `logs/settlements.jsonl` | Chainlink 结算（含 pnlUsd、martingaleHalted、stats） |
+| `logs/signals.jsonl` | 每轮信号（含 NONE、rv、volRegime） |
+| `logs/trades.jsonl` | 下单记录（filled / resting / unfilled；含 volatility、priceCapped） |
+| `logs/settlements.jsonl` | Chainlink 结算（含 pnlUsd、martingaleHalted、stats、rv） |
 | `logs/stats-state.json` | 盈亏 / 胜率 / 止损快照（启动时由 settlements 回填） |
-| `logs/pending-bet.json` | 待结算注单（含 targetPrice、orderId、entryPrice） |
+| `logs/pending-bet.json` | 待结算注单（含 targetPrice、orderId、entryPrice、volatility） |
 | `logs/martingale-state.json` | 马丁状态 |
 | `logs/daily-loss.json` | 当日 UTC 累计亏损 |
-| `logs/heartbeat.json` | 最近一轮状态快照 |
+| `logs/heartbeat.json` | 最近一轮状态快照（含 rv） |
 
 **pending-bet.json 结构：**
 
@@ -228,7 +246,10 @@ min > 0 且 (rv == null 或 rv < min) → 跳过本周期，Telegram 通知
   "targetPrice": 67523.45,
   "orderId": "0x...",
   "limitPrice": 0.52,
-  "entryPrice": 0.47
+  "entryPrice": 0.47,
+  "volatility": { "barTimeframe": "1m", "rv_5m": 0.0006, "rv_15m": 0.0004 },
+  "volRegime": "high",
+  "volRegimeReason": "..."
 }
 ```
 
@@ -249,11 +270,11 @@ min > 0 且 (rv == null 或 rv < min) → 跳过本周期，Telegram 通知
 | `src/index.js` | UTC 调度、pending bet、结算/TG 编排 |
 | `src/collector/binance.js` | CCXT OHLCV（信号 5m + 波动率 1m） |
 | `src/collector/chainlink.js` | RTDS WebSocket；支持 BTC/ETH/SOL/BNB |
-| `src/strategy/reversalContinuation.js` | S1/S2 纯函数 |
-| `src/market/polymarket.js` | Gamma 5m 盘口；`buildMarketSlug()` |
+| `src/strategy/reversalContinuation.js` | S1/S2 + 波动率择向 |
+| `src/market/polymarket.js` | Gamma 5m 盘口；`resolveOrderPricePolicy()` |
 | `src/stats/manager.js` | 盈亏统计、settlements 回填、Telegram 块 |
-| `src/utils/volatility.js` | rv 计算、MIN_RV 下限风控 |
-| `src/trader/executor.js` | CLOB 下单、GTC/FOK 分支 |
+| `src/utils/volatility.js` | rv 计算、择向、日志/Telegram 格式化 |
+| `src/trader/executor.js` | CLOB 下单、GTC/FOK 分支、价格封顶限价 |
 | `src/trader/fillSync.js` | 成交解析与短时轮询 |
 | `src/trader/restingFillWatcher.js` | GTC 周期内补偿轮询 |
 | `src/trader/chainlinkSettle.js` | 结算调度、交叉校验 helper |
@@ -280,7 +301,8 @@ min > 0 且 (rv == null 或 rv < min) → 跳过本周期，Telegram 通知
 | v2.2 初版 | CCXT 信号 + 交易所 K 线结算 |
 | v2.3 | Chainlink RTDS 结算；CCXT 仅信号/校验 |
 | v2.4 | GTC 限价 + fillSync + restingFillWatcher；结算前验成交 |
-| v2.5 | 可配置 `TRADING_SYMBOL`；盈亏统计 + settlements 回填；波动率下限风控 + Telegram |
+| v2.5 | 可配置 `TRADING_SYMBOL`；盈亏统计 + settlements 回填 |
+| v2.6 | 波动率择向策略；买 YES/NO 对称价格封顶 `ORDER_PRICE_CAP`；移除 rv/价格区间跳过 |
 
 **实盘最小 `.env`：**
 
@@ -301,12 +323,13 @@ ORDER_TYPE=GTC
 ```env
 ORDER_TYPE=GTC
 OHLCV_EXCHANGE=okx
-TRADING_SYMBOL=BTC/USDT
+TRADING_SYMBOL=ETH/USDT
 FILL_SYNC_POLL_MS=500
 FILL_SYNC_MAX_WAIT_MS=8000
 CHAINLINK_SETTLE_BUFFER_MS=3000
-# 波动率下限（0=关闭）；ETH 等需确保 Polymarket 有对应 5m 盘口
-# MIN_RV_1M=0.00015
+ORDER_PRICE_CAP=0.95
+RV_STRATEGY_THRESHOLD=0.0005
+VOLATILITY_BAR_TIMEFRAME=1m
 DRY_RUN=false
 ```
 

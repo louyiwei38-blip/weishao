@@ -229,21 +229,21 @@ Polymarket 托管与现货周期对齐的 **5 分钟 BTC 涨跌**二元预测市
 |------|----------|
 | FR-5.1 | **主触发器**：UTC 每 5 分钟整点（`:00`/`:05`/…`/`:55`），与 5m K 收盘对齐 |
 | FR-5.2 | 边界后延迟 `SIGNAL_DELAY_MS`（默认 10s）再拉 OHLCV，确保交易所已写入收盘数据 |
-| FR-5.3 | 每轮流程：拉取 OHLCV → 信号评估 →（有信号）**波动率下限检查** → 市场发现 → 马丁取注 → 下单 |
+| FR-5.3 | 每轮流程：拉取 OHLCV → 波动率择向 → 信号评估 →（有信号）市场发现 → 价格封顶 → 马丁取注 → 下单 |
 | FR-5.4 | **不主动平仓**：仓位持有至 Polymarket 市场自动结算 |
 | FR-5.5 | 支持 `DRY_RUN=true`：全链路运行但不提交真实订单 |
 | FR-5.6 | SIGINT/SIGTERM 优雅退出，刷新待写日志 |
 | FR-5.7 | 结构化控制台日志：DEBUG、INFO、WARN、ERROR |
 | FR-5.8 | 市场结算后 Chainlink 结算，调用 `martingale.onSettled` + `stats.recordSettlement` |
 
-### FR-6：波动率风控（v2.5）
+### FR-6：波动率择向（v2.6）
 
 | 编号 | 需求描述 |
 |------|----------|
 | FR-6.1 | 独立拉取 `VOLATILITY_BAR_TIMEFRAME`（默认 1m）K 线，计算 rv_1m / rv_5m / rv_15m（log return 样本标准差） |
-| FR-6.2 | `MIN_RV_* > 0` 时：rv 为 null 或 **rv < 下限** → 跳过本周期（策略需要波动足够大） |
-| FR-6.3 | 0 = 该窗口不限制；旧 env 名 `MAX_RV_*` 作为下限别名兼容 |
-| FR-6.4 | Telegram：开单 / 跳过均展示 rv；波动率过低时推送跳过通知 |
+| FR-6.2 | `RV_STRATEGY_THRESHOLD`：`rv_5m >= 阈值` 或 `rv_15m >= 阈值` → 高波动反转；两者均 `< 阈值` → 低波动延续 |
+| FR-6.3 | **不拦截下单**；rv 与择向写入信号日志、heartbeat、Telegram |
+| FR-6.4 | 买涨/买跌时 S1/S2 方向随波动率模式翻转（见 README 策略表） |
 
 ### FR-7：盈亏统计（v2.5）
 
@@ -251,7 +251,7 @@ Polymarket 托管与现货周期对齐的 **5 分钟 BTC 涨跌**二元预测市
 |------|----------|
 | FR-7.1 | 累计 / 今日盈亏、胜率、盈亏场次、止损次数（今日按**北京时间**切日） |
 | FR-7.2 | 启动时从 `settlements.jsonl`（含轮转归档）回填，按 `cycleStartTs` 去重 |
-| FR-7.3 | 结算 / 开单 / 波动率跳过 Telegram 与主日志、`heartbeat.json` 展示统计块 |
+| FR-7.3 | 结算 / 开单 / 无信号 Telegram 与主日志、`heartbeat.json` 展示波动率 + 统计块 |
 
 ---
 
@@ -381,14 +381,10 @@ MARTINGALE_MULTIPLIER=2
 MARTINGALE_MAX_LOSSES=4
 
 # 风控（可选）
-SKIP_IF_YES_PRICE_OUT_OF_RANGE=true
-YES_PRICE_MIN=0.05
-YES_PRICE_MAX=0.95
+ORDER_PRICE_CAP=0.95                  # 买 YES/NO 对称封顶；0=不限制（旧名 YES_PRICE_MAX 兼容）
+RV_STRATEGY_THRESHOLD=0.0005          # rv_5m/15m 策略分界
 VOLATILITY_BAR_TIMEFRAME=1m
 VOLATILITY_CANDLE_LIMIT=20
-MIN_RV_1M=0                           # rv 下限；低于则跳过（0=不限制）
-MIN_RV_5M=0
-MIN_RV_15M=0
 ```
 
 ---
@@ -578,7 +574,7 @@ State {
 | **最低余额保护** | pUSD < `MIN_BALANCE_USD` 时跳过 |
 | **单笔下注上限** | `actualBet = min(currentBet, MAX_BET_USD, balance)` |
 | **防重复下单** | 追踪 `(conditionId, cycleStartTs)` |
-| **价格合理性** | YES 价不在 [0.05, 0.95] 时可跳过（可配置） |
+| **价格封顶** | 买 YES/NO 时盘口价 > `ORDER_PRICE_CAP` 则按阈值限价挂单，不跳过 |
 | **数据新鲜度** | K[-1] 的 `timestamp` 必须等于本周期开盘时间，否则 WARN 并跳过 |
 
 ---
@@ -652,20 +648,21 @@ State {
 5. 连亏后下一笔金额为翻倍后的 `currentBet`，且 ≤ `MAX_BET_USD`。  
 6. 预测正确后下一笔恢复 `TRADE_BUDGET_USD`。  
 7. 连亏 4 次触发止损，下一有信号周期从基础注重新开始。  
-8. `signal=NONE` 或波动率低于 `MIN_RV_*` 周期不改变马丁状态。  
+8. `signal=NONE` 周期不改变马丁状态；价格封顶限价未成交亦不变。  
 9. `DRY_RUN=true` 下全链路可跑通并落盘 `signals.jsonl`。  
 10. 重启后统计从 `settlements.jsonl` 回填，累计盈亏与重启前一致。
 
 ---
 
-## 18. 版本变更（v2.5 实现摘要）
+## 18. 版本变更
 
-| 能力 | 说明 |
-|------|------|
-| 可配置标的 | `TRADING_SYMBOL` → CCXT / Chainlink / `{base}-updown-5m-*` slug |
-| 盈亏统计 | `src/stats/manager.js`；Telegram + 日志 + settlements 回填 |
-| 波动率下限 | `src/utils/volatility.js`；rv 过低跳过；Telegram 展示 |
+| 版本 | 能力 | 说明 |
+|------|------|------|
+| v2.5 | 可配置标的 | `TRADING_SYMBOL` → CCXT / Chainlink / slug |
+| v2.5 | 盈亏统计 | `src/stats/manager.js`；settlements 回填 |
+| v2.6 | 波动率择向 | 高波动反转 / 低波动延续；不拦截下单 |
+| v2.6 | 价格封顶 | `ORDER_PRICE_CAP`；买 YES/NO 对称；移除区间跳过 |
 
 ---
 
-*PRD v2.5 — 在 v2.2~v2.4 基础上增加：可配置标的、盈亏统计、波动率下限风控。*
+*PRD v2.6 — 波动率择向策略 + 对称价格封顶。*

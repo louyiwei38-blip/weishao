@@ -1,8 +1,8 @@
 # Polymarket Reversal Continuation Bot
 
-**PRD v2.2+** · 可配置标的 5m · Martingale 4-loss stop · CLOB V2 · Chainlink 结算 · GTC 限价 · 波动率 / 统计风控
+**PRD v2.2+** · 可配置标的 5m · Martingale 4-loss stop · CLOB V2 · Chainlink 结算 · GTC 限价 · 波动率择向 / 统计风控
 
-Polymarket 5 分钟涨跌盘口自动交易机器人：CCXT K 线产生反转信号，CLOB 限价/市价下单，Chainlink oracle 结算，马丁格尔管理仓位；支持多标的、盈亏统计与波动率下限风控。
+Polymarket 5 分钟涨跌盘口自动交易机器人：CCXT K 线 + 波动率择向产生信号，CLOB 限价/市价下单，Chainlink oracle 结算，马丁格尔管理仓位；支持多标的与盈亏统计。
 
 > 详细架构见 **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)**（信号 / 下单 / 成交监视 / 结算全链路）
 
@@ -10,7 +10,9 @@ Polymarket 5 分钟涨跌盘口自动交易机器人：CCXT K 线产生反转信
 
 ## 策略
 
-基于**两根已收盘**的 5m K 线（`K[-2]` 上上根、`K[-1]` 上一根）：
+基于**两根已收盘**的 5m K 线（`K[-2]` 上上根、`K[-1]` 上一根）+ **1m 波动率择向**（`RV_STRATEGY_THRESHOLD`，默认 `0.0005`）：
+
+### 高波动（`rv_5m >= 阈值` 或 `rv_15m >= 阈值`）→ 反转
 
 | 条件 | 信号 | 操作 |
 |------|------|------|
@@ -18,12 +20,21 @@ Polymarket 5 分钟涨跌盘口自动交易机器人：CCXT K 线产生反转信
 | 上上根阴 + 上一根阳 | **S2** UP | 买涨（YES token） |
 | 同向 / 十字线 | NONE | 跳过 |
 
+### 低波动（`rv_5m < 阈值` 且 `rv_15m < 阈值`）→ 延续（方向相反）
+
+| 条件 | 信号 | 操作 |
+|------|------|------|
+| 上上根阳 + 上一根阴 | **S1** UP | 买涨（YES token） |
+| 上上根阴 + 上一根阳 | **S2** DOWN | 买跌（NO token） |
+| 同向 / 十字线 | NONE | 跳过 |
+
 - 信号产生后，交易**当前刚开盘**的 5m 盘口（`{base}-updown-5m-{windowStartUnix}`，如 `eth-updown-5m-…`，由 `TRADING_SYMBOL` 决定）。
 - **标的**：`TRADING_SYMBOL` 同时驱动 CCXT 信号 K 线、Chainlink 订阅与 Polymarket slug（支持 BTC/ETH/SOL/BNB 等）。
 - **信号**：CCXT 拉取交易所 5m OHLCV（OKX / Binance / Bybit，自动 fallback）。
 - **结算**：Polymarket RTDS Chainlink（`close >= target → UP`），与官方 oracle 一致。
 - **下单**：默认 GTC 限价（best ask 挂单 + 成交补偿轮询）；可改 `ORDER_TYPE=FOK` 市价。
-- **波动率风控**：独立拉 1m K 线计算 rv；低于 `MIN_RV_*` 下限则跳过本周期（策略需要波动足够大）。
+- **价格封顶**：买 YES/NO 对称，`ORDER_PRICE_CAP` 为阈值；盘口价高于阈值则按阈值限价挂单，不跳过。
+- **波动率**：独立拉 1m K 线计算 rv，用于择向（不再拦截下单）。
 - **统计**：累计/今日盈亏、胜率、止损次数（今日按北京时间）；启动时从 `settlements.jsonl` 回填。
 
 ---
@@ -109,9 +120,9 @@ logs/
 | `MAX_DAILY_LOSS_USD` | 10000 | 日亏损上限 |
 | `MAX_BET_USD` | 10000 | 单笔下注上限 |
 | `MIN_BALANCE_USD` | 0 | 余额下限（0=不限制） |
-| `SKIP_IF_YES_PRICE_OUT_OF_RANGE` | true | YES 价格超出范围时跳过 |
+| `ORDER_PRICE_CAP` | 0.95 | 买 YES/NO 对称封顶：盘口价高于阈值则按阈值限价挂单；`0`=不限制（旧名 `YES_PRICE_MAX` 仍兼容） |
 | `VOLATILITY_BAR_TIMEFRAME` | 1m | 波动率专用 K 线周期 |
-| `MIN_RV_1M` / `MIN_RV_5M` / `MIN_RV_15M` | 0 | rv 下限；低于则跳过（0=不限制；旧名 `MAX_RV_*` 仍兼容） |
+| `RV_STRATEGY_THRESHOLD` | 0.0005 | rv_5m/15m 策略分界阈值 |
 | `DRY_RUN` | false | true = 模拟下单 |
 
 Polymarket / 钱包 / Telegram 变量见 `.env.example`。
@@ -121,8 +132,9 @@ Polymarket / 钱包 / Telegram 变量见 `.env.example`。
 ## 运行逻辑摘要
 
 ```
-每 5m → CCXT K 线 → S1/S2 信号 → 波动率下限检查 → CLOB 下单
-                              ├─ rv 过低 → 跳过 + Telegram
+每 5m → CCXT K 线 + 1m rv → 波动率择向 → S1/S2 信号 → 价格封顶检查 → CLOB 下单
+                              ├─ 无信号 → 跳过 + Telegram
+                              ├─ 盘口超阈值 → 按 ORDER_PRICE_CAP 限价挂单
                               ├─ 成交 → pending-bet → Chainlink 结算 → 马丁 + 统计
                               └─ GTC 挂单 → 周期内补偿轮询 → 成交后同上
 ```

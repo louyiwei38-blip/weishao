@@ -27,13 +27,6 @@ function num(name, defaultValue) {
   return v !== undefined ? Number(v) : defaultValue;
 }
 
-/** MIN_RV_* preferred; MAX_RV_* kept as legacy alias (same numeric value, inverted semantics). */
-function minRvThreshold(name, legacyName) {
-  if (process.env[name] !== undefined) return Number(process.env[name]);
-  if (process.env[legacyName] !== undefined) return Number(process.env[legacyName]);
-  return 0;
-}
-
 function bool(name, defaultValue) {
   const v = process.env[name];
   if (v === undefined) return defaultValue;
@@ -104,17 +97,17 @@ const config = {
     chatId: optional('TELEGRAM_CHAT_ID', ''),
   },
 
-  // Risk
-  skipIfYesPriceOutOfRange: bool('SKIP_IF_YES_PRICE_OUT_OF_RANGE', true),
-  yesPriceMin: num('YES_PRICE_MIN', 0.05),
-  yesPriceMax: num('YES_PRICE_MAX', 0.95),
-  /** Finer OHLCV for realized-volatility gate (independent of signal timeframe) */
+  // Risk — symmetric cap for YES/NO limit orders; 0 = no cap
+  orderPriceCap: (() => {
+    if (process.env.ORDER_PRICE_CAP !== undefined) return Number(process.env.ORDER_PRICE_CAP);
+    if (process.env.YES_PRICE_MAX !== undefined) return Number(process.env.YES_PRICE_MAX);
+    return 0.95;
+  })(),
+  /** Finer OHLCV for realized-volatility regime (independent of signal timeframe) */
   volatilityBarTimeframe: optional('VOLATILITY_BAR_TIMEFRAME', '1m'),
   volatilityCandleLimit: num('VOLATILITY_CANDLE_LIMIT', 20),
-  /** Log-return std minimum; skip when rv < threshold; 0 = disabled */
-  minRv1m: minRvThreshold('MIN_RV_1M', 'MAX_RV_1M'),
-  minRv5m: minRvThreshold('MIN_RV_5M', 'MAX_RV_5M'),
-  minRv15m: minRvThreshold('MIN_RV_15M', 'MAX_RV_15M'),
+  /** rv_5m/15m threshold: high vol → reversal; both below → continuation */
+  rvStrategyThreshold: num('RV_STRATEGY_THRESHOLD', 0.0005),
 
   // Chainlink RTDS settlement (Polymarket official oracle)
   chainlink: {

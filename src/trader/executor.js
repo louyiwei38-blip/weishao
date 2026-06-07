@@ -477,22 +477,43 @@ async function submitMarketOrder(client, params, exec) {
 
 async function submitLimitOrder(client, params, exec) {
   const {
-    tokenID, actualBet, logBase, dedupKey,
+    tokenID, actualBet, logBase, dedupKey, forceLimitPrice, maxLimitPrice,
   } = params;
 
+  const orderOpts = await resolveOrderOptions(client, tokenID);
   const quote = await resolveExpectedEntryPrice(client, tokenID);
+  const tickSize = quote.tickSize || orderOpts.tickSize || '0.01';
   if (quote.error === 'book_fetch_failed') {
     logger.warn('[executor] 订单簿拉取失败 — 跳过限价单');
     return { orderId: null, skipped: true, skipReason: 'book_fetch_failed' };
   }
-  if (quote.entryPrice == null) {
+  if (quote.entryPrice == null && forceLimitPrice == null) {
     logger.warn('[executor] 订单簿无卖单 — 跳过限价单');
     return { orderId: null, skipped: true, skipReason: 'no_asks' };
   }
 
-  const price = quote.entryPrice;
+  let price;
+  if (forceLimitPrice != null) {
+    price = roundToTick(forceLimitPrice, tickSize, false);
+    logger.info('[executor] 盘口价超阈值 — 按阈值限价挂单', {
+      forceLimitPrice: price,
+      bookBestAsk: quote.entryPrice,
+      orderPriceCap: forceLimitPrice,
+    });
+  } else {
+    price = quote.entryPrice;
+    if (maxLimitPrice != null && price > maxLimitPrice) {
+      const capped = roundToTick(maxLimitPrice, tickSize, false);
+      logger.info('[executor] 盘口价超阈值 — 限价封顶', {
+        bookBestAsk: price,
+        cappedPrice: capped,
+        orderPriceCap: maxLimitPrice,
+      });
+      price = capped;
+    }
+  }
   const minSize = quote.minOrderSize || 0;
-  let size = roundToTick(actualBet / price, quote.tickSize, false);
+  let size = roundToTick(actualBet / price, tickSize, false);
   let estCost = price * size;
 
   if (minSize > 0 && size < minSize) {
@@ -513,7 +534,6 @@ async function submitLimitOrder(client, params, exec) {
     `[executor] 提交限价 ${exec.label} @$${price.toFixed(2)} × ${size} 份（约 $${estCost.toFixed(2)}）`
   );
 
-  const orderOpts = await resolveOrderOptions(client, tokenID);
   let orderResp;
   try {
     orderResp = await withRetry(
@@ -582,8 +602,10 @@ export async function placeOrder(params) {
     yesTokenId, noTokenId,
     conditionId, cycleStartTs,
     actualBet, baseBet, consecutiveLosses,
-    yesPrice,
+    yesPrice, noPrice,
+    maxLimitPrice, priceCapped, originalYesPrice,
     deadlineMs,
+    volatility,
   } = params;
 
   const dedupKey = `${conditionId}:${cycleStartTs}`;
@@ -600,9 +622,11 @@ export async function placeOrder(params) {
     conditionId, cycleStartTs,
     signal, signalId, tokenID,
     actualBet, baseBet, consecutiveLosses,
-    yesPrice, dryRun: config.dryRun,
+    yesPrice, noPrice, dryRun: config.dryRun,
     orderKind: exec.mode,
     orderType: exec.label,
+    ...(priceCapped ? { priceCapped, originalYesPrice, maxLimitPrice } : {}),
+    ...(volatility ? { volatility } : {}),
   };
 
   if (config.dryRun) {
@@ -623,10 +647,12 @@ export async function placeOrder(params) {
   const client = await getClobClient();
   const shared = {
     tokenID, actualBet, signal, signalId, conditionId, cycleStartTs,
-    yesPrice, baseBet, consecutiveLosses, deadlineMs, logBase, dedupKey,
+    yesPrice, noPrice, baseBet, consecutiveLosses, deadlineMs, logBase, dedupKey,
+    maxLimitPrice,
+    forceLimitPrice: maxLimitPrice ?? null,
   };
 
-  if (exec.mode === 'limit') {
+  if (maxLimitPrice != null || exec.mode === 'limit') {
     return submitLimitOrder(client, shared, exec);
   }
   return submitMarketOrder(client, shared, exec);

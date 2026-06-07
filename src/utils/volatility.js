@@ -1,5 +1,4 @@
 import config from '../config.js';
-import { formatBeijingTime } from './datetime.js';
 
 function round(num, digits = 8) {
   if (!Number.isFinite(num)) return null;
@@ -81,71 +80,100 @@ export function computeSignalVolatility(candles, barTimeframe = config.volatilit
   };
 }
 
-export function isVolatilityFilterEnabled() {
-  return config.minRv1m > 0 || config.minRv5m > 0 || config.minRv15m > 0;
-}
-
-/**
- * Hard gate: min > 0 and (rv is null or rv < min) → blocked (need enough volatility).
- * @returns {{ blocked: boolean, field?: string, value?: number|null, min?: number, rv?: object }}
- */
-export function checkVolatilityLimits(signalVol) {
-  const limits = [
-    { field: 'rv_1m', value: signalVol?.rv_1m, min: config.minRv1m },
-    { field: 'rv_5m', value: signalVol?.rv_5m, min: config.minRv5m },
-    { field: 'rv_15m', value: signalVol?.rv_15m, min: config.minRv15m },
-  ];
-
-  for (const { field, value, min } of limits) {
-    if (min > 0 && (value == null || value < min)) {
-      return { blocked: true, field, value, min, rv: signalVol };
-    }
-  }
-
-  return { blocked: false, rv: signalVol };
-}
-
 function formatRvValue(value) {
   if (value == null || !Number.isFinite(Number(value))) return 'N/A';
   return Number(value).toFixed(6);
 }
 
-function formatRvLine(field, value, min) {
+/**
+ * Classify volatility regime for strategy direction.
+ * High: rv_5m >= threshold OR rv_15m >= threshold → reversal
+ * Low:  rv_5m < threshold AND rv_15m < threshold → continuation
+ * Partial sample: default to high (reversal)
+ * @returns {{ regime: 'high' | 'low', reason: string, partial?: boolean }}
+ */
+export function classifyVolatilityRegime(signalVol) {
+  const threshold = config.rvStrategyThreshold;
+  const rv5 = signalVol?.rv_5m;
+  const rv15 = signalVol?.rv_15m;
+
+  const highBy5 = rv5 != null && rv5 >= threshold;
+  const highBy15 = rv15 != null && rv15 >= threshold;
+
+  if (highBy5 || highBy15) {
+    return {
+      regime: 'high',
+      reason: `rv_5m=${formatRvValue(rv5)} / rv_15m=${formatRvValue(rv15)} ≥ ${threshold} → 高波动反转`,
+    };
+  }
+
+  const lowBy5 = rv5 != null && rv5 < threshold;
+  const lowBy15 = rv15 != null && rv15 < threshold;
+
+  if (lowBy5 && lowBy15) {
+    return {
+      regime: 'low',
+      reason: `rv_5m=${formatRvValue(rv5)} & rv_15m=${formatRvValue(rv15)} < ${threshold} → 低波动延续`,
+    };
+  }
+
+  return {
+    regime: 'high',
+    reason: `rv 样本不完整 (rv_5m=${formatRvValue(rv5)}, rv_15m=${formatRvValue(rv15)})，默认高波动反转`,
+    partial: true,
+  };
+}
+
+const REGIME_ZH = { high: '高波动·反转', low: '低波动·延续' };
+
+/** Structured fields for logger / heartbeat / jsonl */
+export function formatLogFields(volCtx) {
+  if (!volCtx) return {};
+  return {
+    volRegime: volCtx.regime ?? null,
+    volRegimeReason: volCtx.regimeReason ?? null,
+    rv_1m: volCtx.rv?.rv_1m ?? null,
+    rv_5m: volCtx.rv?.rv_5m ?? null,
+    rv_15m: volCtx.rv?.rv_15m ?? null,
+    rvThreshold: config.rvStrategyThreshold,
+    volBarTimeframe: volCtx.rv?.barTimeframe ?? config.volatilityBarTimeframe,
+  };
+}
+
+/** Compact snapshot persisted on pending bet for settlement notifications */
+export function snapshotForPending(volCtx) {
+  if (!volCtx) return {};
+  return {
+    volatility: volCtx.rv
+      ? {
+          barTimeframe: volCtx.rv.barTimeframe,
+          rv_1m: volCtx.rv.rv_1m,
+          rv_5m: volCtx.rv.rv_5m,
+          rv_15m: volCtx.rv.rv_15m,
+        }
+      : null,
+    volRegime: volCtx.regime ?? null,
+    volRegimeReason: volCtx.regimeReason ?? null,
+  };
+}
+
+function formatRvLine(field, value, threshold) {
   const v = formatRvValue(value);
-  if (min > 0) return `${field}: <b>${v}</b> (下限 ${min})`;
-  return `${field}: <b>${v}</b>`;
+  return `${field}: <b>${v}</b> (阈值 ${threshold})`;
 }
 
 /** Telegram HTML block for order / settlement context */
-export function formatTelegramBlock(rv) {
+export function formatTelegramBlock(rv, volRegime) {
   if (!rv) return '\n📉 <b>波动率</b>: 暂无数据';
 
-  return (
-    `\n📉 <b>波动率</b> (${rv.barTimeframe})\n` +
-    `${formatRvLine('rv_1m', rv.rv_1m, config.minRv1m)}\n` +
-    `${formatRvLine('rv_5m', rv.rv_5m, config.minRv5m)}\n` +
-    `${formatRvLine('rv_15m', rv.rv_15m, config.minRv15m)}`
-  );
-}
-
-/** Telegram message when volatility gate skips a cycle */
-export function formatSkipTelegramMessage({ signal, signalId, cycleStartTs, volRisk }) {
-  const side = signal === 'UP' ? '📈 买涨 UP' : '📉 买跌 DOWN';
-  let reasonLine;
-
-  if (volRisk.field === 'rv_fetch') {
-    reasonLine = `原因: K 线拉取失败 (${volRisk.error ?? 'unknown'})`;
-  } else if (volRisk.value == null) {
-    reasonLine = `触发: <b>${volRisk.field}</b> 样本不足 (下限 ${volRisk.min})`;
-  } else {
-    reasonLine = `触发: <b>${volRisk.field}</b> = ${formatRvValue(volRisk.value)} < 下限 ${volRisk.min}`;
-  }
+  const regimeLine = volRegime
+    ? `\n模式: <b>${REGIME_ZH[volRegime] ?? volRegime}</b>`
+    : '';
 
   return (
-    `⛔ <b>波动率过低 — 跳过下单</b>\n` +
-    `信号: <b>${side}</b> (${signalId})\n` +
-    `${reasonLine}\n` +
-    `窗口: ${formatBeijingTime(cycleStartTs)}` +
-    formatTelegramBlock(volRisk.rv)
+    `\n📉 <b>波动率</b> (${rv.barTimeframe})${regimeLine}\n` +
+    `${formatRvLine('rv_1m', rv.rv_1m, config.rvStrategyThreshold)}\n` +
+    `${formatRvLine('rv_5m', rv.rv_5m, config.rvStrategyThreshold)}\n` +
+    `${formatRvLine('rv_15m', rv.rv_15m, config.rvStrategyThreshold)}`
   );
 }
