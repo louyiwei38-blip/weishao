@@ -117,6 +117,20 @@ function savePending() {
 }
 
 // ─────────────────────────────────────────
+// Telegram helpers
+// ─────────────────────────────────────────
+
+/** @param {number} [balance] – if omitted, fetches live balance */
+async function formatBalanceTelegramLine(balance) {
+  try {
+    const value = balance ?? await getBalance();
+    return `余额: <b>$${value.toFixed(2)}</b>\n`;
+  } catch {
+    return '余额: <b>—</b>\n';
+  }
+}
+
+// ─────────────────────────────────────────
 // Volatility context (regime for signal direction)
 // ─────────────────────────────────────────
 
@@ -232,6 +246,7 @@ async function runCycle(cycleStartTs) {
         `窗口: ${formatBeijingTime(cycleStartTs)}\n` +
         `标的: ${config.symbol}\n` +
         `原因: ${escapeHtml(signalObj.reason)}\n` +
+        await formatBalanceTelegramLine() +
         `波动率: ${escapeHtml(volCtx.regimeReason)}` +
         formatVolatilityTelegramBlock(volCtx.rv, volCtx.regime) +
         stats.formatTelegramBlock()
@@ -376,7 +391,7 @@ async function runCycle(cycleStartTs) {
         priceOdds +
         `金额: <b>${escapeHtml(fillNote || `$${spent.toFixed(2)}`)}</b>  (连败 ${mgState.consecutiveLosses})\n` +
         `类型: ${orderResult.orderType ?? config.orderType}\n` +
-        `余额: <b>$${balance.toFixed(2)}</b>\n` +
+        await formatBalanceTelegramLine(balance) +
         `盘口: ${market.slug}\n` +
         `时间: ${formatBeijingTime(cycleStartTs)}\n` +
         `波动率: ${escapeHtml(volCtx.regimeReason)}` +
@@ -418,6 +433,7 @@ async function runCycle(cycleStartTs) {
         capNote +
         priceOdds +
         `预算: $${actualBet}  (连败 ${mgState.consecutiveLosses})\n` +
+        await formatBalanceTelegramLine(balance) +
         `盘口: ${market.slug}\n` +
         `周期内自动监视成交\n` +
         `波动率: ${escapeHtml(volCtx.regimeReason)}` +
@@ -629,13 +645,7 @@ async function applyChainlinkSettlement(pending, { candles } = {}) {
   });
 
   const mg = martingale.getState();
-  let balanceStr = '—';
-  try {
-    const balance = await getBalance();
-    balanceStr = `$${balance.toFixed(2)}`;
-  } catch {
-    // notification should still go out
-  }
+  const balanceLine = await formatBalanceTelegramLine();
 
   const resultEmoji = won ? '✅' : '❌';
   const resultText = won ? '赢' : '输';
@@ -657,7 +667,7 @@ async function applyChainlinkSettlement(pending, { candles } = {}) {
     mismatchNote + haltNote + '\n' +
     `下一注: <b>$${mg.currentBet}</b>  (连败 ${mg.consecutiveLosses})\n` +
     `今日亏损: $${getDailyLossUsd().toFixed(2)} / $${config.maxDailyLossUsd}\n` +
-    `余额: <b>${balanceStr}</b>\n` +
+    balanceLine +
     (pending.volRegimeReason ? `波动率: ${escapeHtml(pending.volRegimeReason)}` : '') +
     formatVolatilityTelegramBlock(pending.volatility, pending.volRegime) +
     stats.formatTelegramBlock()
@@ -743,6 +753,7 @@ async function scheduler() {
       priceOdds +
       `金额: <b>${escapeHtml(fillNote || `$${ctx.actualBet.toFixed(2)}`)}</b>\n` +
       `窗口: ${formatBeijingTime(ctx.cycleStartTs)}\n` +
+      await formatBalanceTelegramLine() +
       (ctx.volRegimeReason ? `波动率: ${escapeHtml(ctx.volRegimeReason)}` : '') +
       formatVolatilityTelegramBlock(ctx.volatility, ctx.volRegime) +
       stats.formatTelegramBlock()
