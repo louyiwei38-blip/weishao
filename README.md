@@ -103,10 +103,12 @@ logs/
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `TRADE_BUDGET_USD` | 1 | 马丁基础注 |
+| `TRADE_BUDGET_USD` | 3 | 马丁基础注 |
 | `MARTINGALE_MULTIPLIER` | 2 | 连亏翻倍 |
 | `MARTINGALE_MAX_LOSSES` | 4 | 连亏止损次数 |
-| `MAX_DAILY_LOSS_USD` | 50 | 日亏损上限 |
+| `MAX_DAILY_LOSS_USD` | 10000 | 日亏损上限 |
+| `MAX_BET_USD` | 10000 | 单笔下注上限 |
+| `MIN_BALANCE_USD` | 0 | 余额下限（0=不限制） |
 | `SKIP_IF_YES_PRICE_OUT_OF_RANGE` | true | YES 价格超出范围时跳过 |
 | `VOLATILITY_BAR_TIMEFRAME` | 1m | 波动率专用 K 线周期 |
 | `MIN_RV_1M` / `MIN_RV_5M` / `MIN_RV_15M` | 0 | rv 下限；低于则跳过（0=不限制；旧名 `MAX_RV_*` 仍兼容） |
