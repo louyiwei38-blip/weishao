@@ -93,9 +93,11 @@ export function prepareOrder(availableBalance) {
 /**
  * Call after a Polymarket market resolves.
  * @param {boolean} won
+ * @returns {{ halted: boolean }}
  */
 export function onSettled(won) {
   const s = state[MARTINGALE_KEY];
+  let halted = false;
 
   if (won) {
     logger.info('[martingale] 赢 — 重置下注', {
@@ -116,6 +118,7 @@ export function onSettled(won) {
       s.isHalted = true;
       s.consecutiveLosses = 0;
       s.currentBet = config.tradeBudgetUsd;
+      halted = true;
     } else {
       s.currentBet = s.currentBet * config.martingaleMultiplier;
       logger.info('[martingale] 输 — 加倍下注', {
@@ -127,6 +130,7 @@ export function onSettled(won) {
   }
 
   persist();
+  return { halted };
 }
 
 /**

@@ -13,7 +13,7 @@ import logger from './utils/logger.js';
 import { sleep } from './utils/retry.js';
 import { appendJsonl } from './utils/jsonl.js';
 import { writeHeartbeat } from './utils/heartbeat.js';
-import { fetchClosedCandles, isCandleFresh } from './collector/binance.js';
+import { fetchClosedCandles, fetchVolatilityCandles, isCandleFresh } from './collector/binance.js';
 import {
   startRtdsBuffer,
   stopRtdsBuffer,
@@ -47,8 +47,16 @@ import {
   stopAllRestingFillWatchers,
 } from './trader/restingFillWatcher.js';
 import * as martingale from './martingale/manager.js';
+import * as stats from './stats/manager.js';
 import { notifyTelegram } from './utils/telegram.js';
 import { formatBeijingTime } from './utils/datetime.js';
+import {
+  computeSignalVolatility,
+  checkVolatilityLimits,
+  isVolatilityFilterEnabled,
+  formatTelegramBlock as formatVolatilityTelegramBlock,
+  formatSkipTelegramMessage,
+} from './utils/volatility.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOGS_DIR    = join(__dirname, '..', 'logs');
@@ -106,6 +114,49 @@ function savePending() {
   } catch (err) {
     logger.warn('[settle] 持久化待结算注单失败', { error: err?.message });
   }
+}
+
+// ─────────────────────────────────────────
+// Volatility risk gate
+// ─────────────────────────────────────────
+
+async function evaluateVolatilityRisk() {
+  let volCandles;
+  try {
+    volCandles = await fetchVolatilityCandles();
+  } catch (err) {
+    logger.error('[main] 波动率 K 线拉取失败', { error: err?.message });
+    const blocked = isVolatilityFilterEnabled();
+    return {
+      blocked,
+      field: blocked ? 'rv_fetch' : undefined,
+      value: null,
+      min: null,
+      reason: 'fetch_failed',
+      error: err?.message,
+      rv: null,
+    };
+  }
+
+  const rv = computeSignalVolatility(volCandles);
+  const result = isVolatilityFilterEnabled()
+    ? checkVolatilityLimits(rv)
+    : { blocked: false };
+
+  logger.info('[main] 波动率', {
+    barTimeframe: rv.barTimeframe,
+    rv_1m: rv.rv_1m,
+    rv_5m: rv.rv_5m,
+    rv_15m: rv.rv_15m,
+    limits: {
+      minRv1m: config.minRv1m,
+      minRv5m: config.minRv5m,
+      minRv15m: config.minRv15m,
+    },
+    blocked: result.blocked,
+  });
+
+  return { ...result, rv };
 }
 
 // ─────────────────────────────────────────
@@ -174,6 +225,28 @@ async function runCycle(cycleStartTs) {
       return;
     }
 
+    const volRisk = await evaluateVolatilityRisk();
+    if (volRisk.blocked) {
+      cycleStatus = volRisk.field === 'rv_fetch' ? 'volatility_fetch_failed' : 'volatility_limit';
+      logger.warn('[main] 波动率过低 — 跳过本周期', {
+        field: volRisk.field,
+        value: volRisk.value ?? 'N/A',
+        min: volRisk.min,
+        rv: volRisk.rv,
+        reason: volRisk.reason,
+        error: volRisk.error,
+      });
+      await notifyTelegram(
+        formatSkipTelegramMessage({
+          signal: signalObj.signal,
+          signalId: signalObj.signalId,
+          cycleStartTs,
+          volRisk,
+        }) + stats.formatTelegramBlock()
+      );
+      return;
+    }
+
     if (isDailyLossExceeded()) {
       cycleStatus = 'daily_loss_limit';
       logger.warn('[main] 已达当日亏损上限 — 今日停止交易');
@@ -186,7 +259,9 @@ async function runCycle(cycleStartTs) {
     const market = await findCurrentCycleMarket(cycleStartTs, tradeDeadline);
     if (!market) {
       cycleStatus = 'market_not_found';
-      logger.warn('[main] 未找到 Polymarket BTC 5 分钟市场 — 跳过下单');
+      logger.warn('[main] 未找到 Polymarket 5 分钟市场 — 跳过下单', {
+        symbol: config.symbol,
+      });
       return;
     }
 
@@ -215,7 +290,10 @@ async function runCycle(cycleStartTs) {
 
     if (skipReason) {
       cycleStatus = `martingale_${skipReason}`;
-      logger.info('[main] 马丁格尔策略跳过下单', { skipReason });
+      logger.info('[main] 马丁格尔策略跳过下单', {
+        skipReason,
+        ...stats.formatLogFields(),
+      });
       return;
     }
 
@@ -250,6 +328,7 @@ async function runCycle(cycleStartTs) {
         actualBet: spent,
         orderId: orderResult.orderId,
         limitPrice: orderResult.limitPrice,
+        fill: orderResult.fill,
       });
 
       const side = signalObj.signal === 'UP' ? '📈 买涨 UP' : '📉 买跌 DOWN';
@@ -270,7 +349,9 @@ async function runCycle(cycleStartTs) {
         `类型: ${orderResult.orderType ?? config.orderType}\n` +
         `余额: <b>$${balance.toFixed(2)}</b>\n` +
         `盘口: ${market.slug}\n` +
-        `时间: ${formatBeijingTime(cycleStartTs)}`
+        `时间: ${formatBeijingTime(cycleStartTs)}` +
+        formatVolatilityTelegramBlock(volRisk.rv) +
+        stats.formatTelegramBlock()
       );
     } else if (orderResult.resting) {
       logger.info('[main] 限价单挂单中 — 监视成交', {
@@ -284,6 +365,7 @@ async function runCycle(cycleStartTs) {
         signalId: signalObj.signalId,
         cycleEndMs,
         limitPrice: orderResult.limitPrice,
+        volatility: volRisk.rv,
       });
 
       const side = signalObj.signal === 'UP' ? '📈 买涨 UP' : '📉 买跌 DOWN';
@@ -300,7 +382,9 @@ async function runCycle(cycleStartTs) {
         priceOdds +
         `预算: $${actualBet}  (连败 ${mgState.consecutiveLosses})\n` +
         `盘口: ${market.slug}\n` +
-        `周期内自动监视成交`
+        `周期内自动监视成交` +
+        formatVolatilityTelegramBlock(volRisk.rv) +
+        stats.formatTelegramBlock()
       );
     } else {
       cycleStatus = 'order_no_fill';
@@ -327,6 +411,7 @@ async function runCycle(cycleStartTs) {
         isHalted: mg.isHalted,
       },
       dailyLossUsd: getDailyLossUsd(),
+      ...stats.formatLogFields(),
       error: cycleError,
       shutdownRequested,
     });
@@ -337,7 +422,7 @@ async function runCycle(cycleStartTs) {
 // Pending bet + Chainlink settlement
 // ─────────────────────────────────────────
 
-function registerPendingBet({ cycleStartTs, signal, actualBet, orderId, limitPrice }) {
+function registerPendingBet({ cycleStartTs, signal, actualBet, orderId, limitPrice, entryPrice, fill }) {
   const openSnap = getChainlinkOpenPrice(config.symbol, cycleStartTs);
   pendingBet = {
     cycleStartTs,
@@ -346,6 +431,7 @@ function registerPendingBet({ cycleStartTs, signal, actualBet, orderId, limitPri
     targetPrice: openSnap?.price,
     orderId,
     limitPrice,
+    entryPrice: entryPrice ?? fill?.entryPrice ?? limitPrice ?? null,
   };
   savePending();
   scheduleChainlinkSettlement(pendingBet);
@@ -422,10 +508,16 @@ async function applyChainlinkSettlement(pending, { candles } = {}) {
     });
   }
 
-  const { signal, actualBet, cycleStartTs } = pending;
+  const { signal, actualBet, cycleStartTs, entryPrice, limitPrice } = pending;
   const { won, winningOutcome, targetPrice, closePrice, settleDelta } = result;
   const side = signal === 'UP' ? '📈 UP' : '📉 DOWN';
   const windowLabel = formatBeijingTime(cycleStartTs);
+  const pnlUsd = stats.computeSettlementPnl(won, actualBet, entryPrice ?? limitPrice);
+
+  const { halted } = martingale.onSettled(won);
+  if (!won) recordLoss(actualBet);
+  stats.recordSettlement({ won, pnlUsd });
+  if (halted) stats.recordStopLoss();
 
   logger.info('[settle] Chainlink 结算结果', {
     window: windowLabel,
@@ -435,11 +527,11 @@ async function applyChainlinkSettlement(pending, { candles } = {}) {
     signal,
     won,
     settleDelta,
+    pnlUsd,
+    martingaleHalted: halted,
     crossCheck: cross,
+    ...stats.formatLogFields(),
   });
-
-  martingale.onSettled(won);
-  if (!won) recordLoss(actualBet);
 
   pendingBet = null;
   savePending();
@@ -449,6 +541,8 @@ async function applyChainlinkSettlement(pending, { candles } = {}) {
     cycleStartTs,
     signal,
     actualBet,
+    entryPrice: entryPrice ?? limitPrice ?? null,
+    pnlUsd,
     won,
     winningOutcome,
     targetPrice,
@@ -457,7 +551,9 @@ async function applyChainlinkSettlement(pending, { candles } = {}) {
     settleSource: 'chainlink',
     exchangeDirection: cross?.exchangeDirection ?? null,
     crossMismatch: cross?.mismatch ?? false,
+    martingaleHalted: halted,
     dryRun: config.dryRun,
+    ...stats.formatLogFields(),
   });
 
   const mg = martingale.getState();
@@ -475,16 +571,22 @@ async function applyChainlinkSettlement(pending, { candles } = {}) {
     ? `\n⚠️ 交易所 K 线: ${cross.exchangeDirection} ≠ Chainlink ${cross.chainlinkOutcome}`
     : '';
 
+  const haltNote = halted
+    ? `\n⚠️ <b>马丁连亏止损触发</b> — 下周期重置为基础注`
+    : '';
+
   await notifyTelegram(
     `${resultEmoji} <b>结算${resultText}</b> (Chainlink)\n` +
     `窗口: ${windowLabel}\n` +
     `下注: ${side} $${actualBet}\n` +
     `目标价: $${targetPrice.toFixed(2)} → 收盘价: $${closePrice.toFixed(2)}\n` +
-    `结果: <b>${winningOutcome}</b> (Δ ${settleDelta >= 0 ? '+' : ''}${settleDelta.toFixed(2)})` +
-    mismatchNote + '\n' +
+    `结果: <b>${winningOutcome}</b> (Δ ${settleDelta >= 0 ? '+' : ''}${settleDelta.toFixed(2)})\n` +
+    `本单盈亏: <b>${stats.formatPnlUsd(pnlUsd)}</b>` +
+    mismatchNote + haltNote + '\n' +
     `下一注: <b>$${mg.currentBet}</b>  (连败 ${mg.consecutiveLosses})\n` +
     `今日亏损: $${getDailyLossUsd().toFixed(2)} / $${config.maxDailyLossUsd}\n` +
-    `余额: <b>${balanceStr}</b>`
+    `余额: <b>${balanceStr}</b>` +
+    stats.formatTelegramBlock()
   );
 
   return true;
@@ -518,9 +620,19 @@ async function scheduler() {
     signalDelayMs: config.signalDelayMs,
     cycleTimeoutMs: config.cycleTimeoutMs,
     settlement: 'chainlink-rtds',
+    volatilityFilter: isVolatilityFilterEnabled()
+      ? {
+          barTimeframe: config.volatilityBarTimeframe,
+          minRv1m: config.minRv1m,
+          minRv5m: config.minRv5m,
+          minRv15m: config.minRv15m,
+        }
+      : 'disabled',
+    ...stats.formatLogFields(),
   });
 
   martingale.init();
+  stats.init();
   initDailyLoss();
   loadPending();
 
@@ -540,6 +652,7 @@ async function scheduler() {
       actualBet: ctx.actualBet,
       orderId: ctx.orderId,
       limitPrice: ctx.limitPrice,
+      fill: ctx.fill,
     });
 
     const side = ctx.signal === 'UP' ? '📈 买涨 UP' : '📉 买跌 DOWN';
@@ -555,7 +668,9 @@ async function scheduler() {
       `方向: <b>${side}</b> (${ctx.signalId ?? '—'})\n` +
       priceOdds +
       `金额: <b>${fillNote || `$${ctx.actualBet.toFixed(2)}`}</b>\n` +
-      `窗口: ${formatBeijingTime(ctx.cycleStartTs)}`
+      `窗口: ${formatBeijingTime(ctx.cycleStartTs)}` +
+      formatVolatilityTelegramBlock(ctx.volatility) +
+      stats.formatTelegramBlock()
     );
   });
 
@@ -589,6 +704,7 @@ async function scheduler() {
     pendingBet: pendingBet
       ? { cycleStartTs: pendingBet.cycleStartTs, signal: pendingBet.signal }
       : null,
+    ...stats.formatLogFields(),
   });
 
   // eslint-disable-next-line no-constant-condition

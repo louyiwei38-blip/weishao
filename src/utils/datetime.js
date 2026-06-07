@@ -1,5 +1,21 @@
 const BEIJING_TZ = 'Asia/Shanghai';
 
+/** 北京时间日期键 YYYY-MM-DD（用于「今日」统计切日） */
+export function beijingDateKey(input = Date.now()) {
+  const d = input instanceof Date ? input : new Date(input);
+  if (Number.isNaN(d.getTime())) return '';
+
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: BEIJING_TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(d);
+
+  const get = (type) => parts.find((p) => p.type === type)?.value ?? '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
+}
+
 /**
  * 格式化为北京时间：YYYY-MM-DD HH:mm:ss
  * @param {Date|number|string} input

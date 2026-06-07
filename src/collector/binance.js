@@ -31,11 +31,9 @@ function getExchange(id) {
 }
 
 /**
- * Fetch the most recent closed 5m OHLCV candles for BTC/USDT.
+ * Internal OHLCV fetch; returns closed candles only.
  */
-export async function fetchClosedCandles(limit = config.candleLimit) {
-  const symbol = config.symbol;
-  const timeframe = config.timeframe;
+async function fetchOhlcvCandles(symbol, timeframe, limit) {
   let lastErr;
 
   for (const exchangeId of EXCHANGE_CHAIN) {
@@ -43,10 +41,10 @@ export async function fetchClosedCandles(limit = config.candleLimit) {
       const ex = getExchange(exchangeId);
       const raw = await withRetry(
         () => ex.fetchOHLCV(symbol, timeframe, undefined, limit + 1),
-        { label: `fetchOHLCV(${exchangeId})`, maxAttempts: 2, baseDelayMs: 1000 }
+        { label: `fetchOHLCV(${exchangeId},${timeframe})`, maxAttempts: 2, baseDelayMs: 1000 }
       );
 
-      if (!raw || raw.length < 3) {
+      if (!raw || raw.length < 2) {
         throw new Error(`too few candles: ${raw?.length}`);
       }
 
@@ -59,11 +57,13 @@ export async function fetchClosedCandles(limit = config.candleLimit) {
         logger.warn('[collector] 使用备用交易所', {
           exchange: exchangeId,
           primary: EXCHANGE_CHAIN[0],
+          timeframe,
         });
       }
 
       logger.debug('[collector] K 线已拉取', {
         exchange: exchangeId,
+        timeframe,
         count: candles.length,
         last: candles.at(-1),
       });
@@ -71,11 +71,35 @@ export async function fetchClosedCandles(limit = config.candleLimit) {
       return candles;
     } catch (err) {
       lastErr = err;
-      logger.warn(`[collector] ${exchangeId} 拉取失败`, { error: err?.message });
+      logger.warn(`[collector] ${exchangeId} 拉取失败`, {
+        timeframe,
+        error: err?.message,
+      });
     }
   }
 
-  throw lastErr ?? new Error('all OHLCV exchanges failed');
+  throw lastErr ?? new Error(`all OHLCV exchanges failed (${timeframe})`);
+}
+
+/**
+ * Fetch the most recent closed OHLCV candles for the strategy timeframe.
+ */
+export async function fetchClosedCandles(limit = config.candleLimit) {
+  const candles = await fetchOhlcvCandles(config.symbol, config.timeframe, limit);
+  if (candles.length < 2) {
+    throw new Error(`too few strategy candles: ${candles.length}`);
+  }
+  return candles;
+}
+
+/**
+ * Fetch finer-grained candles for realized-volatility risk checks.
+ */
+export async function fetchVolatilityCandles(
+  limit = config.volatilityCandleLimit,
+  timeframe = config.volatilityBarTimeframe,
+) {
+  return fetchOhlcvCandles(config.symbol, timeframe, limit);
 }
 
 /**

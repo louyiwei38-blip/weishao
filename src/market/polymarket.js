@@ -8,9 +8,16 @@ const GAMMA_API = config.poly.gammaApi;
 /** Simple in-memory cache per cycle boundary */
 let cache = { cycleTs: 0, market: null };
 
+/** e.g. ETH/USDT + 5m → eth-updown-5m-1780758600 */
+export function buildMarketSlug(windowStartSec, symbol = config.symbol, timeframe = config.timeframe) {
+  const [base] = symbol.split('/');
+  if (!base) throw new Error(`Invalid TRADING_SYMBOL: ${symbol}`);
+  return `${base.toLowerCase()}-updown-${timeframe}-${windowStartSec}`;
+}
+
 /**
- * Fetch the BTC 5-minute Up/Down market for the CURRENT window.
- * Polymarket slug format: btc-updown-5m-{windowStartUnixSec}
+ * Fetch the configured symbol's 5-minute Up/Down market for the CURRENT window.
+ * Polymarket slug format: {base}-updown-{timeframe}-{windowStartUnixSec}
  *
  * The signal is derived from the two just-closed candles and predicts the
  * direction of the window that just opened, so we trade THAT window — the one
@@ -28,10 +35,11 @@ export async function findCurrentCycleMarket(cycleStartTs, deadlineMs) {
   // Trade the window that just opened (the one the signal predicts)
   const windowStartMs = cycleStartTs;
   const windowStartSec = Math.floor(windowStartMs / 1000);
-  const slug = `btc-updown-5m-${windowStartSec}`;
+  const slug = buildMarketSlug(windowStartSec);
 
   logger.info('[market] 按 slug 拉取事件', {
     slug,
+    symbol: config.symbol,
     windowStart: formatBeijingTime(windowStartMs),
   });
 
