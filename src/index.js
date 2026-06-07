@@ -48,7 +48,7 @@ import {
 } from './trader/restingFillWatcher.js';
 import * as martingale from './martingale/manager.js';
 import * as stats from './stats/manager.js';
-import { notifyTelegram } from './utils/telegram.js';
+import { notifyTelegram, escapeHtml } from './utils/telegram.js';
 import { formatBeijingTime } from './utils/datetime.js';
 import {
   computeSignalVolatility,
@@ -231,8 +231,8 @@ async function runCycle(cycleStartTs) {
         `⏭ <b>无信号 — 跳过本周期</b>\n` +
         `窗口: ${formatBeijingTime(cycleStartTs)}\n` +
         `标的: ${config.symbol}\n` +
-        `原因: ${signalObj.reason}\n` +
-        `波动率: ${volCtx.regimeReason}` +
+        `原因: ${escapeHtml(signalObj.reason)}\n` +
+        `波动率: ${escapeHtml(volCtx.regimeReason)}` +
         formatVolatilityTelegramBlock(volCtx.rv, volCtx.regime) +
         stats.formatTelegramBlock()
       );
@@ -373,12 +373,12 @@ async function runCycle(cycleStartTs) {
         `方向: <b>${side}</b> (${signalObj.signalId})\n` +
         capNote +
         priceOdds +
-        `金额: <b>${fillNote || `$${spent.toFixed(2)}`}</b>  (连败 ${mgState.consecutiveLosses})\n` +
+        `金额: <b>${escapeHtml(fillNote || `$${spent.toFixed(2)}`)}</b>  (连败 ${mgState.consecutiveLosses})\n` +
         `类型: ${orderResult.orderType ?? config.orderType}\n` +
         `余额: <b>$${balance.toFixed(2)}</b>\n` +
         `盘口: ${market.slug}\n` +
         `时间: ${formatBeijingTime(cycleStartTs)}\n` +
-        `波动率: ${volCtx.regimeReason}` +
+        `波动率: ${escapeHtml(volCtx.regimeReason)}` +
         formatVolatilityTelegramBlock(volCtx.rv, volCtx.regime) +
         stats.formatTelegramBlock()
       );
@@ -417,7 +417,7 @@ async function runCycle(cycleStartTs) {
         `预算: $${actualBet}  (连败 ${mgState.consecutiveLosses})\n` +
         `盘口: ${market.slug}\n` +
         `周期内自动监视成交\n` +
-        `波动率: ${volCtx.regimeReason}` +
+        `波动率: ${escapeHtml(volCtx.regimeReason)}` +
         formatVolatilityTelegramBlock(volCtx.rv, volCtx.regime) +
         stats.formatTelegramBlock()
       );
@@ -637,7 +637,7 @@ async function applyChainlinkSettlement(pending, { candles } = {}) {
   const resultEmoji = won ? '✅' : '❌';
   const resultText = won ? '赢' : '输';
   const mismatchNote = cross?.mismatch
-    ? `\n⚠️ 交易所 K 线: ${cross.exchangeDirection} ≠ Chainlink ${cross.chainlinkOutcome}`
+    ? `\n⚠️ 交易所 K 线: ${escapeHtml(cross.exchangeDirection)} ≠ Chainlink ${escapeHtml(cross.chainlinkOutcome)}`
     : '';
 
   const haltNote = halted
@@ -655,7 +655,7 @@ async function applyChainlinkSettlement(pending, { candles } = {}) {
     `下一注: <b>$${mg.currentBet}</b>  (连败 ${mg.consecutiveLosses})\n` +
     `今日亏损: $${getDailyLossUsd().toFixed(2)} / $${config.maxDailyLossUsd}\n` +
     `余额: <b>${balanceStr}</b>\n` +
-    (pending.volRegimeReason ? `波动率: ${pending.volRegimeReason}` : '') +
+    (pending.volRegimeReason ? `波动率: ${escapeHtml(pending.volRegimeReason)}` : '') +
     formatVolatilityTelegramBlock(pending.volatility, pending.volRegime) +
     stats.formatTelegramBlock()
   );
@@ -737,9 +737,9 @@ async function scheduler() {
       `🤖 <b>限价单成交</b>\n` +
       `方向: <b>${side}</b> (${ctx.signalId ?? '—'})\n` +
       priceOdds +
-      `金额: <b>${fillNote || `$${ctx.actualBet.toFixed(2)}`}</b>\n` +
+      `金额: <b>${escapeHtml(fillNote || `$${ctx.actualBet.toFixed(2)}`)}</b>\n` +
       `窗口: ${formatBeijingTime(ctx.cycleStartTs)}\n` +
-      (ctx.volRegimeReason ? `波动率: ${ctx.volRegimeReason}` : '') +
+      (ctx.volRegimeReason ? `波动率: ${escapeHtml(ctx.volRegimeReason)}` : '') +
       formatVolatilityTelegramBlock(ctx.volatility, ctx.volRegime) +
       stats.formatTelegramBlock()
     );

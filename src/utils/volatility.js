@@ -103,7 +103,7 @@ export function classifyVolatilityRegime(signalVol) {
   if (highBy5 || highBy15) {
     return {
       regime: 'high',
-      reason: `rv_5m=${formatRvValue(rv5)} / rv_15m=${formatRvValue(rv15)} ≥ ${threshold} → 高波动反转`,
+      reason: `rv_5m=${formatRvValue(rv5)} / rv_15m=${formatRvValue(rv15)} 不低于 ${threshold} → 高波动反转`,
     };
   }
 
@@ -113,7 +113,7 @@ export function classifyVolatilityRegime(signalVol) {
   if (lowBy5 && lowBy15) {
     return {
       regime: 'low',
-      reason: `rv_5m=${formatRvValue(rv5)} & rv_15m=${formatRvValue(rv15)} < ${threshold} → 低波动延续`,
+      reason: `rv_5m=${formatRvValue(rv5)} 且 rv_15m=${formatRvValue(rv15)} 低于 ${threshold} → 低波动延续`,
     };
   }
 
