@@ -1,9 +1,9 @@
 /**
- * Reversal Continuation strategy (PRD §3)
+ * Previous-candle follow strategy
  *
- * S1: K[-2]=BULL, K[-1]=BEAR  → signal DOWN  (buy NO)
- * S2: K[-2]=BEAR, K[-1]=BULL  → signal UP    (buy YES)
- * Otherwise                   → signal NONE  (skip)
+ * S1: K[-1]=BULL  → signal UP   (buy YES / 买涨)
+ * S2: K[-1]=BEAR  → signal DOWN (buy NO / 买跌)
+ *     K[-1]=DOJI   → signal NONE (skip)
  *
  * All functions are pure — no side-effects, safe for offline backtesting.
  */
@@ -20,9 +20,9 @@ export function classifyCandle(candle) {
 }
 
 /**
- * Evaluate the reversal continuation signal.
- * @param {{ t: number, open: number, close: number }} kMinus2  – prior closed candle
- * @param {{ t: number, open: number, close: number }} kMinus1  – most recent closed candle
+ * Evaluate signal from the most recent closed candle.
+ * @param {{ t: number, open: number, close: number }} kMinus2  – kept for logging context
+ * @param {{ t: number, open: number, close: number }} kMinus1  – previous closed candle (上一根K线)
  * @returns {{
  *   signal: 'UP' | 'DOWN' | 'NONE',
  *   signalId: 'S1' | 'S2' | null,
@@ -36,26 +36,25 @@ const TYPE_ZH = { BULL: '阳线', BEAR: '阴线', DOJI: '十字星' };
 export function evaluateReversalContinuation(kMinus2, kMinus1) {
   const prevType = classifyCandle(kMinus2);
   const currType = classifyCandle(kMinus1);
-  const prev = TYPE_ZH[prevType];
   const curr = TYPE_ZH[currType];
 
-  if (prevType === 'BULL' && currType === 'BEAR') {
+  if (currType === 'BULL') {
     return {
-      signal: 'DOWN',
+      signal: 'UP',
       signalId: 'S1',
       prevType,
       currType,
-      reason: `前根=${prev}, 当前=${curr} → 预测下一根阴线`,
+      reason: `上一根=${curr} → 当前盘口买涨`,
     };
   }
 
-  if (prevType === 'BEAR' && currType === 'BULL') {
+  if (currType === 'BEAR') {
     return {
-      signal: 'UP',
+      signal: 'DOWN',
       signalId: 'S2',
       prevType,
       currType,
-      reason: `前根=${prev}, 当前=${curr} → 预测下一根阳线`,
+      reason: `上一根=${curr} → 当前盘口买跌`,
     };
   }
 
@@ -64,7 +63,7 @@ export function evaluateReversalContinuation(kMinus2, kMinus1) {
     signalId: null,
     prevType,
     currType,
-    reason: `前根=${prev}, 当前=${curr} → 无反转信号`,
+    reason: `上一根=${curr} → 十字星跳过`,
   };
 }
 

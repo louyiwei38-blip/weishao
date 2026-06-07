@@ -1,8 +1,8 @@
-# Polymarket Reversal Continuation Bot
+# Polymarket Previous-Candle Bot
 
 **PRD v2.2+** · 可配置标的 5m · Martingale 4-loss stop · CLOB V2 · Chainlink 结算 · GTC 限价 · 波动率 / 统计风控
 
-Polymarket 5 分钟涨跌盘口自动交易机器人：CCXT K 线产生反转信号，CLOB 限价/市价下单，Chainlink oracle 结算，马丁格尔管理仓位；支持多标的、盈亏统计与波动率下限风控。
+Polymarket 5 分钟涨跌盘口自动交易机器人：根据上一根已收盘 K 线方向产生信号，CLOB 限价/市价下单，Chainlink oracle 结算，马丁格尔管理仓位；支持多标的、盈亏统计与波动率下限风控。
 
 > 详细架构见 **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)**（信号 / 下单 / 成交监视 / 结算全链路）
 
@@ -10,13 +10,13 @@ Polymarket 5 分钟涨跌盘口自动交易机器人：CCXT K 线产生反转信
 
 ## 策略
 
-基于**两根已收盘**的 5m K 线（`K[-2]` 上上根、`K[-1]` 上一根）：
+基于**上一根已收盘**的 5m K 线（`K[-1]`）：
 
 | 条件 | 信号 | 操作 |
 |------|------|------|
-| 上上根阳 + 上一根阴 | **S1** DOWN | 买跌（NO token） |
-| 上上根阴 + 上一根阳 | **S2** UP | 买涨（YES token） |
-| 同向 / 十字线 | NONE | 跳过 |
+| 上一根阳线 (close > open) | **S1** UP | 当前盘口买涨（YES token） |
+| 上一根阴线 | **S2** DOWN | 当前盘口买跌（NO token） |
+| 上一根十字星 (open = close) | NONE | 跳过，不下单 |
 
 - 信号产生后，交易**当前刚开盘**的 5m 盘口（`{base}-updown-5m-{windowStartUnix}`，如 `eth-updown-5m-…`，由 `TRADING_SYMBOL` 决定）。
 - **标的**：`TRADING_SYMBOL` 同时驱动 CCXT 信号 K 线、Chainlink 订阅与 Polymarket slug（支持 BTC/ETH/SOL/BNB 等）。
@@ -50,7 +50,7 @@ src/
 ├── collector/
 │   ├── binance.js                   # CCXT OHLCV（信号）
 │   └── chainlink.js                 # RTDS Chainlink（结算）
-├── strategy/reversalContinuation.js # S1/S2
+├── strategy/reversalContinuation.js # 上一根 K 线跟随（S1 买涨 / S2 买跌）
 ├── market/polymarket.js             # Gamma 盘口（slug 随 TRADING_SYMBOL）
 ├── stats/manager.js                 # 盈亏 / 胜率 / 止损统计
 ├── trader/
@@ -121,7 +121,7 @@ Polymarket / 钱包 / Telegram 变量见 `.env.example`。
 ## 运行逻辑摘要
 
 ```
-每 5m → CCXT K 线 → S1/S2 信号 → 波动率下限检查 → CLOB 下单
+每 5m → CCXT K 线 → 上一根 K 线信号 → 波动率下限检查 → CLOB 下单
                               ├─ rv 过低 → 跳过 + Telegram
                               ├─ 成交 → pending-bet → Chainlink 结算 → 马丁 + 统计
                               └─ GTC 挂单 → 周期内补偿轮询 → 成交后同上
