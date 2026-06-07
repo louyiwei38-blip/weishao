@@ -196,12 +196,12 @@ Polymarket 托管与现货周期对齐的 **5 分钟 BTC 涨跌**二元预测市
 
 ### FR-3：市场发现与周期检测模块（Polymarket Gamma API）
 
-**目标市场：** `https://polymarket.com/zh/crypto/5M`（Polymarket 加密货币 **BTC 5 分钟**预测市场）
+**目标市场：** `https://polymarket.com/zh/crypto/5M`（Polymarket 加密货币 **5 分钟 Up/Down** 预测市场，标的由 `TRADING_SYMBOL` 配置）
 
 | 编号 | 需求描述 |
 |------|----------|
-| FR-3.1 | 查询 `https://gamma-api.polymarket.com/markets` 获取活跃的加密货币 5 分钟预测市场 |
-| FR-3.2 | 筛选条件：`category=crypto`、`active=true`、周期 5 分钟、标的为 **BTC**、未到期 |
+| FR-3.1 | 按 slug 查询 Gamma API：`{base}-updown-{timeframe}-{windowStartUnix}`（`base` 取自 `TRADING_SYMBOL`） |
+| FR-3.2 | 标的可配置（如 BTC/ETH/SOL/BNB）；需 Polymarket 存在对应 5m 盘口且 Chainlink 有映射 |
 | FR-3.3 | **触发时机**：UTC 每 5 分钟整点（`:00`/`:05`/…`/`:55`），在 K[-1] 收盘确认后执行（建议延迟 `SIGNAL_DELAY_MS`） |
 | FR-3.4 | 绑定**下一窗口**市场：`endTime ≈ 当前边界 + 5min`（即 K[0] 对应的 Polymarket 轮次） |
 | FR-3.5 | 调用 `getClobMarketInfo()` 获取 YES/NO token ID 和动态手续费率 |
@@ -229,12 +229,29 @@ Polymarket 托管与现货周期对齐的 **5 分钟 BTC 涨跌**二元预测市
 |------|----------|
 | FR-5.1 | **主触发器**：UTC 每 5 分钟整点（`:00`/`:05`/…`/`:55`），与 5m K 收盘对齐 |
 | FR-5.2 | 边界后延迟 `SIGNAL_DELAY_MS`（默认 10s）再拉 OHLCV，确保交易所已写入收盘数据 |
-| FR-5.3 | 每轮流程：拉取 OHLCV → 信号评估 →（有信号）市场发现 → 马丁取注 → 下单 |
+| FR-5.3 | 每轮流程：拉取 OHLCV → 信号评估 →（有信号）**波动率下限检查** → 市场发现 → 马丁取注 → 下单 |
 | FR-5.4 | **不主动平仓**：仓位持有至 Polymarket 市场自动结算 |
 | FR-5.5 | 支持 `DRY_RUN=true`：全链路运行但不提交真实订单 |
 | FR-5.6 | SIGINT/SIGTERM 优雅退出，刷新待写日志 |
 | FR-5.7 | 结构化控制台日志：DEBUG、INFO、WARN、ERROR |
-| FR-5.8 | 市场结算后异步轮询 `resolved`，调用 `martingale.onSettled(win\|loss)` 更新状态 |
+| FR-5.8 | 市场结算后 Chainlink 结算，调用 `martingale.onSettled` + `stats.recordSettlement` |
+
+### FR-6：波动率风控（v2.5）
+
+| 编号 | 需求描述 |
+|------|----------|
+| FR-6.1 | 独立拉取 `VOLATILITY_BAR_TIMEFRAME`（默认 1m）K 线，计算 rv_1m / rv_5m / rv_15m（log return 样本标准差） |
+| FR-6.2 | `MIN_RV_* > 0` 时：rv 为 null 或 **rv < 下限** → 跳过本周期（策略需要波动足够大） |
+| FR-6.3 | 0 = 该窗口不限制；旧 env 名 `MAX_RV_*` 作为下限别名兼容 |
+| FR-6.4 | Telegram：开单 / 跳过均展示 rv；波动率过低时推送跳过通知 |
+
+### FR-7：盈亏统计（v2.5）
+
+| 编号 | 需求描述 |
+|------|----------|
+| FR-7.1 | 累计 / 今日盈亏、胜率、盈亏场次、止损次数（今日按**北京时间**切日） |
+| FR-7.2 | 启动时从 `settlements.jsonl`（含轮转归档）回填，按 `cycleStartTs` 去重 |
+| FR-7.3 | 结算 / 开单 / 波动率跳过 Telegram 与主日志、`heartbeat.json` 展示统计块 |
 
 ---
 
@@ -343,7 +360,7 @@ POLY_BUILDER_CODE=0x...               # 可选：Builder 归因代码
 BINANCE_API_KEY=
 BINANCE_SECRET=
 
-# 策略（固定 BTC 5m）
+# 策略（可配置标的 5m）
 TRADING_SYMBOL=BTC/USDT
 CANDLE_TIMEFRAME=5m
 CANDLE_FETCH_LIMIT=5
@@ -359,7 +376,7 @@ ORDER_TYPE=FOK                        # FOK | GTC
 DRY_RUN=false
 LOG_LEVEL=INFO                        # DEBUG | INFO | WARN | ERROR
 
-# 马丁格尔（单轨 BTC/USDT:5m）
+# 马丁格尔（单轨 {TRADING_SYMBOL}:5m）
 MARTINGALE_MULTIPLIER=2
 MARTINGALE_MAX_LOSSES=4
 
@@ -367,6 +384,11 @@ MARTINGALE_MAX_LOSSES=4
 SKIP_IF_YES_PRICE_OUT_OF_RANGE=true
 YES_PRICE_MIN=0.05
 YES_PRICE_MAX=0.95
+VOLATILITY_BAR_TIMEFRAME=1m
+VOLATILITY_CANDLE_LIMIT=20
+MIN_RV_1M=0                           # rv 下限；低于则跳过（0=不限制）
+MIN_RV_5M=0
+MIN_RV_15M=0
 ```
 
 ---
@@ -626,13 +648,24 @@ State {
 1. UTC 5m 边界 + 延迟后，能正确识别 K[-2]/K[-1] 阴阳形态。  
 2. **S1**（阳→阴）仅触发买 NO；**S2**（阴→阳）仅触发买 YES。  
 3. 阳+阳、阴+阴、含十字等组合**零下单**。  
-4. 每轮最多一笔 BTC 5M 订单，且绑定**下一** 5 分钟窗口。  
+4. 每轮最多一笔 5m 订单，绑定**当前刚开盘**窗口；slug 与 `TRADING_SYMBOL` 一致。  
 5. 连亏后下一笔金额为翻倍后的 `currentBet`，且 ≤ `MAX_BET_USD`。  
 6. 预测正确后下一笔恢复 `TRADE_BUDGET_USD`。  
 7. 连亏 4 次触发止损，下一有信号周期从基础注重新开始。  
-8. `signal=NONE` 周期不改变 `martingale-state.json`。  
-9. `DRY_RUN=true` 下全链路可跑通并落盘 `signals.jsonl`。
+8. `signal=NONE` 或波动率低于 `MIN_RV_*` 周期不改变马丁状态。  
+9. `DRY_RUN=true` 下全链路可跑通并落盘 `signals.jsonl`。  
+10. 重启后统计从 `settlements.jsonl` 回填，累计盈亏与重启前一致。
 
 ---
 
-*PRD v2.2 — 策略：趋势反转并延续；标的：BTC 5 分钟 Polymarket（`crypto/5M`）；马丁：$10 起 ×2、4 连亏止损。定稿，可开始 Phase 1 开发。*
+## 18. 版本变更（v2.5 实现摘要）
+
+| 能力 | 说明 |
+|------|------|
+| 可配置标的 | `TRADING_SYMBOL` → CCXT / Chainlink / `{base}-updown-5m-*` slug |
+| 盈亏统计 | `src/stats/manager.js`；Telegram + 日志 + settlements 回填 |
+| 波动率下限 | `src/utils/volatility.js`；rv 过低跳过；Telegram 展示 |
+
+---
+
+*PRD v2.5 — 在 v2.2~v2.4 基础上增加：可配置标的、盈亏统计、波动率下限风控。*

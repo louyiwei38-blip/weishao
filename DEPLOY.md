@@ -54,6 +54,7 @@ POLY_PRIVATE_KEY_ENCRYPTED=...    # 或 POLY_PRIVATE_KEY
 POLY_KEY_PASSWORD=...             # 加密私钥时必填
 
 OHLCV_EXCHANGE=okx
+TRADING_SYMBOL=BTC/USDT
 TRADE_BUDGET_USD=1
 MIN_BALANCE_USD=5
 ORDER_TYPE=GTC
@@ -75,6 +76,10 @@ CHAINLINK_BUFFER_MINUTES=30
 FILL_SYNC_POLL_MS=500
 FILL_SYNC_MAX_WAIT_MS=8000
 LIMIT_PRICE_OFFSET_TICKS=0
+
+# 波动率下限（可选；0=关闭；低于阈值跳过有信号轮次）
+# VOLATILITY_BAR_TIMEFRAME=1m
+# MIN_RV_1M=0.00015
 
 # Telegram（可选）
 TELEGRAM_BOT_TOKEN=...
@@ -140,6 +145,7 @@ pm2 save && pm2 startup
 | `logs/signals.jsonl` | 每轮信号 |
 | `logs/trades.jsonl` | 下单（filled / resting / unfilled） |
 | `logs/settlements.jsonl` | Chainlink 结算 + 交叉校验 |
+| `logs/stats-state.json` | 盈亏 / 胜率 / 止损（启动从 settlements 回填） |
 | `logs/pending-bet.json` | 待结算注单（重启恢复） |
 | `logs/martingale-state.json` | 马丁状态 |
 | `logs/daily-loss.json` | 当日 UTC 累计亏损 |
@@ -153,6 +159,9 @@ tail -5 logs/settlements.jsonl | jq .
 
 # 是否有 pending 卡住
 cat logs/pending-bet.json
+
+# 统计快照（重启后从 settlements 重建）
+jq '{total, today, beijingDate}' logs/stats-state.json
 
 # Chainlink 是否就绪
 grep chainlink logs/bot.log | tail -20
@@ -181,7 +190,8 @@ grep chainlink logs/bot.log | tail -20
 | `WebSocket unavailable` | `npm install` 确保 `ws` 已装；Node ≥ 18 |
 | `[chainlink] RTDS disconnected` | 检查到 `ws-live-data.polymarket.com` 的网络；会自动重连 |
 | `pUSD balance below minimum` | 充值或降低 `MIN_BALANCE_USD` |
-| `no BTC 5M market found` | 等下一 5m 周期；检查 Gamma API |
+| `no BTC 5M market found` / `market_not_found` | 检查 `TRADING_SYMBOL` 与 Polymarket 是否有对应 5m 盘口；等下一周期 |
+| `volatility_limit` / 波动率过低 | `MIN_RV_*` 阈值过高或市场横盘；调低下限或设为 0 关闭 |
 | 限价挂单未成交 | 正常；周期结束未成交不计马丁；可调 `LIMIT_PRICE_OFFSET_TICKS` |
 | `Chainlink vs exchange OHLCV mismatch` | 告警 only；结算以 Chainlink 为准 |
 | FOK `425 service not ready` | 新盘口流动性未就绪；Bot 会自动重试 |
