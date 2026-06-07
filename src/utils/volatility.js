@@ -87,33 +87,38 @@ function formatRvValue(value) {
 
 /**
  * Classify volatility regime for strategy direction.
- * High: rv_5m >= threshold OR rv_15m >= threshold → reversal
- * Low:  rv_5m < threshold AND rv_15m < threshold → continuation
- * Partial sample: default to high (reversal)
+ * High: rv_5m >= RV_5M_THRESHOLD OR rv_15m >= RV_15M_THRESHOLD → continuation
+ * Low:  rv_5m < RV_5M_THRESHOLD AND rv_15m < RV_15M_THRESHOLD → reversal
+ * Partial sample: default to high (continuation)
  * @returns {{ regime: 'high' | 'low', reason: string, partial?: boolean }}
  */
 export function classifyVolatilityRegime(signalVol) {
-  const threshold = config.rvStrategyThreshold;
+  const thresh5 = config.rv5mThreshold;
+  const thresh15 = config.rv15mThreshold;
   const rv5 = signalVol?.rv_5m;
   const rv15 = signalVol?.rv_15m;
 
-  const highBy5 = rv5 != null && rv5 >= threshold;
-  const highBy15 = rv15 != null && rv15 >= threshold;
+  const highBy5 = rv5 != null && rv5 >= thresh5;
+  const highBy15 = rv15 != null && rv15 >= thresh15;
 
   if (highBy5 || highBy15) {
+    const trigger = [
+      highBy5 ? `rv_5m=${formatRvValue(rv5)} 不低于 ${thresh5}` : null,
+      highBy15 ? `rv_15m=${formatRvValue(rv15)} 不低于 ${thresh15}` : null,
+    ].filter(Boolean).join(' 或 ');
     return {
       regime: 'high',
-      reason: `rv_5m=${formatRvValue(rv5)} / rv_15m=${formatRvValue(rv15)} 不低于 ${threshold} → 高波动延续`,
+      reason: `${trigger} → 高波动延续`,
     };
   }
 
-  const lowBy5 = rv5 != null && rv5 < threshold;
-  const lowBy15 = rv15 != null && rv15 < threshold;
+  const lowBy5 = rv5 != null && rv5 < thresh5;
+  const lowBy15 = rv15 != null && rv15 < thresh15;
 
   if (lowBy5 && lowBy15) {
     return {
       regime: 'low',
-      reason: `rv_5m=${formatRvValue(rv5)} 且 rv_15m=${formatRvValue(rv15)} 低于 ${threshold} → 低波动反转`,
+      reason: `rv_5m=${formatRvValue(rv5)} 低于 ${thresh5} 且 rv_15m=${formatRvValue(rv15)} 低于 ${thresh15} → 低波动反转`,
     };
   }
 
@@ -135,7 +140,8 @@ export function formatLogFields(volCtx) {
     rv_1m: volCtx.rv?.rv_1m ?? null,
     rv_5m: volCtx.rv?.rv_5m ?? null,
     rv_15m: volCtx.rv?.rv_15m ?? null,
-    rvThreshold: config.rvStrategyThreshold,
+    rv5mThreshold: config.rv5mThreshold,
+    rv15mThreshold: config.rv15mThreshold,
     volBarTimeframe: volCtx.rv?.barTimeframe ?? config.volatilityBarTimeframe,
   };
 }
@@ -159,6 +165,7 @@ export function snapshotForPending(volCtx) {
 
 function formatRvLine(field, value, threshold) {
   const v = formatRvValue(value);
+  if (threshold == null) return `${field}: <b>${v}</b>`;
   return `${field}: <b>${v}</b> (阈值 ${threshold})`;
 }
 
@@ -172,8 +179,8 @@ export function formatTelegramBlock(rv, volRegime) {
 
   return (
     `\n📉 <b>波动率</b> (${rv.barTimeframe})${regimeLine}\n` +
-    `${formatRvLine('rv_1m', rv.rv_1m, config.rvStrategyThreshold)}\n` +
-    `${formatRvLine('rv_5m', rv.rv_5m, config.rvStrategyThreshold)}\n` +
-    `${formatRvLine('rv_15m', rv.rv_15m, config.rvStrategyThreshold)}`
+    `${formatRvLine('rv_1m', rv.rv_1m, null)}\n` +
+    `${formatRvLine('rv_5m', rv.rv_5m, config.rv5mThreshold)}\n` +
+    `${formatRvLine('rv_15m', rv.rv_15m, config.rv15mThreshold)}`
   );
 }

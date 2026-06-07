@@ -241,7 +241,7 @@ Polymarket 托管与现货周期对齐的 **5 分钟 BTC 涨跌**二元预测市
 | 编号 | 需求描述 |
 |------|----------|
 | FR-6.1 | 独立拉取 `VOLATILITY_BAR_TIMEFRAME`（默认 1m）K 线，计算 rv_1m / rv_5m / rv_15m（log return 样本标准差） |
-| FR-6.2 | `RV_STRATEGY_THRESHOLD`：`rv_5m >= 阈值` 或 `rv_15m >= 阈值` → 高波动延续；两者均低于阈值 → 低波动反转 |
+| FR-6.2 | `RV_5M_THRESHOLD` / `RV_15M_THRESHOLD`：`rv_5m >= RV_5M_THRESHOLD` 或 `rv_15m >= RV_15M_THRESHOLD` → 高波动延续；两者均低于各自阈值 → 低波动反转 |
 | FR-6.3 | **不拦截下单**；rv 与择向写入信号日志、heartbeat、Telegram |
 | FR-6.4 | 买涨/买跌时 S1/S2 方向随波动率模式翻转（见 README 策略表） |
 
@@ -382,7 +382,8 @@ MARTINGALE_MAX_LOSSES=4
 
 # 风控（可选）
 ORDER_PRICE_CAP=0.95                  # 买 YES/NO 对称封顶；0=不限制（旧名 YES_PRICE_MAX 兼容）
-RV_STRATEGY_THRESHOLD=0.0005          # rv_5m/15m 策略分界
+RV_5M_THRESHOLD=0.0005                # rv_5m 策略阈值
+RV_15M_THRESHOLD=0.0005               # rv_15m 策略阈值
 VOLATILITY_BAR_TIMEFRAME=1m
 VOLATILITY_CANDLE_LIMIT=20
 ```

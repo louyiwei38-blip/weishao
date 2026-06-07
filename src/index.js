@@ -156,7 +156,8 @@ async function fetchVolatilityContext() {
     rv_1m: rv.rv_1m,
     rv_5m: rv.rv_5m,
     rv_15m: rv.rv_15m,
-    threshold: config.rvStrategyThreshold,
+    rv5mThreshold: config.rv5mThreshold,
+    rv15mThreshold: config.rv15mThreshold,
     regime,
     regimeReason: reason,
     partial: Boolean(partial),
@@ -706,7 +707,8 @@ async function scheduler() {
     settlement: 'chainlink-rtds',
     volatilityStrategy: {
       barTimeframe: config.volatilityBarTimeframe,
-      rvStrategyThreshold: config.rvStrategyThreshold,
+      rv5mThreshold: config.rv5mThreshold,
+      rv15mThreshold: config.rv15mThreshold,
     },
     ...stats.formatLogFields(),
   });

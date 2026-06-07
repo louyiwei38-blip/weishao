@@ -10,9 +10,9 @@ Polymarket 5 分钟涨跌盘口自动交易机器人：CCXT K 线 + 波动率择
 
 ## 策略
 
-基于**两根已收盘**的 5m K 线（`K[-2]` 上上根、`K[-1]` 上一根）+ **1m 波动率择向**（`RV_STRATEGY_THRESHOLD`，默认 `0.0005`）：
+基于**两根已收盘**的 5m K 线（`K[-2]` 上上根、`K[-1]` 上一根）+ **1m 波动率择向**（`RV_5M_THRESHOLD` / `RV_15M_THRESHOLD`，默认均为 `0.0005`）：
 
-### 高波动（`rv_5m >= 阈值` 或 `rv_15m >= 阈值`）→ 延续
+### 高波动（`rv_5m >= RV_5M_THRESHOLD` 或 `rv_15m >= RV_15M_THRESHOLD`）→ 延续
 
 | 条件 | 信号 | 操作 |
 |------|------|------|
@@ -20,7 +20,7 @@ Polymarket 5 分钟涨跌盘口自动交易机器人：CCXT K 线 + 波动率择
 | 上上根阴 + 上一根阳 | **S2** UP | 买涨（YES token） |
 | 同向 / 十字线 | NONE | 跳过 |
 
-### 低波动（`rv_5m < 阈值` 且 `rv_15m < 阈值`）→ 反转
+### 低波动（`rv_5m < RV_5M_THRESHOLD` 且 `rv_15m < RV_15M_THRESHOLD`）→ 反转
 
 | 条件 | 信号 | 操作 |
 |------|------|------|
@@ -122,7 +122,8 @@ logs/
 | `MIN_BALANCE_USD` | 0 | 余额下限（0=不限制） |
 | `ORDER_PRICE_CAP` | 0.95 | 买 YES/NO 对称封顶：盘口价高于阈值则按阈值限价挂单；`0`=不限制（旧名 `YES_PRICE_MAX` 仍兼容） |
 | `VOLATILITY_BAR_TIMEFRAME` | 1m | 波动率专用 K 线周期 |
-| `RV_STRATEGY_THRESHOLD` | 0.0005 | rv_5m/15m 策略分界阈值 |
+| `RV_5M_THRESHOLD` | 0.0005 | rv_5m 高波动判定阈值 |
+| `RV_15M_THRESHOLD` | 0.0005 | rv_15m 高波动判定阈值 |
 | `DRY_RUN` | false | true = 模拟下单 |
 
 Polymarket / 钱包 / Telegram 变量见 `.env.example`。

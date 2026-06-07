@@ -106,8 +106,17 @@ const config = {
   /** Finer OHLCV for realized-volatility regime (independent of signal timeframe) */
   volatilityBarTimeframe: optional('VOLATILITY_BAR_TIMEFRAME', '1m'),
   volatilityCandleLimit: num('VOLATILITY_CANDLE_LIMIT', 20),
-  /** rv_5m/15m threshold: high vol → continuation; both below → reversal */
-  rvStrategyThreshold: num('RV_STRATEGY_THRESHOLD', 0.0005),
+  /** rv_5m/15m thresholds: high if either >= its threshold; low if both below */
+  rv5mThreshold: (() => {
+    if (process.env.RV_5M_THRESHOLD !== undefined) return Number(process.env.RV_5M_THRESHOLD);
+    if (process.env.RV_STRATEGY_THRESHOLD !== undefined) return Number(process.env.RV_STRATEGY_THRESHOLD);
+    return 0.0005;
+  })(),
+  rv15mThreshold: (() => {
+    if (process.env.RV_15M_THRESHOLD !== undefined) return Number(process.env.RV_15M_THRESHOLD);
+    if (process.env.RV_STRATEGY_THRESHOLD !== undefined) return Number(process.env.RV_STRATEGY_THRESHOLD);
+    return 0.0005;
+  })(),
 
   // Chainlink RTDS settlement (Polymarket official oracle)
   chainlink: {

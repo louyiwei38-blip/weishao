@@ -183,12 +183,12 @@ rv = sampleStd( ln(close_i / close_{i-1}) )   # 窗口内逐 bar
 | rv_5m | 5 | ~5 分钟 |
 | rv_15m | 15 | ~15 分钟 |
 
-**择向规则**（`RV_STRATEGY_THRESHOLD`，默认 `0.0005`）：
+**择向规则**（`RV_5M_THRESHOLD` / `RV_15M_THRESHOLD`，默认均为 `0.0005`）：
 
 | 条件 | 模式 | S1（阳→阴） | S2（阴→阳） |
 |------|------|------------|------------|
-| `rv_5m >= 阈值` 或 `rv_15m >= 阈值` | 高波动·延续 | DOWN | UP |
-| `rv_5m < 阈值` 且 `rv_15m < 阈值` | 低波动·反转 | UP | DOWN |
+| `rv_5m >= RV_5M_THRESHOLD` 或 `rv_15m >= RV_15M_THRESHOLD` | 高波动·延续 | DOWN | UP |
+| `rv_5m < RV_5M_THRESHOLD` 且 `rv_15m < RV_15M_THRESHOLD` | 低波动·反转 | UP | DOWN |
 
 **不拦截下单**；rv 写入信号日志、heartbeat、Telegram。实现：`src/utils/volatility.js` + `src/strategy/reversalContinuation.js`。
 
@@ -328,7 +328,8 @@ FILL_SYNC_POLL_MS=500
 FILL_SYNC_MAX_WAIT_MS=8000
 CHAINLINK_SETTLE_BUFFER_MS=3000
 ORDER_PRICE_CAP=0.95
-RV_STRATEGY_THRESHOLD=0.0005
+RV_5M_THRESHOLD=0.0005
+RV_15M_THRESHOLD=0.0005
 VOLATILITY_BAR_TIMEFRAME=1m
 DRY_RUN=false
 ```
