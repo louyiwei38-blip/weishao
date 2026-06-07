@@ -238,15 +238,13 @@ export function formatLogFields() {
 /** Telegram HTML block appended to trade / settlement notifications */
 export function formatTelegramBlock() {
   const s = getSnapshot();
-  const todayGames = s.today.wins + s.today.losses;
-  const totalGames = s.total.wins + s.total.losses;
 
   return (
     `\n──────────\n` +
     `📊 <b>统计</b> (${s.beijingDate || '—'} 北京)\n` +
     `盈亏: 累计 <b>${formatPnlUsd(s.total.pnlUsd)}</b> | 今日 <b>${formatPnlUsd(s.today.pnlUsd)}</b>\n` +
-    `胜率: 累计 <b>${s.totalWinRate.toFixed(1)}%</b> (${s.total.wins}胜/${totalGames}场)\n` +
-    `     今日 <b>${s.todayWinRate.toFixed(1)}%</b> (${s.today.wins}胜/${todayGames}场)\n` +
+    `胜率: 累计 <b>${s.totalWinRate.toFixed(1)}%</b> (${s.total.wins}胜/${s.total.losses}输)\n` +
+    `     今日 <b>${s.todayWinRate.toFixed(1)}%</b> (${s.today.wins}胜/${s.today.losses}输)\n` +
     `止损: 今日 <b>${s.today.stopLosses}</b> | 总计 <b>${s.total.stopLosses}</b>`
   );
 }
