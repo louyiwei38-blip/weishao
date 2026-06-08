@@ -286,9 +286,9 @@ async function runCycle(cycleStartTs) {
       const marketPrice = signalObj.signal === 'UP'
         ? pricePolicy.originalYesPrice
         : pricePolicy.originalNoPrice;
-      logger.info('[main] 盘口价超阈值 — 按阈值限价挂单', {
+      logger.info('[main] Gamma 参考价超阈值 — 下单前将以订单簿最优卖价复核', {
         token,
-        marketPrice,
+        gammaRefPrice: marketPrice,
         orderPriceCap: config.orderPriceCap,
         maxLimitPrice: pricePolicy.maxLimitPrice,
         signal: signalObj.signal,

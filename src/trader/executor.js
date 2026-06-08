@@ -383,11 +383,53 @@ export function clearOrderDedup() {
   orderedThisCycle.clear();
 }
 
+/**
+ * Authoritative cap check: CLOB best ask vs ORDER_PRICE_CAP.
+ * Gamma outcomePrices can lag or diverge (especially NO ≈ 1−YES).
+ */
+async function resolveBookPriceCap(client, tokenID, { gammaPriceCapped, maxLimitPrice }) {
+  const cap = maxLimitPrice ?? (config.orderPriceCap > 0 ? config.orderPriceCap : null);
+  if (!(cap > 0)) {
+    return { priceCapped: gammaPriceCapped, bookBestAsk: null, cap: null };
+  }
+
+  const quote = await resolveExpectedEntryPrice(client, tokenID);
+  if (quote.error === 'book_fetch_failed') {
+    logger.warn('[executor] 订单簿拉取失败 — 启用封顶时按阈值限价挂单');
+    return { priceCapped: true, bookBestAsk: null, cap, bookFetchFailed: true };
+  }
+  if (quote.error === 'no_asks') {
+    logger.warn('[executor] 订单簿无卖单 — 跳过下单');
+    return { priceCapped: gammaPriceCapped, bookBestAsk: null, cap, noAsks: true };
+  }
+
+  const bookBestAsk = quote.entryPrice;
+  const bookExceedsCap = bookBestAsk > cap;
+
+  if (bookExceedsCap) {
+    logger.info('[executor] 订单簿价超阈值 — 按阈值限价挂单', {
+      bookBestAsk,
+      orderPriceCap: cap,
+      gammaPriceCapped,
+    });
+  } else if (gammaPriceCapped) {
+    logger.info('[executor] Gamma 参考价超阈值但订单簿未超 — 按市价', {
+      bookBestAsk,
+      orderPriceCap: cap,
+    });
+  }
+
+  return { priceCapped: bookExceedsCap, bookBestAsk, cap };
+}
+
 async function submitMarketOrder(client, params, exec) {
   const {
     tokenID, actualBet, signal, signalId, conditionId, cycleStartTs,
     yesPrice, baseBet, consecutiveLosses, deadlineMs, logBase, dedupKey,
+    maxLimitPrice,
   } = params;
+
+  const marketMaxPrice = maxLimitPrice ?? (config.orderPriceCap > 0 ? config.orderPriceCap : null);
 
   let parsed = null;
   let orderResp = null;
@@ -401,8 +443,14 @@ async function submitMarketOrder(client, params, exec) {
     const orderOpts = await resolveOrderOptions(client, tokenID);
 
     try {
+      const marketPayload = {
+        tokenID,
+        amount: actualBet,
+        side: Side.BUY,
+        ...(marketMaxPrice != null ? { price: marketMaxPrice } : {}),
+      };
       orderResp = await client.createAndPostMarketOrder(
-        { tokenID, amount: actualBet, side: Side.BUY },
+        marketPayload,
         orderOpts,
         exec.orderType
       );
@@ -619,25 +667,23 @@ export async function placeOrder(params) {
 
   const tokenID = signal === 'UP' ? yesTokenId : noTokenId;
   const exec = resolveExecutionMode();
-  // FOK/FAK: market when price <= cap; limit at cap when price exceeds ORDER_PRICE_CAP
-  const useLimitOrder = exec.mode === 'limit' || priceCapped;
-  const effectiveExec = priceCapped && exec.mode === 'market'
-    ? { mode: 'limit', orderType: OrderType.GTC, label: 'GTC' }
-    : exec;
-
-  const logBase = {
-    ts: new Date().toISOString(),
-    conditionId, cycleStartTs,
-    signal, signalId, tokenID,
-    actualBet, baseBet, consecutiveLosses,
-    yesPrice, noPrice, dryRun: config.dryRun,
-    orderKind: useLimitOrder ? 'limit' : 'market',
-    orderType: effectiveExec.label,
-    ...(priceCapped ? { priceCapped, originalYesPrice, maxLimitPrice } : {}),
-    ...(volatility ? { volatility } : {}),
-  };
 
   if (config.dryRun) {
+    const useLimitOrder = exec.mode === 'limit' || priceCapped;
+    const effectiveExec = priceCapped && exec.mode === 'market'
+      ? { mode: 'limit', orderType: OrderType.GTC, label: 'GTC' }
+      : exec;
+    const logBase = {
+      ts: new Date().toISOString(),
+      conditionId, cycleStartTs,
+      signal, signalId, tokenID,
+      actualBet, baseBet, consecutiveLosses,
+      yesPrice, noPrice, dryRun: config.dryRun,
+      orderKind: useLimitOrder ? 'limit' : 'market',
+      orderType: effectiveExec.label,
+      ...(priceCapped ? { priceCapped, originalYesPrice, maxLimitPrice } : {}),
+      ...(volatility ? { volatility } : {}),
+    };
     const dryId = `dry-${Date.now()}`;
     logger.info('[executor] 空跑 — 模拟下单', { ...logBase, orderId: dryId });
     writeTradelog({ ...logBase, orderId: dryId, status: 'dry_run' });
@@ -655,11 +701,46 @@ export async function placeOrder(params) {
   const client = await getClobClient();
   const effectiveMaxPrice = maxLimitPrice
     ?? (config.orderPriceCap > 0 ? config.orderPriceCap : null);
+
+  const bookCap = await resolveBookPriceCap(client, tokenID, {
+    gammaPriceCapped: priceCapped,
+    maxLimitPrice: effectiveMaxPrice,
+  });
+
+  if (bookCap.noAsks) {
+    return { orderId: null, skipped: true, skipReason: 'no_asks' };
+  }
+
+  const finalPriceCapped = bookCap.priceCapped;
+  // FOK/FAK: market when book ask <= cap; limit at cap when book ask exceeds ORDER_PRICE_CAP
+  const useLimitOrder = exec.mode === 'limit' || finalPriceCapped;
+  const effectiveExec = finalPriceCapped && exec.mode === 'market'
+    ? { mode: 'limit', orderType: OrderType.GTC, label: 'GTC' }
+    : exec;
+
+  const logBase = {
+    ts: new Date().toISOString(),
+    conditionId, cycleStartTs,
+    signal, signalId, tokenID,
+    actualBet, baseBet, consecutiveLosses,
+    yesPrice, noPrice, dryRun: config.dryRun,
+    orderKind: useLimitOrder ? 'limit' : 'market',
+    orderType: effectiveExec.label,
+    ...(finalPriceCapped ? {
+      priceCapped: true,
+      originalYesPrice,
+      maxLimitPrice: effectiveMaxPrice,
+      bookBestAsk: bookCap.bookBestAsk,
+      gammaPriceCapped: priceCapped,
+    } : {}),
+    ...(volatility ? { volatility } : {}),
+  };
+
   const shared = {
     tokenID, actualBet, signal, signalId, conditionId, cycleStartTs,
     yesPrice, noPrice, baseBet, consecutiveLosses, deadlineMs, logBase, dedupKey,
     maxLimitPrice: effectiveMaxPrice,
-    forceLimitPrice: priceCapped ? effectiveMaxPrice : null,
+    forceLimitPrice: finalPriceCapped ? effectiveMaxPrice : null,
   };
 
   if (useLimitOrder) {

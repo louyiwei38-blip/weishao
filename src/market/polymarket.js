@@ -61,7 +61,7 @@ export async function findCurrentCycleMarket(cycleStartTs, deadlineMs) {
     return null;
   }
 
-  const { event, m, upTokenId, downTokenId, upPrice } = parsed;
+  const { event, m, upTokenId, downTokenId, upPrice, downPrice } = parsed;
 
   const result = {
     conditionId: m.conditionId,
@@ -72,7 +72,7 @@ export async function findCurrentCycleMarket(cycleStartTs, deadlineMs) {
     yesTokenId: upTokenId,   // UP signal → buy Up token
     noTokenId: downTokenId,  // DOWN signal → buy Down token
     yesPrice: upPrice,
-    noPrice: upPrice != null ? +(1 - upPrice).toFixed(4) : null,
+    noPrice: downPrice ?? (upPrice != null ? +(1 - upPrice).toFixed(4) : null),
   };
 
   logger.info('[market] 匹配到市场', {
@@ -87,7 +87,7 @@ export async function findCurrentCycleMarket(cycleStartTs, deadlineMs) {
 }
 
 /**
- * Symmetric price cap: buy YES or NO at most ORDER_PRICE_CAP when market price exceeds cap.
+ * Preliminary price cap from Gamma outcomePrices (authoritative check uses CLOB best ask in executor).
  * No range skip — always proceeds.
  * @param {{ yesPrice: number|null, noPrice: number|null }} market
  * @param {'UP' | 'DOWN'} signal
@@ -217,6 +217,7 @@ function parseUpDownTokens(market) {
   let upTokenId = null;
   let downTokenId = null;
   let upPrice = null;
+  let downPrice = null;
 
   if (Array.isArray(tokenIds) && Array.isArray(outcomes)) {
     outcomes.forEach((outcome, i) => {
@@ -227,11 +228,12 @@ function parseUpDownTokens(market) {
       }
       if (label === 'DOWN' || label === 'NO') {
         downTokenId = tokenIds[i];
+        downPrice = prices?.[i] != null ? Number(prices[i]) : null;
       }
     });
   }
 
-  return { upTokenId, downTokenId, upPrice };
+  return { upTokenId, downTokenId, upPrice, downPrice };
 }
 
 // Settlement uses Chainlink RTDS in src/trader/chainlinkSettle.js;
