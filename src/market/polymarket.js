@@ -113,6 +113,7 @@ export function resolveOrderPricePolicy(market, signal) {
     priceCapped: false,
     yesPrice: originalYesPrice,
     noPrice: originalNoPrice,
+    ...(cap > 0 ? { maxLimitPrice: cap } : {}),
   };
 
   if (!(cap > 0)) return base;

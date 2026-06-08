@@ -480,6 +480,9 @@ async function submitLimitOrder(client, params, exec) {
     tokenID, actualBet, logBase, dedupKey, forceLimitPrice, maxLimitPrice,
   } = params;
 
+  const effectiveMaxPrice = maxLimitPrice
+    ?? (config.orderPriceCap > 0 ? config.orderPriceCap : null);
+
   const orderOpts = await resolveOrderOptions(client, tokenID);
   const quote = await resolveExpectedEntryPrice(client, tokenID);
   const tickSize = quote.tickSize || orderOpts.tickSize || '0.01';
@@ -502,12 +505,12 @@ async function submitLimitOrder(client, params, exec) {
     });
   } else {
     price = quote.entryPrice;
-    if (maxLimitPrice != null && price > maxLimitPrice) {
-      const capped = roundToTick(maxLimitPrice, tickSize, false);
-      logger.info('[executor] 盘口价超阈值 — 限价封顶', {
+    if (effectiveMaxPrice != null && price > effectiveMaxPrice) {
+      const capped = roundToTick(effectiveMaxPrice, tickSize, false);
+      logger.info('[executor] 订单簿价超阈值 — 限价封顶', {
         bookBestAsk: price,
         cappedPrice: capped,
-        orderPriceCap: maxLimitPrice,
+        orderPriceCap: effectiveMaxPrice,
       });
       price = capped;
     }
@@ -645,11 +648,13 @@ export async function placeOrder(params) {
   }
 
   const client = await getClobClient();
+  const effectiveMaxPrice = maxLimitPrice
+    ?? (config.orderPriceCap > 0 ? config.orderPriceCap : null);
   const shared = {
     tokenID, actualBet, signal, signalId, conditionId, cycleStartTs,
     yesPrice, noPrice, baseBet, consecutiveLosses, deadlineMs, logBase, dedupKey,
-    maxLimitPrice,
-    forceLimitPrice: maxLimitPrice ?? null,
+    maxLimitPrice: effectiveMaxPrice,
+    forceLimitPrice: priceCapped ? effectiveMaxPrice : null,
   };
 
   if (maxLimitPrice != null || exec.mode === 'limit') {
