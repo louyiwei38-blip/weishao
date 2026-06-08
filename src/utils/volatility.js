@@ -86,9 +86,9 @@ function formatRvValue(value) {
 }
 
 /**
- * Classify volatility regime for strategy direction.
- * High: rv_5m >= RV_5M_THRESHOLD OR rv_15m >= RV_15M_THRESHOLD → continuation
- * Low:  rv_5m < RV_5M_THRESHOLD AND rv_15m < RV_15M_THRESHOLD → reversal
+ * Classify volatility regime for trade gating.
+ * High: rv_5m >= RV_5M_THRESHOLD OR rv_15m >= RV_15M_THRESHOLD → continuation, allow order
+ * Low:  rv_5m < RV_5M_THRESHOLD AND rv_15m < RV_15M_THRESHOLD → skip order
  * Partial sample: default to high (continuation)
  * @returns {{ regime: 'high' | 'low', reason: string, partial?: boolean }}
  */
@@ -118,7 +118,7 @@ export function classifyVolatilityRegime(signalVol) {
   if (lowBy5 && lowBy15) {
     return {
       regime: 'low',
-      reason: `rv_5m=${formatRvValue(rv5)} 低于 ${thresh5} 且 rv_15m=${formatRvValue(rv15)} 低于 ${thresh15} → 低波动反转`,
+      reason: `rv_5m=${formatRvValue(rv5)} 低于 ${thresh5} 且 rv_15m=${formatRvValue(rv15)} 低于 ${thresh15} → 低波动跳过`,
     };
   }
 
@@ -129,7 +129,7 @@ export function classifyVolatilityRegime(signalVol) {
   };
 }
 
-const REGIME_ZH = { high: '高波动·延续', low: '低波动·反转' };
+const REGIME_ZH = { high: '高波动·延续', low: '低波动·跳过' };
 
 /** Structured fields for logger / heartbeat / jsonl */
 export function formatLogFields(volCtx) {

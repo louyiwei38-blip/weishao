@@ -106,7 +106,7 @@ const config = {
   /** Finer OHLCV for realized-volatility regime (independent of signal timeframe) */
   volatilityBarTimeframe: optional('VOLATILITY_BAR_TIMEFRAME', '1m'),
   volatilityCandleLimit: num('VOLATILITY_CANDLE_LIMIT', 20),
-  /** rv_5m/15m thresholds: high if either >= its threshold; low if both below */
+  /** rv_5m/15m thresholds: trade if either >= its threshold; skip if both below */
   rv5mThreshold: (() => {
     if (process.env.RV_5M_THRESHOLD !== undefined) return Number(process.env.RV_5M_THRESHOLD);
     if (process.env.RV_STRATEGY_THRESHOLD !== undefined) return Number(process.env.RV_STRATEGY_THRESHOLD);

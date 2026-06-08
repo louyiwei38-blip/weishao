@@ -30,7 +30,12 @@ async function main() {
   const { regime, reason } = classifyVolatilityRegime(rv);
   console.log('\n[0] Volatility:', { regime, reason, rv_5m: rv.rv_5m, rv_15m: rv.rv_15m });
 
-  const signalObj = buildSignal(kMinus2, kMinus1, config.symbol, config.timeframe, regime);
+  if (regime === 'low') {
+    console.log('\nLow volatility — skip order this cycle. Pipeline OK through volatility gate.');
+    return;
+  }
+
+  const signalObj = buildSignal(kMinus2, kMinus1, config.symbol, config.timeframe);
   console.log('\n[1] Signal:', signalObj.signal, signalObj.signalId, '-', signalObj.reason);
 
   if (signalObj.signal === 'NONE') {
