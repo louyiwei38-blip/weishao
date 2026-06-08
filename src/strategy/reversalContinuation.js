@@ -1,12 +1,13 @@
 /**
- * Volatility-gated continuation strategy
+ * Volatility-regime reversal / continuation strategy
  *
- * Only trades when volatility is high (rv_5m >= threshold OR rv_15m >= threshold).
- * Low volatility cycles are skipped upstream in index.js.
- *
- * High vol — continuation:
+ * High vol (rv_5m >= threshold OR rv_15m >= threshold) — continuation:
  *   S1: K[-2]=BULL, K[-1]=BEAR  → signal DOWN  (buy NO)
  *   S2: K[-2]=BEAR, K[-1]=BULL  → signal UP    (buy YES)
+ *
+ * Low vol (rv_5m < threshold AND rv_15m < threshold) — reversal:
+ *   S1: K[-2]=BULL, K[-1]=BEAR  → signal UP    (buy YES)
+ *   S2: K[-2]=BEAR, K[-1]=BULL  → signal DOWN  (buy NO)
  *
  * Same direction / DOJI → signal NONE (skip)
  *
@@ -25,13 +26,14 @@ export function classifyCandle(candle) {
 }
 
 /**
- * Evaluate continuation signal from candle pattern.
+ * Evaluate signal from candle pattern and volatility regime.
  * @param {{ t: number, open: number, close: number }} kMinus2
  * @param {{ t: number, open: number, close: number }} kMinus1
+ * @param {'high' | 'low'} [volRegime='high']
  * @returns {{
  *   signal: 'UP' | 'DOWN' | 'NONE',
  *   signalId: 'S1' | 'S2' | null,
- *   volRegime: 'high',
+ *   volRegime: 'high' | 'low',
  *   prevType: string,
  *   currType: string,
  *   reason: string
@@ -39,38 +41,43 @@ export function classifyCandle(candle) {
  */
 const TYPE_ZH = { BULL: '阳线', BEAR: '阴线', DOJI: '十字星' };
 
-export function evaluateReversalContinuation(kMinus2, kMinus1) {
+export function evaluateReversalContinuation(kMinus2, kMinus1, volRegime = 'high') {
   const prevType = classifyCandle(kMinus2);
   const currType = classifyCandle(kMinus1);
   const prev = TYPE_ZH[prevType];
   const curr = TYPE_ZH[currType];
+  const mode = volRegime === 'low' ? '低波动反转' : '高波动延续';
 
   if (prevType === 'BULL' && currType === 'BEAR') {
+    const signal = volRegime === 'low' ? 'UP' : 'DOWN';
+    const action = signal === 'UP' ? '买涨' : '买跌';
     return {
-      signal: 'DOWN',
+      signal,
       signalId: 'S1',
-      volRegime: 'high',
+      volRegime,
       prevType,
       currType,
-      reason: `上上根=${prev}, 上一根=${curr} → 高波动延续 → S1 DOWN (买跌)`,
+      reason: `上上根=${prev}, 上一根=${curr} → ${mode} → S1 ${signal} (${action})`,
     };
   }
 
   if (prevType === 'BEAR' && currType === 'BULL') {
+    const signal = volRegime === 'low' ? 'DOWN' : 'UP';
+    const action = signal === 'UP' ? '买涨' : '买跌';
     return {
-      signal: 'UP',
+      signal,
       signalId: 'S2',
-      volRegime: 'high',
+      volRegime,
       prevType,
       currType,
-      reason: `上上根=${prev}, 上一根=${curr} → 高波动延续 → S2 UP (买涨)`,
+      reason: `上上根=${prev}, 上一根=${curr} → ${mode} → S2 ${signal} (${action})`,
     };
   }
 
   return {
     signal: 'NONE',
     signalId: null,
-    volRegime: 'high',
+    volRegime,
     prevType,
     currType,
     reason: `上上根=${prev}, 上一根=${curr} → 同向/十字线，无信号`,
@@ -83,10 +90,11 @@ export function evaluateReversalContinuation(kMinus2, kMinus1) {
  * @param {object} kMinus1
  * @param {string} symbol
  * @param {string} timeframe
+ * @param {'high' | 'low'} [volRegime='high']
  * @returns {object}
  */
-export function buildSignal(kMinus2, kMinus1, symbol, timeframe) {
-  const evaluation = evaluateReversalContinuation(kMinus2, kMinus1);
+export function buildSignal(kMinus2, kMinus1, symbol, timeframe, volRegime = 'high') {
+  const evaluation = evaluateReversalContinuation(kMinus2, kMinus1, volRegime);
   return {
     symbol,
     timeframe,

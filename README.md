@@ -10,9 +10,9 @@ Polymarket 5 分钟涨跌盘口自动交易机器人：CCXT K 线 + 波动率择
 
 ## 策略
 
-基于**两根已收盘**的 5m K 线（`K[-2]` 上上根、`K[-1]` 上一根）+ **1m 波动率门槛**（`RV_5M_THRESHOLD` / `RV_15M_THRESHOLD`，默认均为 `0.0005`）：
+基于**两根已收盘**的 5m K 线（`K[-2]` 上上根、`K[-1]` 上一根）+ **1m 波动率择向**（`RV_5M_THRESHOLD` / `RV_15M_THRESHOLD`，默认均为 `0.0005`）：
 
-### 高波动（`rv_5m >= RV_5M_THRESHOLD` 或 `rv_15m >= RV_15M_THRESHOLD`）→ 延续 → 下单
+### 高波动（`rv_5m >= RV_5M_THRESHOLD` 或 `rv_15m >= RV_15M_THRESHOLD`）→ 延续
 
 | 条件 | 信号 | 操作 |
 |------|------|------|
@@ -20,9 +20,13 @@ Polymarket 5 分钟涨跌盘口自动交易机器人：CCXT K 线 + 波动率择
 | 上上根阴 + 上一根阳 | **S2** UP | 买涨（YES token） |
 | 同向 / 十字线 | NONE | 跳过 |
 
-### 低波动（`rv_5m < RV_5M_THRESHOLD` 且 `rv_15m < RV_15M_THRESHOLD`）→ 跳过
+### 低波动（`rv_5m < RV_5M_THRESHOLD` 且 `rv_15m < RV_15M_THRESHOLD`）→ 反转
 
-本周期不下单。
+| 条件 | 信号 | 操作 |
+|------|------|------|
+| 上上根阳 + 上一根阴 | **S1** UP | 买涨（YES token） |
+| 上上根阴 + 上一根阳 | **S2** DOWN | 买跌（NO token） |
+| 同向 / 十字线 | NONE | 跳过 |
 
 - 信号产生后，交易**当前刚开盘**的 5m 盘口（`{base}-updown-5m-{windowStartUnix}`，如 `eth-updown-5m-…`，由 `TRADING_SYMBOL` 决定）。
 - **标的**：`TRADING_SYMBOL` 同时驱动 CCXT 信号 K 线、Chainlink 订阅与 Polymarket slug（支持 BTC/ETH/SOL/BNB 等）。

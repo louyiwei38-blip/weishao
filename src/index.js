@@ -219,29 +219,12 @@ async function runCycle(cycleStartTs) {
     // ── FR-2: Volatility regime + signal evaluation ──
     const volCtx = await fetchVolatilityContext();
     lastVolCtx = volCtx;
-
-    if (volCtx.regime === 'low') {
-      cycleStatus = 'low_volatility';
-      logger.info('[main] 低波动 — 跳过下单', {
-        ...formatVolatilityLogFields(volCtx),
-      });
-      await notifyTelegram(
-        `⏭ <b>低波动 — 跳过本周期</b>\n` +
-        `窗口: ${formatBeijingTime(cycleStartTs)}\n` +
-        `标的: ${config.symbol}\n` +
-        `原因: ${escapeHtml(volCtx.regimeReason)}\n` +
-        await formatBalanceTelegramLine() +
-        formatVolatilityTelegramBlock(volCtx.rv, volCtx.regime) +
-        stats.formatTelegramBlock()
-      );
-      return;
-    }
-
     const signalObj = buildSignal(
       kMinus2,
       kMinus1,
       config.symbol,
-      config.timeframe
+      config.timeframe,
+      volCtx.regime
     );
     lastSignal = signalObj.signal;
     writeSignalLog({
