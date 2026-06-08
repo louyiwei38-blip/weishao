@@ -619,6 +619,11 @@ export async function placeOrder(params) {
 
   const tokenID = signal === 'UP' ? yesTokenId : noTokenId;
   const exec = resolveExecutionMode();
+  // FOK/FAK: market when price <= cap; limit at cap when price exceeds ORDER_PRICE_CAP
+  const useLimitOrder = exec.mode === 'limit' || priceCapped;
+  const effectiveExec = priceCapped && exec.mode === 'market'
+    ? { mode: 'limit', orderType: OrderType.GTC, label: 'GTC' }
+    : exec;
 
   const logBase = {
     ts: new Date().toISOString(),
@@ -626,8 +631,8 @@ export async function placeOrder(params) {
     signal, signalId, tokenID,
     actualBet, baseBet, consecutiveLosses,
     yesPrice, noPrice, dryRun: config.dryRun,
-    orderKind: exec.mode,
-    orderType: exec.label,
+    orderKind: useLimitOrder ? 'limit' : 'market',
+    orderType: effectiveExec.label,
     ...(priceCapped ? { priceCapped, originalYesPrice, maxLimitPrice } : {}),
     ...(volatility ? { volatility } : {}),
   };
@@ -640,10 +645,10 @@ export async function placeOrder(params) {
     return {
       orderId: dryId,
       skipped: false,
-      resting: exec.mode === 'limit',
+      resting: useLimitOrder,
       usdcSpent: actualBet,
-      orderKind: exec.mode,
-      orderType: exec.label,
+      orderKind: useLimitOrder ? 'limit' : 'market',
+      orderType: effectiveExec.label,
     };
   }
 
@@ -657,8 +662,8 @@ export async function placeOrder(params) {
     forceLimitPrice: priceCapped ? effectiveMaxPrice : null,
   };
 
-  if (maxLimitPrice != null || exec.mode === 'limit') {
-    return submitLimitOrder(client, shared, exec);
+  if (useLimitOrder) {
+    return submitLimitOrder(client, shared, effectiveExec);
   }
   return submitMarketOrder(client, shared, exec);
 }
