@@ -58,6 +58,14 @@ function computeRvForWindow(closePrices, barsNeeded) {
   return round(sampleStd(returns), 8);
 }
 
+/** rv_5m / rv_15m — short-term vol spike vs 15m baseline */
+export function computeRvRatio(signalVol) {
+  const rv5 = signalVol?.rv_5m;
+  const rv15 = signalVol?.rv_15m;
+  if (!Number.isFinite(rv5) || !Number.isFinite(rv15) || rv15 === 0) return null;
+  return round(rv5 / rv15, 4);
+}
+
 /**
  * Realized volatility: sample std of log returns over 1m/5m/15m windows.
  * @param {Array<{ close: number }>} candles
@@ -129,26 +137,66 @@ export function classifyVolatilityRegime(signalVol) {
   };
 }
 
+/**
+ * Scheme A: on high-vol continuation only, skip when rv_ratio spikes (chop fake continuation).
+ * Low-vol reversal signals are not filtered.
+ * @param {ReturnType<typeof import('../strategy/reversalContinuation.js').buildSignal>} signalObj
+ * @param {{ regime?: string, rv?: object }} volCtx
+ */
+export function filterHighVolContinuationSignal(signalObj, volCtx) {
+  if (!signalObj || signalObj.signal === 'NONE' || volCtx?.regime !== 'high') {
+    return signalObj;
+  }
+
+  const maxRatio = config.rvRatioMax;
+  if (!Number.isFinite(maxRatio) || maxRatio <= 0) {
+    return signalObj;
+  }
+
+  const rvRatio = computeRvRatio(volCtx.rv);
+  if (rvRatio == null) {
+    return signalObj;
+  }
+
+  if (rvRatio >= maxRatio) {
+    return {
+      ...signalObj,
+      signal: 'NONE',
+      signalId: null,
+      reason: `${signalObj.reason} → rv_ratio=${rvRatio.toFixed(4)} ≥ ${maxRatio}，跳过震荡假延续`,
+      filterSkipReason: 'rv_ratio_spike',
+      rv_ratio: rvRatio,
+    };
+  }
+
+  return { ...signalObj, rv_ratio: rvRatio };
+}
+
 const REGIME_ZH = { high: '高波动·延续', low: '低波动·反转' };
 
 /** Structured fields for logger / heartbeat / jsonl */
-export function formatLogFields(volCtx) {
+export function formatLogFields(volCtx, signalObj = null) {
   if (!volCtx) return {};
+  const rvRatio = signalObj?.rv_ratio ?? computeRvRatio(volCtx.rv);
   return {
     volRegime: volCtx.regime ?? null,
     volRegimeReason: volCtx.regimeReason ?? null,
     rv_1m: volCtx.rv?.rv_1m ?? null,
     rv_5m: volCtx.rv?.rv_5m ?? null,
     rv_15m: volCtx.rv?.rv_15m ?? null,
+    rv_ratio: rvRatio,
+    rvRatioMax: config.rvRatioMax,
     rv5mThreshold: config.rv5mThreshold,
     rv15mThreshold: config.rv15mThreshold,
+    filterSkipReason: signalObj?.filterSkipReason ?? null,
     volBarTimeframe: volCtx.rv?.barTimeframe ?? config.volatilityBarTimeframe,
   };
 }
 
 /** Compact snapshot persisted on pending bet for settlement notifications */
-export function snapshotForPending(volCtx) {
+export function snapshotForPending(volCtx, signalObj = null) {
   if (!volCtx) return {};
+  const rvRatio = signalObj?.rv_ratio ?? computeRvRatio(volCtx.rv);
   return {
     volatility: volCtx.rv
       ? {
@@ -156,10 +204,12 @@ export function snapshotForPending(volCtx) {
           rv_1m: volCtx.rv.rv_1m,
           rv_5m: volCtx.rv.rv_5m,
           rv_15m: volCtx.rv.rv_15m,
+          rv_ratio: rvRatio,
         }
       : null,
     volRegime: volCtx.regime ?? null,
     volRegimeReason: volCtx.regimeReason ?? null,
+    filterSkipReason: signalObj?.filterSkipReason ?? null,
   };
 }
 
@@ -181,6 +231,11 @@ export function formatTelegramBlock(rv, volRegime) {
     `\n📉 <b>波动率</b> (${rv.barTimeframe})${regimeLine}\n` +
     `${formatRvLine('rv_1m', rv.rv_1m, null)}\n` +
     `${formatRvLine('rv_5m', rv.rv_5m, config.rv5mThreshold)}\n` +
-    `${formatRvLine('rv_15m', rv.rv_15m, config.rv15mThreshold)}`
+    `${formatRvLine('rv_15m', rv.rv_15m, config.rv15mThreshold)}` +
+    (() => {
+      const ratio = computeRvRatio(rv);
+      if (ratio == null || config.rvRatioMax <= 0) return '';
+      return `\nrv_ratio: <b>${ratio.toFixed(4)}</b> (上限 ${config.rvRatioMax})`;
+    })()
   );
 }

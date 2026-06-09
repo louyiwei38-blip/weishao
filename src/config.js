@@ -110,13 +110,15 @@ const config = {
   rv5mThreshold: (() => {
     if (process.env.RV_5M_THRESHOLD !== undefined) return Number(process.env.RV_5M_THRESHOLD);
     if (process.env.RV_STRATEGY_THRESHOLD !== undefined) return Number(process.env.RV_STRATEGY_THRESHOLD);
-    return 0.0005;
+    return 0.00045;
   })(),
   rv15mThreshold: (() => {
     if (process.env.RV_15M_THRESHOLD !== undefined) return Number(process.env.RV_15M_THRESHOLD);
     if (process.env.RV_STRATEGY_THRESHOLD !== undefined) return Number(process.env.RV_STRATEGY_THRESHOLD);
-    return 0.0005;
+    return 0.00025;
   })(),
+  /** High-vol continuation: skip when rv_5m/rv_15m >= this (0 = disabled) */
+  rvRatioMax: num('RV_RATIO_MAX', 1.05),
 
   // Chainlink RTDS settlement (Polymarket official oracle)
   chainlink: {

@@ -53,6 +53,7 @@ import { formatBeijingTime } from './utils/datetime.js';
 import {
   computeSignalVolatility,
   classifyVolatilityRegime,
+  filterHighVolContinuationSignal,
   formatLogFields as formatVolatilityLogFields,
   snapshotForPending,
   formatTelegramBlock as formatVolatilityTelegramBlock,
@@ -219,24 +220,28 @@ async function runCycle(cycleStartTs) {
     // ── FR-2: Volatility regime + signal evaluation ──
     const volCtx = await fetchVolatilityContext();
     lastVolCtx = volCtx;
-    const signalObj = buildSignal(
-      kMinus2,
-      kMinus1,
-      config.symbol,
-      config.timeframe,
-      volCtx.regime
+    const signalObj = filterHighVolContinuationSignal(
+      buildSignal(
+        kMinus2,
+        kMinus1,
+        config.symbol,
+        config.timeframe,
+        volCtx.regime,
+      ),
+      volCtx,
     );
     lastSignal = signalObj.signal;
     writeSignalLog({
       ...signalObj,
-      ...formatVolatilityLogFields(volCtx),
+      ...formatVolatilityLogFields(volCtx, signalObj),
     });
 
     logger.info('[main] 信号', {
       signal: signalObj.signal,
       signalId: signalObj.signalId,
       reason: signalObj.reason,
-      ...formatVolatilityLogFields(volCtx),
+      filterSkipReason: signalObj.filterSkipReason ?? null,
+      ...formatVolatilityLogFields(volCtx, signalObj),
     });
 
     if (signalObj.signal === 'NONE') {
@@ -368,7 +373,7 @@ async function runCycle(cycleStartTs) {
         orderId: orderResult.orderId,
         limitPrice: orderResult.limitPrice,
         fill: orderResult.fill,
-        ...snapshotForPending(volCtx),
+        ...snapshotForPending(volCtx, signalObj),
       });
 
       const side = signalObj.signal === 'UP' ? '📈 买涨 UP' : '📉 买跌 DOWN';
@@ -413,7 +418,7 @@ async function runCycle(cycleStartTs) {
         signalReason: signalObj.reason,
         cycleEndMs,
         limitPrice: orderResult.limitPrice,
-        ...snapshotForPending(volCtx),
+        ...snapshotForPending(volCtx, signalObj),
       });
 
       const side = signalObj.signal === 'UP' ? '📈 买涨 UP' : '📉 买跌 DOWN';

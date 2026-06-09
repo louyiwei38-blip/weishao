@@ -9,6 +9,8 @@
  *   S1: K[-2]=BULL, K[-1]=BEAR  → signal UP    (buy YES)
  *   S2: K[-2]=BEAR, K[-1]=BULL  → signal DOWN  (buy NO)
  *
+ * High-vol continuation may be filtered by rv_ratio in volatility.js (Scheme A).
+ *
  * Same direction / DOJI → signal NONE (skip)
  *
  * All functions are pure — no side-effects, safe for offline backtesting.
