@@ -271,6 +271,17 @@ async function runCycle(cycleStartTs) {
       logger.info('[main] 会话休眠 — 跳过本周期下单', {
         ...formatSessionLogFields(sessionCtx),
       });
+      // 每周期推送；action=stop 时上面已发过「会话停止」，避免重复
+      if (sessionCtx.action !== 'stop') {
+        await notifyTelegram(
+          `💤 <b>会话休眠 — 本周期跳过</b>\n` +
+          `窗口: ${formatBeijingTime(cycleStartTs)}\n` +
+          `标的: ${config.symbol}\n` +
+          formatSessionTelegramBlock(sessionCtx) +
+          await formatBalanceTelegramLine() +
+          stats.formatTelegramBlock()
+        );
+      }
       return;
     }
 
