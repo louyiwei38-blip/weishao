@@ -138,8 +138,8 @@ export function classifyVolatilityRegime(signalVol) {
 }
 
 /**
+ * @deprecated Per-trade rv_ratio skip removed from production.
  * Scheme A: on high-vol continuation only, skip when rv_ratio spikes (chop fake continuation).
- * Low-vol reversal signals are not filtered.
  * @param {ReturnType<typeof import('../strategy/reversalContinuation.js').buildSignal>} signalObj
  * @param {{ regime?: string, rv?: object }} volCtx
  */

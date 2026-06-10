@@ -13,7 +13,7 @@ import logger from './utils/logger.js';
 import { sleep } from './utils/retry.js';
 import { appendJsonl } from './utils/jsonl.js';
 import { writeHeartbeat } from './utils/heartbeat.js';
-import { fetchClosedCandles, fetchVolatilityCandles, isCandleFresh } from './collector/binance.js';
+import { fetchClosedCandles, fetchVolatilityCandles, fetchSessionCandles, isCandleFresh } from './collector/binance.js';
 import {
   startRtdsBuffer,
   stopRtdsBuffer,
@@ -52,16 +52,23 @@ import { notifyTelegram, escapeHtml } from './utils/telegram.js';
 import { formatBeijingTime } from './utils/datetime.js';
 import {
   computeSignalVolatility,
-  classifyVolatilityRegime,
-  filterHighVolContinuationSignal,
   formatLogFields as formatVolatilityLogFields,
   snapshotForPending,
   formatTelegramBlock as formatVolatilityTelegramBlock,
 } from './utils/volatility.js';
+import {
+  evaluateSession,
+  advanceSessionState,
+  loadSessionState,
+  saveSessionState,
+  formatSessionLogFields,
+  formatSessionTelegramBlock,
+} from './session/sessionGate.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOGS_DIR    = join(__dirname, '..', 'logs');
 const SIGNAL_LOG  = join(LOGS_DIR, 'signals.jsonl');
+const SESSION_LOG = join(LOGS_DIR, 'session.jsonl');
 const SETTLE_LOG  = join(LOGS_DIR, 'settlements.jsonl');
 const PENDING_FILE = join(LOGS_DIR, 'pending-bet.json');
 
@@ -73,6 +80,7 @@ let pendingBet = null;
 
 let shutdownRequested = false;
 let cycleInProgress = null;
+let sessionCtx = loadSessionState();
 
 // ─────────────────────────────────────────
 // Startup
@@ -132,7 +140,7 @@ async function formatBalanceTelegramLine(balance) {
 }
 
 // ─────────────────────────────────────────
-// Volatility context (regime for signal direction)
+// Volatility context (rv metrics for logging; direction is always continuation)
 // ─────────────────────────────────────────
 
 async function fetchVolatilityContext() {
@@ -140,31 +148,31 @@ async function fetchVolatilityContext() {
   try {
     volCandles = await fetchVolatilityCandles();
   } catch (err) {
-    logger.error('[main] 波动率 K 线拉取失败 — 默认高波动延续', { error: err?.message });
+    logger.error('[main] 波动率 K 线拉取失败', { error: err?.message });
     return {
       rv: null,
       regime: 'high',
-      regimeReason: `K 线拉取失败: ${err?.message ?? 'unknown'}`,
+      regimeReason: '固定高波动延续（K 线拉取失败，仍按延续模式）',
       partial: true,
     };
   }
 
   const rv = computeSignalVolatility(volCandles);
-  const { regime, reason, partial } = classifyVolatilityRegime(rv);
 
   logger.info('[main] 波动率', {
     barTimeframe: rv.barTimeframe,
     rv_1m: rv.rv_1m,
     rv_5m: rv.rv_5m,
     rv_15m: rv.rv_15m,
-    rv5mThreshold: config.rv5mThreshold,
-    rv15mThreshold: config.rv15mThreshold,
-    regime,
-    regimeReason: reason,
-    partial: Boolean(partial),
+    mode: 'high_continuation_only',
   });
 
-  return { rv, regime, regimeReason: reason, partial: Boolean(partial) };
+  return {
+    rv,
+    regime: 'high',
+    regimeReason: '固定高波动延续模式',
+    partial: false,
+  };
 }
 
 // ─────────────────────────────────────────
@@ -177,19 +185,23 @@ async function runCycle(cycleStartTs) {
   let cycleError = null;
   let lastSignal = null;
   let lastVolCtx = null;
+  let lastSessionCtx = null;
 
   logger.info('━━━ 周期开始', {
     cycle: formatBeijingTime(cycleStartTs),
     dryRun: config.dryRun,
+    sessionState: sessionCtx.sessionState,
   });
 
   clearOrderDedup();
 
   try {
-    // ── FR-1: Fetch OHLCV ──
+    // ── FR-1: Fetch OHLCV (extended when session gate enabled) ──
     let candles;
     try {
-      candles = await fetchClosedCandles(config.candleLimit);
+      candles = config.sessionGate.enabled
+        ? await fetchSessionCandles()
+        : await fetchClosedCandles(config.candleLimit);
     } catch (err) {
       cycleStatus = 'ohlcv_failed';
       cycleError = err?.message;
@@ -217,23 +229,66 @@ async function runCycle(cycleStartTs) {
       return;
     }
 
-    // ── FR-2: Volatility regime + signal evaluation ──
+    // ── Session gate: compression ∧ volume anomaly ──
+    const evaluation = evaluateSession(candles);
+    sessionCtx = advanceSessionState(sessionCtx, evaluation, candles);
+    sessionCtx.evaluation = evaluation;
+    lastSessionCtx = sessionCtx;
+    saveSessionState(sessionCtx);
+
+    try {
+      appendJsonl(SESSION_LOG, {
+        t: new Date().toISOString(),
+        cycleStartTs,
+        ...formatSessionLogFields(sessionCtx),
+      }, config.jsonlMaxBytes);
+    } catch (err) {
+      logger.warn('[session] 写入 session 日志失败', { error: err?.message });
+    }
+
+    logger.info('[main] 会话评估', {
+      ...formatSessionLogFields(sessionCtx),
+    });
+
+    if (sessionCtx.action === 'start' || sessionCtx.action === 'stop' || sessionCtx.action === 'big_move') {
+      const emoji = sessionCtx.action === 'start' ? '▶️'
+        : sessionCtx.action === 'big_move' ? '🚀'
+        : '⏸';
+      const label = sessionCtx.action === 'start' ? '会话启动'
+        : sessionCtx.action === 'big_move' ? '大行情段'
+        : '会话停止';
+      await notifyTelegram(
+        `${emoji} <b>${label}</b>\n` +
+        `窗口: ${formatBeijingTime(cycleStartTs)}\n` +
+        `状态: <b>${sessionCtx.sessionState}</b>\n` +
+        formatSessionTelegramBlock(sessionCtx) +
+        stats.formatTelegramBlock()
+      );
+    }
+
+    if (!sessionCtx.tradeAllowed) {
+      cycleStatus = 'session_idle';
+      logger.info('[main] 会话休眠 — 跳过本周期下单', {
+        ...formatSessionLogFields(sessionCtx),
+      });
+      return;
+    }
+
+    // ── FR-2: Signal evaluation (S1/S2 high continuation) ──
     const volCtx = await fetchVolatilityContext();
     lastVolCtx = volCtx;
-    const signalObj = filterHighVolContinuationSignal(
-      buildSignal(
-        kMinus2,
-        kMinus1,
-        config.symbol,
-        config.timeframe,
-        volCtx.regime,
-      ),
-      volCtx,
+    const signalObj = buildSignal(
+      kMinus2,
+      kMinus1,
+      config.symbol,
+      config.timeframe,
+      'high',
     );
     lastSignal = signalObj.signal;
     writeSignalLog({
       ...signalObj,
       ...formatVolatilityLogFields(volCtx, signalObj),
+      ...formatSessionLogFields(sessionCtx),
     });
 
     logger.info('[main] 信号', {
@@ -255,6 +310,7 @@ async function runCycle(cycleStartTs) {
         await formatBalanceTelegramLine() +
         `波动率: ${escapeHtml(volCtx.regimeReason)}` +
         formatVolatilityTelegramBlock(volCtx.rv, volCtx.regime) +
+        formatSessionTelegramBlock(sessionCtx) +
         stats.formatTelegramBlock()
       );
       return;
@@ -402,6 +458,7 @@ async function runCycle(cycleStartTs) {
         `时间: ${formatBeijingTime(cycleStartTs)}\n` +
         `波动率: ${escapeHtml(volCtx.regimeReason)}` +
         formatVolatilityTelegramBlock(volCtx.rv, volCtx.regime) +
+        formatSessionTelegramBlock(sessionCtx) +
         stats.formatTelegramBlock()
       );
     } else if (orderResult.resting) {
@@ -444,6 +501,7 @@ async function runCycle(cycleStartTs) {
         `周期内自动监视成交\n` +
         `波动率: ${escapeHtml(volCtx.regimeReason)}` +
         formatVolatilityTelegramBlock(volCtx.rv, volCtx.regime) +
+        formatSessionTelegramBlock(sessionCtx) +
         stats.formatTelegramBlock()
       );
     } else {
@@ -476,6 +534,7 @@ async function runCycle(cycleStartTs) {
       },
       dailyLossUsd: getDailyLossUsd(),
       ...formatVolatilityLogFields(lastVolCtx),
+      ...formatSessionLogFields(lastSessionCtx),
       ...stats.formatLogFields(),
       error: cycleError,
       shutdownRequested,
@@ -712,8 +771,11 @@ async function scheduler() {
     settlement: 'chainlink-rtds',
     volatilityStrategy: {
       barTimeframe: config.volatilityBarTimeframe,
-      rv5mThreshold: config.rv5mThreshold,
-      rv15mThreshold: config.rv15mThreshold,
+      mode: 'high_continuation_only',
+    },
+    sessionGate: {
+      enabled: config.sessionGate.enabled,
+      state: sessionCtx.sessionState,
     },
     ...stats.formatLogFields(),
   });
@@ -722,6 +784,14 @@ async function scheduler() {
   stats.init();
   initDailyLoss();
   loadPending();
+  sessionCtx = loadSessionState();
+  if (!config.sessionGate.enabled) {
+    sessionCtx = {
+      ...sessionCtx,
+      sessionState: 'ACTIVE',
+      tradeAllowed: true,
+    };
+  }
 
   initChainlinkSettler({
     getPendingBet: () => pendingBet,

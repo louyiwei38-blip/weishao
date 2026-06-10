@@ -7,7 +7,7 @@
 import 'dotenv/config';
 import { fetchClosedCandles, fetchVolatilityCandles } from '../src/collector/binance.js';
 import { buildSignal } from '../src/strategy/reversalContinuation.js';
-import { computeSignalVolatility, classifyVolatilityRegime, filterHighVolContinuationSignal } from '../src/utils/volatility.js';
+import { computeSignalVolatility } from '../src/utils/volatility.js';
 import { findCurrentCycleMarket, resolveOrderPricePolicy } from '../src/market/polymarket.js';
 import { placeOrder } from '../src/trader/executor.js';
 import * as martingale from '../src/martingale/manager.js';
@@ -27,15 +27,10 @@ async function main() {
 
   const volCandles = await fetchVolatilityCandles();
   const rv = computeSignalVolatility(volCandles);
-  const { regime, reason } = classifyVolatilityRegime(rv);
-  console.log('\n[0] Volatility:', { regime, reason, rv_5m: rv.rv_5m, rv_15m: rv.rv_15m });
+  console.log('\n[0] Volatility (log only):', { rv_5m: rv.rv_5m, rv_15m: rv.rv_15m, mode: 'high_continuation_only' });
 
-  const signalObj = filterHighVolContinuationSignal(
-    buildSignal(kMinus2, kMinus1, config.symbol, config.timeframe, regime),
-    { regime, rv },
-  );
+  const signalObj = buildSignal(kMinus2, kMinus1, config.symbol, config.timeframe, 'high');
   console.log('\n[1] Signal:', signalObj.signal, signalObj.signalId, '-', signalObj.reason);
-  if (signalObj.rv_ratio != null) console.log('    rv_ratio:', signalObj.rv_ratio, 'max:', config.rvRatioMax);
 
   if (signalObj.signal === 'NONE') {
     console.log('No trade signal this cycle (normal). Pipeline OK through signal step.');

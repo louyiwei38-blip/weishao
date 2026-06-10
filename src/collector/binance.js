@@ -103,6 +103,17 @@ export async function fetchVolatilityCandles(
 }
 
 /**
+ * Fetch extended closed 5m candles for session gate evaluation.
+ */
+export async function fetchSessionCandles(limit = config.sessionGate.candleLimit) {
+  const candles = await fetchOhlcvCandles(config.symbol, config.timeframe, limit);
+  if (candles.length < 2) {
+    throw new Error(`too few session candles: ${candles.length}`);
+  }
+  return candles;
+}
+
+/**
  * Validate candle timestamp aligns with expected 5m boundary.
  */
 export function isCandleFresh(candle, cycleMs) {

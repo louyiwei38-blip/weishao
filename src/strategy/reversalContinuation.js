@@ -1,19 +1,16 @@
 /**
  * Volatility-regime reversal / continuation strategy
  *
- * High vol (rv_5m >= threshold OR rv_15m >= threshold) — continuation:
+ * Production: always high-vol continuation (S1→DOWN, S2→UP).
+ *
+ * High vol — continuation:
  *   S1: K[-2]=BULL, K[-1]=BEAR  → signal DOWN  (buy NO)
  *   S2: K[-2]=BEAR, K[-1]=BULL  → signal UP    (buy YES)
  *
- * Low vol (rv_5m < threshold AND rv_15m < threshold) — reversal:
- *   S1: K[-2]=BULL, K[-1]=BEAR  → signal UP    (buy YES)
- *   S2: K[-2]=BEAR, K[-1]=BULL  → signal DOWN  (buy NO)
- *
- * High-vol continuation may be filtered by rv_ratio in volatility.js (Scheme A).
+ * Low vol — reversal (backtest-only; not used in production):
+ *   S1 → UP, S2 → DOWN
  *
  * Same direction / DOJI → signal NONE (skip)
- *
- * All functions are pure — no side-effects, safe for offline backtesting.
  */
 
 /**

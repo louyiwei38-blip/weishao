@@ -118,7 +118,30 @@ const config = {
     return 0.00025;
   })(),
   /** High-vol continuation: skip when rv_5m/rv_15m >= this (0 = disabled) */
-  rvRatioMax: num('RV_RATIO_MAX', 1.05),
+  rvRatioMax: num('RV_RATIO_MAX', 0),
+
+  /** Session gate: vol compression ∧ volume anomaly before trading */
+  sessionGate: {
+    enabled: bool('SESSION_GATE_ENABLED', true),
+    /** 5m bars fetched for compression / volume evaluation */
+    candleLimit: num('SESSION_CANDLE_LIMIT', 100),
+    volCompressLookback: num('VOL_COMPRESS_LOOKBACK', 96),
+    volCompressPercentile: num('VOL_COMPRESS_PERCENTILE', 0.40),
+    volCompressMinBars: num('VOL_COMPRESS_MIN_BARS', 12),
+    volPeriodRatioMin: num('VOL_PERIOD_RATIO_MIN', 1.1),
+    volSpikeMult: num('VOL_SPIKE_MULT', 1.3),
+    volSpikeLookback: num('VOL_SPIKE_LOOKBACK', 12),
+    volMomentumMult: num('VOL_MOMENTUM_MULT', 1.1),
+    eventWindowEnabled: bool('EVENT_WINDOW_ENABLED', false),
+    eventWindowHours: num('EVENT_WINDOW_HOURS', 4),
+    sessionObservationBars: num('SESSION_OBSERVATION_BARS', 24),
+    /** ATR period on 5m bars for compression metric */
+    atrPeriod: num('SESSION_ATR_PERIOD', 14),
+    /** Consecutive bars of release signs → RUNNING_BIG_MOVE */
+    bigMoveConfirmBars: num('BIG_MOVE_CONFIRM_BARS', 2),
+    /** Consecutive bars of weakness → exit RUNNING_BIG_MOVE */
+    bigMoveEndBars: num('BIG_MOVE_END_BARS', 3),
+  },
 
   // Chainlink RTDS settlement (Polymarket official oracle)
   chainlink: {

@@ -81,6 +81,18 @@ export function prevSameDirStreak(candles, idx) {
   return streak;
 }
 
+function avgPastVolume(candles5m, idx, lookback) {
+  const start = idx - lookback;
+  if (start < 0) return null;
+  let sum = 0;
+  for (let j = start; j < idx; j += 1) {
+    const v = Number(candles5m[j]?.volume);
+    if (!Number.isFinite(v)) return null;
+    sum += v;
+  }
+  return sum / lookback;
+}
+
 function nearestPivot(close, pivots) {
   const dists = [
     { val: pivots.pivotHigh, d: Math.abs(close - pivots.pivotHigh) },
@@ -140,6 +152,11 @@ export function computeTradeFactors(candles5m, idx1m, i, rvHistory) {
     rangeComp = (hi - lo) / atr14;
   }
 
+  const k1Vol = Number(k1.volume);
+  const avgVol5 = avgPastVolume(candles5m, i, 5);
+  const avgVol20 = avgPastVolume(candles5m, i, 20);
+  const vol3Ago = Number(candles5m[i - 3]?.volume);
+
   return {
     t: k1.t + 5 * 60_000,
     k1t: k1.t,
@@ -160,6 +177,10 @@ export function computeTradeFactors(candles5m, idx1m, i, rvHistory) {
     signal_wick_dominance: signalDir ? wickDominance(k1, signalDir) : null,
     prev_same_dir_streak: prevSameDirStreak(candles5m, i - 1),
     breakout_dist: atr14 ? breakoutRaw / atr14 : null,
+    vol_ratio_5: Number.isFinite(k1Vol) && avgVol5 ? k1Vol / avgVol5 : null,
+    vol_ratio_20: Number.isFinite(k1Vol) && avgVol20 ? k1Vol / avgVol20 : null,
+    vol_accel: Number.isFinite(k1Vol) && Number.isFinite(vol3Ago) && vol3Ago > 0
+      ? k1Vol / vol3Ago : null,
   };
 }
 
