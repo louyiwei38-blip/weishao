@@ -217,11 +217,7 @@ async function runCycle(cycleStartTs) {
     }
 
     if (config.sessionGate.enabled && candles.length < minSessionCandles()) {
-      logger.warn('[main] 会话评估 K 线偏少 — 压缩因子可能无法计算', {
-        got: candles.length,
-        need: minSessionCandles(),
-        hint: `提高 SESSION_CANDLE_LIMIT (当前 ${config.sessionGate.candleLimit})`,
-      });
+      logger.warn('[main] 会话评估 K 线不足', { got: candles.length, need: minSessionCandles() });
     }
 
     // ── Settle the PREVIOUS cycle's bet (Chainlink; OHLCV used for cross-check) ──
@@ -238,8 +234,8 @@ async function runCycle(cycleStartTs) {
       return;
     }
 
-    // ── Session gate: compression ∧ volume anomaly ──
-    const evaluation = evaluateSession(candles);
+    // ── Session gate: 5m bar volume burst (default burst-only; optional scheduled windows) ──
+    const evaluation = evaluateSession(candles, Date.now(), sessionCtx);
     sessionCtx = advanceSessionState(sessionCtx, evaluation, candles);
     sessionCtx.evaluation = evaluation;
     lastSessionCtx = sessionCtx;
@@ -259,13 +255,9 @@ async function runCycle(cycleStartTs) {
       ...formatSessionLogFields(sessionCtx),
     });
 
-    if (sessionCtx.action === 'start' || sessionCtx.action === 'stop' || sessionCtx.action === 'big_move') {
-      const emoji = sessionCtx.action === 'start' ? '▶️'
-        : sessionCtx.action === 'big_move' ? '🚀'
-        : '⏸';
-      const label = sessionCtx.action === 'start' ? '会话启动'
-        : sessionCtx.action === 'big_move' ? '大行情段'
-        : '会话停止';
+    if (sessionCtx.action === 'start' || sessionCtx.action === 'stop') {
+      const emoji = sessionCtx.action === 'start' ? '▶️' : '⏸';
+      const label = sessionCtx.action === 'start' ? '门控开启' : '门控关闭';
       await notifyTelegram(
         `${emoji} <b>${label}</b>\n` +
         `窗口: ${formatBeijingTime(cycleStartTs)}\n` +

@@ -50,6 +50,10 @@ const config = {
 
   // OHLCV data source (binance | okx | bybit). If primary fails, auto-fallback.
   ohlcvExchange: optional('OHLCV_EXCHANGE', 'okx'),
+  /** spot | swap — OKX USDT 永续用 swap */
+  ohlcvMarketType: optional('OHLCV_MARKET_TYPE', 'swap'),
+  /** Override CCXT symbol; empty → swap: BTC/USDT:USDT from TRADING_SYMBOL */
+  ohlcvSymbol: optional('OHLCV_SYMBOL', ''),
 
   binance: {
     apiKey: optional('BINANCE_API_KEY', ''),
@@ -120,11 +124,22 @@ const config = {
   /** High-vol continuation: skip when rv_5m/rv_15m >= this (0 = disabled) */
   rvRatioMax: num('RV_RATIO_MAX', 0),
 
-  /** Session gate: vol compression ∧ volume anomaly before trading */
+  /** Session gate: burst-only by default — 5m bar volume ≥ threshold opens gate (refresh, no stack) */
   sessionGate: {
     enabled: bool('SESSION_GATE_ENABLED', true),
-    /** 5m bars fetched for compression / volume evaluation (≥ lookback + ATR period) */
-    candleLimit: num('SESSION_CANDLE_LIMIT', 120),
+    /** 5m bars fetched for bar-volume evaluation */
+    candleLimit: num('SESSION_CANDLE_LIMIT', 5),
+    eventWindowEnabled: bool('EVENT_WINDOW_ENABLED', false),
+    eventWindowHours: num('EVENT_WINDOW_HOURS', 1),
+    /** Fixed US session window in Beijing time (NY trading days only) */
+    usMarketOpenEnabled: bool('US_MARKET_OPEN_ENABLED', false),
+    usMarketWindowStartBj: optional('US_MARKET_WINDOW_START_BJ', '19:30'),
+    usMarketWindowEndBj: optional('US_MARKET_WINDOW_END_BJ', '23:59'),
+    /** Closed 5m bar USDT notional (volume×close) to trigger burst window */
+    barVolumeUsdtMin: num('BAR_VOLUME_USDT_MIN', 25_000_000),
+    /** Burst gate duration after trigger; re-trigger refreshes from now (no stack) */
+    volumeBurstMinutes: num('VOLUME_BURST_MINUTES', 20),
+    /** @deprecated legacy compress/volume gate — unused in production gate v2 */
     volCompressLookback: num('VOL_COMPRESS_LOOKBACK', 96),
     volCompressPercentile: num('VOL_COMPRESS_PERCENTILE', 0.40),
     volCompressMinBars: num('VOL_COMPRESS_MIN_BARS', 12),
@@ -132,14 +147,9 @@ const config = {
     volSpikeMult: num('VOL_SPIKE_MULT', 1.3),
     volSpikeLookback: num('VOL_SPIKE_LOOKBACK', 12),
     volMomentumMult: num('VOL_MOMENTUM_MULT', 1.1),
-    eventWindowEnabled: bool('EVENT_WINDOW_ENABLED', false),
-    eventWindowHours: num('EVENT_WINDOW_HOURS', 4),
     sessionObservationBars: num('SESSION_OBSERVATION_BARS', 24),
-    /** ATR period on 5m bars for compression metric */
     atrPeriod: num('SESSION_ATR_PERIOD', 14),
-    /** Consecutive bars of release signs → RUNNING_BIG_MOVE */
     bigMoveConfirmBars: num('BIG_MOVE_CONFIRM_BARS', 2),
-    /** Consecutive bars of weakness → exit RUNNING_BIG_MOVE */
     bigMoveEndBars: num('BIG_MOVE_END_BARS', 3),
   },
 

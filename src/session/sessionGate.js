@@ -3,10 +3,8 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 import config from '../config.js';
-import {
-  computePeriodVolRatio,
-  PERIOD_LONG_BARS,
-} from '../utils/volumeFilter.js';
+import { computePeriodVolRatio, computeBarUsdtNotional, PERIOD_LONG_BARS } from '../utils/volumeFilter.js';
+import { evaluateCombinedEventWindow } from '../utils/usMarketOpen.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = join(__dirname, '..', '..', 'logs', 'session-state.json');
@@ -22,10 +20,10 @@ function sg() {
   return config.sessionGate;
 }
 
-/** Minimum closed 5m bars: lookback window + ATR warm-up. */
+/** Minimum closed 5m bars for bar-volume gate (legacy compress gate needs more). */
 export function minSessionCandles() {
-  const { volCompressLookback, atrPeriod } = sg();
-  return volCompressLookback + atrPeriod;
+  if (!config.sessionGate.enabled) return 2;
+  return 2;
 }
 
 /** @param {Array<{ high: number, low: number, close: number, open?: number, volume?: number }>} candles */
@@ -222,33 +220,32 @@ export function evaluateVolumeAnomaly(candles5m, idx) {
 }
 
 /**
- * Element 3 — optional event window (log only, never vetoes).
+ * Scheduled always-open window: macro calendar ±hours OR US BJ session.
+ * When both eventWindowEnabled and usMarketOpenEnabled are false → burst-only (never passes).
  */
+export function evaluateScheduledWindow(nowMs = Date.now()) {
+  const { eventWindowEnabled, eventWindowHours, usMarketOpenEnabled } = sg();
+
+  if (!eventWindowEnabled && !usMarketOpenEnabled) {
+    return { pass: false, enabled: false, detail: '仅放量窗（定时常开已关闭）' };
+  }
+
+  const events = eventWindowEnabled ? loadEventCalendar() : [];
+  return evaluateCombinedEventWindow(nowMs, events, eventWindowHours, {
+    usOpen: usMarketOpenEnabled,
+    usWindow: {
+      startBj: sg().usMarketWindowStartBj,
+      endBj: sg().usMarketWindowEndBj,
+    },
+  });
+}
+
+/** @deprecated alias — use evaluateScheduledWindow */
 export function evaluateEventWindow(nowMs = Date.now()) {
-  const { eventWindowEnabled, eventWindowHours } = sg();
-  if (!eventWindowEnabled) {
-    return { pass: false, enabled: false, detail: '未启用，不参与否决' };
+  if (!sg().eventWindowEnabled) {
+    return { pass: false, enabled: false, detail: '事件窗口未启用' };
   }
-
-  const events = loadEventCalendar();
-  const windowMs = eventWindowHours * 60 * 60 * 1000;
-  const nearby = events.filter((e) => Math.abs(e.ts - nowMs) <= windowMs);
-
-  if (nearby.length === 0) {
-    return {
-      pass: false,
-      enabled: true,
-      detail: `±${eventWindowHours}h 内无日历事件`,
-    };
-  }
-
-  const label = nearby.map((e) => e.label).join('; ');
-  return {
-    pass: true,
-    enabled: true,
-    detail: `催化临近: ${label}`,
-    events: nearby.map((e) => ({ label: e.label, ts: e.ts })),
-  };
+  return evaluateScheduledWindow(nowMs);
 }
 
 function loadEventCalendar() {
@@ -336,58 +333,94 @@ function detectBigMoveEnded(candles5m, idx, volCompression, volumeAnomaly) {
 }
 
 /**
- * Full session evaluation for the latest 5m bar.
+ * Session gate: volume burst (default) or optional scheduled windows; burst refresh, no stack.
  * @param {Array} candles5m closed 5m OHLCV, oldest first
  * @param {number} [nowMs]
+ * @param {{ volumeBurstUntilMs?: number|null }} [prevState]
  */
-export function evaluateSession(candles5m, nowMs = Date.now()) {
+export function evaluateSession(candles5m, nowMs = Date.now(), prevState = {}) {
   if (!config.sessionGate.enabled) {
     return {
       sessionGateEnabled: false,
       evaluationPassed: true,
-      volCompression: { pass: true, detail: '门控已关闭' },
-      volumeAnomaly: { pass: true, detail: '门控已关闭' },
-      eventWindow: { pass: false, enabled: false, detail: '门控已关闭' },
-      release: { hasRelease: true, detail: '门控已关闭' },
-      action: 'continue',
+      tradeAllowed: true,
+      gateMode: 'disabled',
+      scheduledWindow: { pass: true, detail: '门控已关闭' },
+      volumeBurst: null,
+      barUsdt: null,
+      volumeBurstUntilMs: null,
       passReason: 'SESSION_GATE_ENABLED=false',
     };
   }
 
   const idx = candles5m.length - 1;
-  const volCompression = evaluateVolCompression(candles5m, idx);
-  const volumeAnomaly = evaluateVolumeAnomaly(candles5m, idx);
-  const eventWindow = evaluateEventWindow(nowMs);
-  const release = detectRelease(candles5m, idx, volCompression.metrics);
+  const bar = candles5m[idx];
+  const barUsdt = computeBarUsdtNotional(bar);
+  const { barVolumeUsdtMin, volumeBurstMinutes } = sg();
+  const scheduledWindow = evaluateScheduledWindow(nowMs);
 
-  const evaluationPassed = volCompression.pass && volumeAnomaly.pass;
-  const passReason = evaluationPassed
-    ? '压缩∧异动同时满足'
-    : [
-      !volCompression.pass ? '压缩未满足' : null,
-      !volumeAnomaly.pass ? '异动未满足' : null,
-    ].filter(Boolean).join('；');
+  let volumeBurstUntilMs = prevState.volumeBurstUntilMs ?? null;
+  const barTriggered = barUsdt != null && barUsdt >= barVolumeUsdtMin;
+  if (barTriggered) {
+    volumeBurstUntilMs = nowMs + volumeBurstMinutes * 60_000;
+  }
+
+  const burstActive = volumeBurstUntilMs != null && nowMs < volumeBurstUntilMs;
+  const scheduledActive = scheduledWindow.pass;
+
+  let gateMode = 'idle';
+  let tradeAllowed = false;
+  if (scheduledActive) {
+    gateMode = 'scheduled';
+    tradeAllowed = true;
+  } else if (burstActive) {
+    gateMode = 'volume_burst';
+    tradeAllowed = true;
+  }
+
+  const passReason = scheduledActive
+    ? `定时常开: ${scheduledWindow.detail}`
+    : burstActive
+      ? `放量窗口至 ${new Date(volumeBurstUntilMs).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })} (本根 ${formatUsdtM(barUsdt)}${barTriggered ? ' 触发刷新' : ''})`
+      : barUsdt != null
+        ? `休眠 — 本根 ${formatUsdtM(barUsdt)} < ${formatUsdtM(barVolumeUsdtMin)}`
+        : '休眠 — 成交额不可用';
 
   return {
     sessionGateEnabled: true,
-    barTime: candles5m[idx]?.t ?? null,
-    volCompression,
-    volumeAnomaly,
-    eventWindow,
-    release,
-    evaluationPassed,
+    barTime: bar?.t ?? null,
+    scheduledWindow,
+    volumeBurst: {
+      active: burstActive,
+      untilMs: volumeBurstUntilMs,
+      untilBj: volumeBurstUntilMs
+        ? new Date(volumeBurstUntilMs).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
+        : null,
+      barTriggered,
+      thresholdUsdt: barVolumeUsdtMin,
+      durationMinutes: volumeBurstMinutes,
+    },
+    barUsdt,
+    gateMode,
+    evaluationPassed: tradeAllowed,
+    tradeAllowed,
+    volumeBurstUntilMs,
     passReason,
-    riskPreference: 'miss_big_move > small_loss',
   };
+}
+
+function formatUsdtM(n) {
+  if (n == null) return '—';
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
 }
 
 export function loadSessionState() {
   const defaults = {
     sessionState: 'IDLE',
     sessionStartedAt: null,
-    barsInSession: 0,
-    consecutiveEvalFail: 0,
-    bigMoveConfirmed: false,
+    volumeBurstUntilMs: null,
     lastEvaluation: null,
     updatedAt: null,
   };
@@ -400,6 +433,7 @@ export function loadSessionState() {
       ...defaults,
       ...raw,
       sessionState: SESSION_STATES.includes(raw.sessionState) ? raw.sessionState : 'IDLE',
+      volumeBurstUntilMs: Number.isFinite(raw.volumeBurstUntilMs) ? raw.volumeBurstUntilMs : null,
     };
   } catch {
     return { ...defaults };
@@ -416,8 +450,7 @@ export function saveSessionState(state) {
 }
 
 /**
- * Advance session state machine from evaluation + candles context.
- * @returns {{ sessionState, action, evaluationPassed, bigMoveConfirmed, ... }}
+ * Apply evaluation → session context; detect start/stop transitions.
  */
 export function advanceSessionState(prev, evaluation, candles5m) {
   if (!config.sessionGate.enabled) {
@@ -426,116 +459,30 @@ export function advanceSessionState(prev, evaluation, candles5m) {
       sessionState: 'ACTIVE',
       action: 'continue',
       evaluationPassed: true,
-      bigMoveConfirmed: false,
       tradeAllowed: true,
+      gateMode: 'disabled',
     };
   }
 
-  const idx = candles5m.length - 1;
-  const obsBars = sg().sessionObservationBars;
-  let {
-    sessionState,
-    sessionStartedAt,
-    barsInSession,
-    consecutiveEvalFail,
-    bigMoveConfirmed,
-  } = prev;
-
-  const { evaluationPassed, release, volCompression, volumeAnomaly } = evaluation;
+  const tradeAllowed = evaluation.tradeAllowed === true;
+  const prevAllowed = prev.tradeAllowed === true;
   let action = 'none';
+  if (tradeAllowed && !prevAllowed) action = 'start';
+  else if (!tradeAllowed && prevAllowed) action = 'stop';
+  else if (tradeAllowed && evaluation.volumeBurst?.barTriggered) action = 'burst_refresh';
 
-  if (sessionState === 'IDLE') {
-    if (evaluationPassed) {
-      sessionState = 'ACTIVE';
-      action = 'start';
-      sessionStartedAt = evaluation.barTime ?? Date.now();
-      barsInSession = 1;
-      consecutiveEvalFail = 0;
-      bigMoveConfirmed = false;
-    } else {
-      action = 'idle';
-    }
-
-    return buildResult({
-      sessionState,
-      action,
-      sessionStartedAt,
-      barsInSession,
-      consecutiveEvalFail,
-      bigMoveConfirmed,
-      evaluation,
-      tradeAllowed: sessionState !== 'IDLE',
-    });
-  }
-
-  barsInSession += 1;
-  if (evaluationPassed) {
-    consecutiveEvalFail = 0;
-  } else {
-    consecutiveEvalFail += 1;
-  }
-
-  if (!bigMoveConfirmed && detectBigMoveConfirmed(candles5m, idx, volCompression, volumeAnomaly, release)) {
-    bigMoveConfirmed = true;
-    sessionState = 'RUNNING_BIG_MOVE';
-    action = 'big_move';
-    return buildResult({
-      sessionState,
-      action,
-      sessionStartedAt,
-      barsInSession,
-      consecutiveEvalFail,
-      bigMoveConfirmed,
-      evaluation,
-      tradeAllowed: true,
-    });
-  }
-
-  if (sessionState === 'RUNNING_BIG_MOVE') {
-    if (detectBigMoveEnded(candles5m, idx, volCompression, volumeAnomaly)) {
-      sessionState = 'IDLE';
-      action = 'stop';
-      sessionStartedAt = null;
-      barsInSession = 0;
-      consecutiveEvalFail = 0;
-      bigMoveConfirmed = false;
-    } else {
-      action = 'continue';
-    }
-
-    return buildResult({
-      sessionState,
-      action,
-      sessionStartedAt,
-      barsInSession,
-      consecutiveEvalFail,
-      bigMoveConfirmed: sessionState === 'RUNNING_BIG_MOVE',
-      evaluation,
-      tradeAllowed: sessionState !== 'IDLE',
-    });
-  }
-
-  // ACTIVE — default continue; stop only on long fail + no release
-  if (consecutiveEvalFail >= obsBars && !release.hasRelease) {
-    sessionState = 'IDLE';
-    action = 'stop';
-    sessionStartedAt = null;
-    barsInSession = 0;
-    consecutiveEvalFail = 0;
-    bigMoveConfirmed = false;
-  } else {
-    action = 'continue';
-  }
+  const sessionState = tradeAllowed ? 'ACTIVE' : 'IDLE';
 
   return buildResult({
     sessionState,
     action,
-    sessionStartedAt,
-    barsInSession,
-    consecutiveEvalFail,
-    bigMoveConfirmed,
+    sessionStartedAt: tradeAllowed
+      ? (prev.sessionStartedAt ?? evaluation.barTime ?? Date.now())
+      : null,
+    volumeBurstUntilMs: evaluation.volumeBurstUntilMs ?? null,
+    gateMode: evaluation.gateMode,
     evaluation,
-    tradeAllowed: sessionState !== 'IDLE',
+    tradeAllowed,
   });
 }
 
@@ -545,10 +492,10 @@ function buildResult(fields) {
     lastEvaluation: {
       evaluationPassed: fields.evaluation.evaluationPassed,
       passReason: fields.evaluation.passReason,
-      volCompression: fields.evaluation.volCompression,
-      volumeAnomaly: fields.evaluation.volumeAnomaly,
-      eventWindow: fields.evaluation.eventWindow,
-      release: fields.evaluation.release,
+      gateMode: fields.evaluation.gateMode,
+      scheduledWindow: fields.evaluation.scheduledWindow,
+      volumeBurst: fields.evaluation.volumeBurst,
+      barUsdt: fields.evaluation.barUsdt,
       barTime: fields.evaluation.barTime,
     },
   };
@@ -560,16 +507,14 @@ export function formatSessionLogFields(sessionCtx) {
   return {
     sessionState: sessionCtx.sessionState ?? null,
     sessionAction: sessionCtx.action ?? null,
+    gateMode: ev.gateMode ?? sessionCtx.gateMode ?? null,
     evaluationPassed: ev.evaluationPassed ?? null,
     sessionPassReason: ev.passReason ?? null,
-    volCompression: ev.volCompression ?? null,
-    volumeAnomaly: ev.volumeAnomaly ?? null,
-    eventWindow: ev.eventWindow ?? null,
-    release: ev.release ?? null,
+    scheduledWindow: ev.scheduledWindow ?? null,
+    volumeBurst: ev.volumeBurst ?? null,
+    barUsdt: ev.barUsdt ?? null,
+    volumeBurstUntilMs: sessionCtx.volumeBurstUntilMs ?? null,
     tradeAllowed: sessionCtx.tradeAllowed ?? null,
-    barsInSession: sessionCtx.barsInSession ?? null,
-    consecutiveEvalFail: sessionCtx.consecutiveEvalFail ?? null,
-    bigMoveConfirmed: sessionCtx.bigMoveConfirmed ?? null,
   };
 }
 
@@ -578,29 +523,33 @@ export function formatSessionTelegramBlock(sessionCtx) {
 
   const ev = sessionCtx.evaluation ?? sessionCtx.lastEvaluation;
   const state = sessionCtx.sessionState ?? 'IDLE';
-  const stateZh = {
-    IDLE: '休眠',
-    ACTIVE: '运行中',
-    RUNNING_BIG_MOVE: '大行情段',
-  }[state] ?? state;
+  const stateZh = { IDLE: '休眠', ACTIVE: '运行中', RUNNING_BIG_MOVE: '运行中' }[state] ?? state;
+  const modeZh = {
+    scheduled: '定时常开',
+    volume_burst: '放量窗口',
+    idle: '休眠',
+    disabled: '门控关闭',
+  }[ev.gateMode] ?? ev.gateMode ?? '—';
 
-  const c1 = ev.volCompression?.pass ? '✓' : '✗';
-  const c2 = ev.volumeAnomaly?.pass ? '✓' : '✗';
-  const t1 = ev.volCompression?.thresholds
-    ? `p${((ev.volCompression.thresholds.percentile ?? 0) * 100).toFixed(0)}/${ev.volCompression.thresholds.minBars}根`
-    : '';
-  const t2 = ev.volumeAnomaly?.thresholds
-    ? `ratio>${ev.volumeAnomaly.thresholds.periodRatioMin} spike×${ev.volumeAnomaly.thresholds.spikeMult}`
-    : '';
-  const ev3 = ev.eventWindow?.enabled
-    ? `\n催化: ${ev.eventWindow.pass ? '✓' : '—'} ${ev.eventWindow.detail}`
-    : '';
+  const barStr = ev.barUsdt != null ? `${formatUsdtM(ev.barUsdt)} USDT` : '—';
+  const burst = ev.volumeBurst;
+  const burstLine = burst?.active
+    ? `\n放量窗: 至 ${burst.untilBj}${burst.barTriggered ? ' (本根刷新)' : ''}`
+    : burst?.thresholdUsdt
+      ? `\n放量触发: 本根 ≥ ${formatUsdtM(burst.thresholdUsdt)} → 开 ${burst.durationMinutes} 分钟`
+      : '';
+
+  const sched = ev.scheduledWindow?.pass
+    ? `\n定时: ✓ ${ev.scheduledWindow.detail}`
+    : ev.scheduledWindow?.enabled !== false
+      ? `\n定时: ✗ ${ev.scheduledWindow?.detail ?? '非事件/美股时段'}`
+      : '';
 
   return (
-    `\n🎯 <b>会话</b>: <b>${stateZh}</b> (${sessionCtx.action ?? '—'})\n` +
-    `评估: ${ev.evaluationPassed ? '✓ 通过' : '✗ 未通过'} — ${ev.passReason ?? '—'}\n` +
-    `压缩 ${c1}${t1 ? ` [${t1}]` : ''}: ${ev.volCompression?.detail ?? '—'}\n` +
-    `异动 ${c2}${t2 ? ` [${t2}]` : ''}: ${ev.volumeAnomaly?.detail ?? '—'}` +
-    ev3
+    `\n🎯 <b>会话</b>: <b>${stateZh}</b> · ${modeZh} (${sessionCtx.action ?? '—'})\n` +
+    `门控: ${ev.evaluationPassed ? '✓ 开启' : '✗ 关闭'} — ${ev.passReason ?? '—'}\n` +
+    `本根成交额: ${barStr}` +
+    sched +
+    burstLine
   );
 }

@@ -8,13 +8,49 @@ import { withRetry } from '../utils/retry.js';
 const EXCHANGE_CHAIN = buildExchangeChain();
 
 function buildExchangeChain() {
-  const primary = (config.ohlcvExchange || 'binance').toLowerCase();
+  const primary = (config.ohlcvExchange || 'okx').toLowerCase();
   const fallbacks = ['okx', 'bybit', 'binance'];
   const ordered = [primary, ...fallbacks.filter((e) => e !== primary)];
   return [...new Set(ordered)];
 }
 
 const exchangeCache = {};
+
+/** CCXT symbol + OKX options for spot or USDT-margined swap. */
+export function resolveOhlcvMarket(marketType = config.ohlcvMarketType, symbolOverride = null) {
+  const market = (marketType || 'swap').toLowerCase();
+  if (market === 'spot') {
+    const symbol = symbolOverride || config.ohlcvSymbol || config.symbol;
+    return { marketType: 'spot', symbol, okxOptions: {}, label: 'spot' };
+  }
+  const symbol = symbolOverride || config.ohlcvSymbol || swapSymbolFrom(config.symbol);
+  return {
+    marketType: 'swap',
+    symbol,
+    okxOptions: { defaultType: 'swap' },
+    label: 'USDT永续',
+  };
+}
+
+function swapSymbolFrom(symbol) {
+  if (symbol.includes(':')) return symbol;
+  const [base, quote] = symbol.split('/');
+  return `${base}/${quote}:${quote}`;
+}
+
+function getExchangeOptions(exchangeId) {
+  if (exchangeId === 'okx' || exchangeId === 'bybit') {
+    return resolveOhlcvMarket().okxOptions;
+  }
+  if (config.ohlcvMarketType === 'swap') {
+    return { defaultType: 'swap' };
+  }
+  return {};
+}
+
+function getOhlcvSymbol(_exchangeId) {
+  return resolveOhlcvMarket().symbol;
+}
 
 function getExchange(id) {
   if (!exchangeCache[id]) {
@@ -25,6 +61,7 @@ function getExchange(id) {
       secret: config.binance.secret || undefined,
       enableRateLimit: true,
       timeout: 20_000,
+      options: getExchangeOptions(id),
     });
   }
   return exchangeCache[id];
@@ -39,8 +76,9 @@ async function fetchOhlcvCandles(symbol, timeframe, limit) {
   for (const exchangeId of EXCHANGE_CHAIN) {
     try {
       const ex = getExchange(exchangeId);
+      const fetchSymbol = getOhlcvSymbol(exchangeId);
       const raw = await withRetry(
-        () => ex.fetchOHLCV(symbol, timeframe, undefined, limit + 1),
+        () => ex.fetchOHLCV(fetchSymbol, timeframe, undefined, limit + 1),
         { label: `fetchOHLCV(${exchangeId},${timeframe})`, maxAttempts: 2, baseDelayMs: 1000 }
       );
 
@@ -63,6 +101,8 @@ async function fetchOhlcvCandles(symbol, timeframe, limit) {
 
       logger.debug('[collector] K 线已拉取', {
         exchange: exchangeId,
+        marketType: config.ohlcvMarketType,
+        symbol: fetchSymbol,
         timeframe,
         count: candles.length,
         last: candles.at(-1),

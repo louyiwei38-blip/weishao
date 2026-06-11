@@ -67,6 +67,14 @@ export function computePeriodVolRatio(
   return roundRatio(shortAvg / longAvg);
 }
 
+/** Single closed 5m bar USDT notional (base volume × close). */
+export function computeBarUsdtNotional(candle) {
+  const v = Number(candle?.volume);
+  const close = Number(candle?.close);
+  if (!Number.isFinite(v) || !Number.isFinite(close) || v <= 0 || close <= 0) return null;
+  return roundUsdt(v * close);
+}
+
 /**
  * Snapshot volume metrics at the last candle index.
  * @param {Array<{ volume: number, close: number }>} candles5m closed 5m bars, oldest first
