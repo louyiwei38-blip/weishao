@@ -22,6 +22,12 @@ function sg() {
   return config.sessionGate;
 }
 
+/** Minimum closed 5m bars: lookback window + ATR warm-up. */
+export function minSessionCandles() {
+  const { volCompressLookback, atrPeriod } = sg();
+  return volCompressLookback + atrPeriod;
+}
+
 /** @param {Array<{ high: number, low: number, close: number, open?: number, volume?: number }>} candles */
 export function computeAtr(candles, idx, period = sg().atrPeriod) {
   if (!Array.isArray(candles) || idx < period) return null;
@@ -86,17 +92,32 @@ export function evaluateVolCompression(candles5m, idx) {
     atrPeriod,
   };
 
-  if (!Array.isArray(candles5m) || idx < volCompressLookback - 1 || idx < atrPeriod) {
-    return { pass: false, detail: '样本不足', thresholds, metrics: null };
+  if (!Array.isArray(candles5m) || idx < atrPeriod) {
+    return {
+      pass: false,
+      detail: `K线不足: 需要≥${minSessionCandles()}根, 当前${candles5m?.length ?? 0}根`,
+      thresholds,
+      metrics: null,
+    };
+  }
+
+  const windowStart = idx - volCompressLookback + 1;
+  if (windowStart < atrPeriod) {
+    return {
+      pass: false,
+      detail: `K线不足: 需要≥${minSessionCandles()}根(lookback=${volCompressLookback}+atr=${atrPeriod}), 当前${candles5m.length}根`,
+      thresholds,
+      metrics: null,
+    };
   }
 
   const series = [];
-  for (let i = idx - volCompressLookback + 1; i <= idx; i += 1) {
+  for (let i = windowStart; i <= idx; i += 1) {
     const atrVal = computeAtr(candles5m, i, atrPeriod);
     const rvVal = computeRvPct(candles5m, i, atrPeriod);
     const close = Number(candles5m[i]?.close);
     if (atrVal == null || rvVal == null || !Number.isFinite(close) || close <= 0) {
-      return { pass: false, detail: 'RV/ATR 样本不足', thresholds, metrics: null };
+      return { pass: false, detail: `RV/ATR 计算失败 @bar${i}`, thresholds, metrics: null };
     }
     series.push({ i, atrPct: atrVal / close, rvPct: rvVal });
   }

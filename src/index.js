@@ -63,6 +63,7 @@ import {
   saveSessionState,
   formatSessionLogFields,
   formatSessionTelegramBlock,
+  minSessionCandles,
 } from './session/sessionGate.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -213,6 +214,14 @@ async function runCycle(cycleStartTs) {
       cycleStatus = 'insufficient_candles';
       logger.warn('[main] K 线数量不足', { got: candles.length });
       return;
+    }
+
+    if (config.sessionGate.enabled && candles.length < minSessionCandles()) {
+      logger.warn('[main] 会话评估 K 线偏少 — 压缩因子可能无法计算', {
+        got: candles.length,
+        need: minSessionCandles(),
+        hint: `提高 SESSION_CANDLE_LIMIT (当前 ${config.sessionGate.candleLimit})`,
+      });
     }
 
     // ── Settle the PREVIOUS cycle's bet (Chainlink; OHLCV used for cross-check) ──

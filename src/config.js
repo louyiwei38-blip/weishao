@@ -123,8 +123,8 @@ const config = {
   /** Session gate: vol compression ∧ volume anomaly before trading */
   sessionGate: {
     enabled: bool('SESSION_GATE_ENABLED', true),
-    /** 5m bars fetched for compression / volume evaluation */
-    candleLimit: num('SESSION_CANDLE_LIMIT', 100),
+    /** 5m bars fetched for compression / volume evaluation (≥ lookback + ATR period) */
+    candleLimit: num('SESSION_CANDLE_LIMIT', 120),
     volCompressLookback: num('VOL_COMPRESS_LOOKBACK', 96),
     volCompressPercentile: num('VOL_COMPRESS_PERCENTILE', 0.40),
     volCompressMinBars: num('VOL_COMPRESS_MIN_BARS', 12),
