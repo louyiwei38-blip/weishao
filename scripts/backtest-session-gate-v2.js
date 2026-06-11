@@ -15,6 +15,7 @@ import { computeBarUsdtNotional } from '../src/utils/volumeFilter.js';
 import { evaluateCombinedEventWindow, listUsMarketWindows, DEFAULT_US_WINDOW } from '../src/utils/usMarketOpen.js';
 import { simulateMartingale, summarizeTrades } from './lib/backtestFactors.js';
 import { ensureOkxCandles } from './lib/okxOhlcv.js';
+import { resolveBurstThresholdUsdt } from '../src/session/sessionGate.js';
 import { resolveOhlcvMarket } from '../src/collector/binance.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -101,15 +102,20 @@ function precomputeBars(c5, fromMs, toMs, events, eventWindowHours, burstOnly = 
   return rows;
 }
 
-function simulateBurstTimeline(rows, barVolumeUsdtMin, volumeBurstMinutes) {
+function simulateBurstTimeline(c5, rows, volumeBurstMinutes, { fixedThresholdUsdt = null } = {}) {
   let volumeBurstUntilMs = null;
   let burstTriggers = 0;
   const burstMs = volumeBurstMinutes * 60_000;
   const timeline = [];
   const modeBars = { scheduled: 0, volume_burst: 0, idle: 0 };
+  const idxByT = new Map(c5.map((b, i) => [b.t, i]));
 
   for (const row of rows) {
-    const barTriggered = row.barUsdt != null && row.barUsdt >= barVolumeUsdtMin;
+    const idx = idxByT.get(row.t);
+    const { thresholdUsdt } = fixedThresholdUsdt != null
+      ? { thresholdUsdt: fixedThresholdUsdt }
+      : resolveBurstThresholdUsdt(c5, idx ?? 0);
+    const barTriggered = row.barUsdt != null && row.barUsdt >= thresholdUsdt;
     if (barTriggered) {
       volumeBurstUntilMs = row.nowMs + burstMs;
       burstTriggers += 1;
@@ -131,17 +137,19 @@ function simulateBurstTimeline(rows, barVolumeUsdtMin, volumeBurstMinutes) {
       gateMode,
       barUsdt: row.barUsdt,
       barTriggered,
+      thresholdUsdt,
     });
   }
 
   return { timeline, modeBars, burstTriggers };
 }
 
-function runBacktest(c5, rows, fromMs, toMs, barVolumeUsdtMin, volumeBurstMinutes) {
+function runBacktest(c5, rows, fromMs, toMs, volumeBurstMinutes, { fixedThresholdUsdt = null } = {}) {
   const { timeline, modeBars, burstTriggers } = simulateBurstTimeline(
+    c5,
     rows,
-    barVolumeUsdtMin,
     volumeBurstMinutes,
+    { fixedThresholdUsdt },
   );
   const gatedTrades = buildGatedTrades(c5, timeline, fromMs, toMs);
   const totalBars = timeline.length;
@@ -149,7 +157,7 @@ function runBacktest(c5, rows, fromMs, toMs, barVolumeUsdtMin, volumeBurstMinute
   const gated = summarizeTrades(gatedTrades);
   const burst = pnlByMode(gatedTrades, 'volume_burst');
   return {
-    barVolumeUsdtMin,
+    fixedThresholdUsdt,
     gateOpenPct: gateOpenBars / (totalBars || 1),
     modeBarsPct: {
       scheduled: modeBars.scheduled / (totalBars || 1),
@@ -211,7 +219,7 @@ async function main() {
       .map((s) => Number(s.trim()))
       .filter((n) => Number.isFinite(n) && n > 0);
     const sweepResults = durations.map((mins) => {
-      const r = runBacktest(c5, rows, fromMs, toMs, barVolumeUsdtMin, mins);
+      const r = runBacktest(c5, rows, fromMs, toMs, mins, { fixedThresholdUsdt: barVolumeUsdtMin });
       r.volumeBurstMinutes = mins;
       r.pnlDelta = r.gated.pnl - alwaysOnTrades.pnl;
       return r;
@@ -269,7 +277,7 @@ async function main() {
   if (hasFlag('sweep-volume')) {
     const thresholds = burstOnly ? BURST_SWEEP_THRESHOLDS_M : SWEEP_THRESHOLDS_M;
     const sweepResults = thresholds.map((m) => {
-      const r = runBacktest(c5, rows, fromMs, toMs, m * 1_000_000, volumeBurstMinutes);
+      const r = runBacktest(c5, rows, fromMs, toMs, volumeBurstMinutes, { fixedThresholdUsdt: m * 1_000_000 });
       r.pnlDelta = r.gated.pnl - alwaysOnTrades.pnl;
       r.score = r.gated.pnl + r.pnlDelta * 0.3 + (r.burst.pnl > 0 ? r.burst.pnl * 0.2 : 0);
       return r;
@@ -288,7 +296,7 @@ async function main() {
       alwaysOn: alwaysOnTrades,
       barUsdtDistribution: barDist,
       sweep: sweepResults.map((r) => ({
-        thresholdM: r.barVolumeUsdtMin / 1e6,
+        thresholdM: r.fixedThresholdUsdt / 1e6,
         gateOpenPct: r.gateOpenPct,
         burstCoveragePct: r.modeBarsPct.volume_burst,
         burstTriggers: r.burstTriggers,
@@ -317,7 +325,7 @@ async function main() {
     console.log('\n阈值(M) | 门控% | 触发 | 交易 | 胜率 | 止损 | 门控PnL | ROI% | Δ常开');
     for (const r of sweepResults) {
       console.log(
-        `${String(r.barVolumeUsdtMin / 1e6).padStart(5)} | ` +
+        `${String(r.fixedThresholdUsdt / 1e6).padStart(5)} | ` +
         `${(r.gateOpenPct * 100).toFixed(1).padStart(5)}% | ` +
         `${String(r.burstTriggers).padStart(5)} | ` +
         `${String(r.gated.trades).padStart(5)} | ` +
@@ -329,13 +337,22 @@ async function main() {
       );
     }
     const best = sweepResults[0];
-    console.log(`\n最优阈值: ${best.barVolumeUsdtMin / 1e6}M (PnL ${best.gated.pnl.toFixed(1)}, ROI ${(best.gated.roi * 100).toFixed(2)}%, Δ ${best.pnlDelta.toFixed(1)})`);
+    console.log(`\n最优阈值: ${best.fixedThresholdUsdt / 1e6}M (PnL ${best.gated.pnl.toFixed(1)}, ROI ${(best.gated.roi * 100).toFixed(2)}%, Δ ${best.pnlDelta.toFixed(1)})`);
     console.log(`Full JSON: ${sweepOut}`);
     return;
   }
 
-  const barVolumeUsdtMin = barMinArg ? Number(barMinArg) : config.sessionGate.barVolumeUsdtMin;
-  const { timeline, modeBars, burstTriggers } = simulateBurstTimeline(rows, barVolumeUsdtMin, volumeBurstMinutes);
+  const sg = config.sessionGate;
+  const useFixed = barMinArg != null || hasFlag('fixed-threshold') || !sg.dynamicThresholdEnabled;
+  const fixedThresholdUsdt = useFixed
+    ? (barMinArg ? Number(barMinArg) : sg.barVolumeUsdtMin)
+    : null;
+  const { timeline, modeBars, burstTriggers } = simulateBurstTimeline(
+    c5,
+    rows,
+    volumeBurstMinutes,
+    { fixedThresholdUsdt },
+  );
   const segments = buildSegments(timeline, fromMs, toMs);
   const gatedTrades = buildGatedTrades(c5, timeline, fromMs, toMs);
   const totalBars = timeline.length;
@@ -349,8 +366,17 @@ async function main() {
     config: {
       burstOnly,
       ohlcv: { marketType: marketCtx.marketType, symbol: marketCtx.symbol, label: marketCtx.label },
-      barVolumeUsdtMin,
       volumeBurstMinutes,
+      ...(useFixed
+        ? { barVolumeUsdtMin: fixedThresholdUsdt, gateMode: 'fixed-threshold' }
+        : {
+          dynamicThresholdEnabled: true,
+          activityWindowBars: sg.activityWindowBars,
+          activityProbeUsdtMin: sg.activityProbeUsdtMin,
+          barVolumeUsdtMinDynamic: sg.barVolumeUsdtMinDynamic,
+          barVolumeUsdtMaxDynamic: sg.barVolumeUsdtMaxDynamic,
+          gateMode: 'dynamic-threshold',
+        }),
       eventWindowHours,
       usMarketWindow: US_WINDOW,
       events: events.map((e) => ({ label: e.label, tsBj: fmtBj(e.ts) })),
@@ -389,7 +415,12 @@ async function main() {
   } else {
     console.log(`规则: 宏观±${eventWindowHours}h ∨ 美股 ${w.startBj}–${w.endBj} 常开`);
   }
-  console.log(`      其它时段: 5m 成交额 ≥ ${fmtM(barVolumeUsdtMin)} → 开 ${volumeBurstMinutes} 分钟(刷新)`);
+  if (useFixed) {
+    console.log(`      其它时段: 5m 成交额 ≥ ${fmtM(fixedThresholdUsdt)} → 开 ${volumeBurstMinutes} 分钟(刷新)`);
+  } else {
+    console.log(`      动态门控: 近${sg.activityWindowBars}根 ≥${fmtM(sg.activityProbeUsdtMin)} 频率 → 触发线 ${fmtM(sg.barVolumeUsdtMinDynamic)}–${fmtM(sg.barVolumeUsdtMaxDynamic)}`);
+    console.log(`      触发后开 ${volumeBurstMinutes} 分钟(刷新)`);
+  }
   console.log(`区间: ${report.range.from} → ${report.range.to} (${days}d)`);
   if (barDist) {
     console.log(`5m 成交额: p90=${fmtM(barDist.p90)} p95=${fmtM(barDist.p95)} p99=${fmtM(barDist.p99)}`);

@@ -21,10 +21,71 @@ function sg() {
   return config.sessionGate;
 }
 
-/** Minimum closed 5m bars for bar-volume gate (legacy compress gate needs more). */
+/** Minimum closed 5m bars for session gate evaluation. */
 export function minSessionCandles() {
   if (!config.sessionGate.enabled) return 2;
+  if (sg().dynamicThresholdEnabled) {
+    return Math.max(2, sg().activityWindowBars);
+  }
   return 2;
+}
+
+/**
+ * Activity freq: share of recent 5m bars with USDT notional ≥ probe line.
+ * @returns {{ freq: number, hits: number, windowBars: number, probeLineUsdt: number }}
+ */
+export function computeActivityFreq(candles5m, idx) {
+  const { activityWindowBars, activityProbeUsdtMin } = sg();
+  const windowBars = Math.min(activityWindowBars, idx + 1);
+  const startIdx = idx - windowBars + 1;
+  let hits = 0;
+  for (let i = startIdx; i <= idx; i += 1) {
+    const usdt = computeBarUsdtNotional(candles5m[i]);
+    if (usdt != null && usdt >= activityProbeUsdtMin) hits += 1;
+  }
+  const freq = windowBars > 0 ? hits / windowBars : 0;
+  return {
+    freq,
+    hits,
+    windowBars,
+    probeLineUsdt: activityProbeUsdtMin,
+  };
+}
+
+/** Map activity freq → burst trigger threshold (high freq → lower threshold). */
+export function computeDynamicThreshold(freq) {
+  const { barVolumeUsdtMinDynamic, barVolumeUsdtMaxDynamic } = sg();
+  const lo = Math.min(barVolumeUsdtMinDynamic, barVolumeUsdtMaxDynamic);
+  const hi = Math.max(barVolumeUsdtMinDynamic, barVolumeUsdtMaxDynamic);
+  const clamped = Math.min(1, Math.max(0, freq));
+  return Math.round(hi - clamped * (hi - lo));
+}
+
+/**
+ * Resolve burst trigger USDT threshold for the current bar.
+ * @returns {{ thresholdUsdt: number, dynamic: boolean, activity: object }}
+ */
+export function resolveBurstThresholdUsdt(candles5m, idx) {
+  const { dynamicThresholdEnabled, barVolumeUsdtMin, barVolumeUsdtMinDynamic, barVolumeUsdtMaxDynamic } = sg();
+  if (!dynamicThresholdEnabled) {
+    return {
+      thresholdUsdt: barVolumeUsdtMin,
+      dynamic: false,
+      activity: null,
+    };
+  }
+  const activity = computeActivityFreq(candles5m, idx);
+  const lo = Math.min(barVolumeUsdtMinDynamic, barVolumeUsdtMaxDynamic);
+  const hi = Math.max(barVolumeUsdtMinDynamic, barVolumeUsdtMaxDynamic);
+  return {
+    thresholdUsdt: computeDynamicThreshold(activity.freq),
+    dynamic: true,
+    activity: {
+      ...activity,
+      threshMin: lo,
+      threshMax: hi,
+    },
+  };
 }
 
 /** @param {Array<{ high: number, low: number, close: number, open?: number, volume?: number }>} candles */
@@ -357,11 +418,12 @@ export function evaluateSession(candles5m, nowMs = Date.now(), prevState = {}) {
   const idx = candles5m.length - 1;
   const bar = candles5m[idx];
   const barUsdt = computeBarUsdtNotional(bar);
-  const { barVolumeUsdtMin, volumeBurstMinutes } = sg();
+  const { volumeBurstMinutes } = sg();
+  const { thresholdUsdt, dynamic, activity } = resolveBurstThresholdUsdt(candles5m, idx);
   const scheduledWindow = evaluateScheduledWindow(nowMs);
 
   let volumeBurstUntilMs = prevState.volumeBurstUntilMs ?? null;
-  const barTriggered = barUsdt != null && barUsdt >= barVolumeUsdtMin;
+  const barTriggered = barUsdt != null && barUsdt >= thresholdUsdt;
   if (barTriggered) {
     volumeBurstUntilMs = nowMs + volumeBurstMinutes * 60_000;
   }
@@ -379,12 +441,16 @@ export function evaluateSession(candles5m, nowMs = Date.now(), prevState = {}) {
     tradeAllowed = true;
   }
 
+  const activityHint = dynamic && activity
+    ? `活跃 ${activity.hits}/${activity.windowBars} (探测≥${formatUsdtM(activity.probeLineUsdt)}) → 触发线 ${formatUsdtM(thresholdUsdt)}`
+    : `触发线 ${formatUsdtM(thresholdUsdt)}`;
+
   const passReason = scheduledActive
     ? `定时常开: ${scheduledWindow.detail}`
     : burstActive
-      ? `放量窗口至 ${new Date(volumeBurstUntilMs).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })} (本根 ${formatUsdtM(barUsdt)}${barTriggered ? ' 触发刷新' : ''})`
+      ? `放量窗口至 ${new Date(volumeBurstUntilMs).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })} (本根 ${formatUsdtM(barUsdt)}${barTriggered ? ' 触发刷新' : ''}; ${activityHint})`
       : barUsdt != null
-        ? `休眠 — 本根 ${formatUsdtM(barUsdt)} < ${formatUsdtM(barVolumeUsdtMin)}`
+        ? `休眠 — 本根 ${formatUsdtM(barUsdt)} < ${formatUsdtM(thresholdUsdt)} (${activityHint})`
         : '休眠 — 成交额不可用';
 
   return {
@@ -398,8 +464,15 @@ export function evaluateSession(candles5m, nowMs = Date.now(), prevState = {}) {
         ? new Date(volumeBurstUntilMs).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
         : null,
       barTriggered,
-      thresholdUsdt: barVolumeUsdtMin,
+      thresholdUsdt,
+      dynamicThreshold: dynamic,
       durationMinutes: volumeBurstMinutes,
+      activityFreq: activity?.freq ?? null,
+      activityHits: activity?.hits ?? null,
+      activityWindowBars: activity?.windowBars ?? null,
+      probeLineUsdt: activity?.probeLineUsdt ?? null,
+      threshMin: activity?.threshMin ?? null,
+      threshMax: activity?.threshMax ?? null,
     },
     barUsdt,
     gateMode,
@@ -534,10 +607,18 @@ export function formatSessionTelegramBlock(sessionCtx) {
 
   const barStr = ev.barUsdt != null ? `${formatUsdtM(ev.barUsdt)} USDT` : '—';
   const burst = ev.volumeBurst;
+  const activityLine = burst?.dynamicThreshold && burst.activityHits != null
+    ? `\n活跃: <b>${burst.activityHits}/${burst.activityWindowBars}</b> (${Math.round((burst.activityFreq ?? 0) * 100)}%)` +
+      ` 探测≥${escapeHtml(formatUsdtM(burst.probeLineUsdt))}` +
+      ` → 触发线 <b>${escapeHtml(formatUsdtM(burst.thresholdUsdt))}</b>` +
+      ` (${escapeHtml(formatUsdtM(burst.threshMin))}–${escapeHtml(formatUsdtM(burst.threshMax))})`
+    : burst?.thresholdUsdt
+      ? `\n触发线: <b>${escapeHtml(formatUsdtM(burst.thresholdUsdt))}</b> (固定)`
+      : '';
   const burstLine = burst?.active
     ? `\n放量窗: 至 ${escapeHtml(burst.untilBj)}${burst.barTriggered ? ' (本根刷新)' : ''}`
     : burst?.thresholdUsdt
-      ? `\n放量触发: 本根 ≥ ${formatUsdtM(burst.thresholdUsdt)} → 开 ${burst.durationMinutes} 分钟`
+      ? `\n放量触发: 本根 ≥ ${escapeHtml(formatUsdtM(burst.thresholdUsdt))} → 开 ${burst.durationMinutes} 分钟`
       : '';
 
   const sched = ev.scheduledWindow?.pass
@@ -550,6 +631,7 @@ export function formatSessionTelegramBlock(sessionCtx) {
     `\n🎯 <b>会话</b>: <b>${escapeHtml(stateZh)}</b> · ${escapeHtml(modeZh)} (${escapeHtml(sessionCtx.action ?? '—')})\n` +
     `门控: ${ev.evaluationPassed ? '✓ 开启' : '✗ 关闭'} — ${escapeHtml(ev.passReason ?? '—')}\n` +
     `本根成交额: ${escapeHtml(barStr)}` +
+    activityLine +
     sched +
     burstLine
   );
