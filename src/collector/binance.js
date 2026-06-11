@@ -168,6 +168,52 @@ export async function fetchSessionCandles(limit = config.sessionGate.candleLimit
 }
 
 /**
+ * Fetch a single closed OHLCV candle whose open time equals openTimeMs.
+ * Used for OKX-based settlement when the candle is not in the in-memory batch.
+ */
+export async function fetchClosedCandleAt(openTimeMs) {
+  const cycleMs = config.cycleMinutes * 60 * 1000;
+  let lastErr;
+
+  for (const exchangeId of EXCHANGE_CHAIN) {
+    try {
+      const ex = getExchange(exchangeId);
+      const fetchSymbol = getOhlcvSymbol(exchangeId);
+      const raw = await withRetry(
+        () => ex.fetchOHLCV(fetchSymbol, config.timeframe, openTimeMs, 3),
+        {
+          label: `fetchOHLCV(${exchangeId},${fetchSymbol},at=${openTimeMs})`,
+          maxAttempts: 2,
+          baseDelayMs: 1000,
+        },
+      );
+
+      if (!raw?.length) {
+        throw new Error(`empty OHLCV @ ${openTimeMs}`);
+      }
+
+      const lastOpen = raw[raw.length - 1][0];
+      const closed = lastOpen >= openTimeMs + cycleMs ? raw : raw.slice(0, -1);
+      const row = closed.find(([t]) => t === openTimeMs);
+      if (!row) {
+        throw new Error(`candle not found @ ${openTimeMs}`);
+      }
+
+      const [t, open, high, low, close, volume] = row;
+      return { t, open, high, low, close, volume };
+    } catch (err) {
+      lastErr = err;
+      logger.warn(`[collector] ${exchangeId} 单根 K 线拉取失败`, {
+        openTimeMs,
+        error: err?.message,
+      });
+    }
+  }
+
+  throw lastErr ?? new Error(`fetchClosedCandleAt failed @ ${openTimeMs}`);
+}
+
+/**
  * Validate candle timestamp aligns with expected 5m boundary.
  */
 export function isCandleFresh(candle, cycleMs) {

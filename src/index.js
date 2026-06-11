@@ -31,8 +31,11 @@ import {
   stopChainlinkSettler,
   scheduleChainlinkSettlement,
   trySettlePending,
-  computeChainlinkSettlement,
+  computeSettlement,
   crossCheckWithCandle,
+  candleDirection,
+  usesChainlinkSettlement,
+  settleSourceLabel,
 } from './trader/chainlinkSettle.js';
 import { buildSignal } from './strategy/reversalContinuation.js';
 import { findCurrentCycleMarket, resolveOrderPricePolicy } from './market/polymarket.js';
@@ -81,7 +84,7 @@ const PENDING_FILE = join(LOGS_DIR, 'pending-bet.json');
 
 const CYCLE_MS = config.cycleMinutes * 60 * 1000;
 
-// Pending bet awaiting Chainlink settlement. Shape:
+// Pending bet awaiting settlement. Shape:
 //   { cycleStartTs, signal, actualBet, targetPrice?, orderId? }
 let pendingBet = null;
 
@@ -226,7 +229,7 @@ async function runCycle(cycleStartTs) {
       logger.warn('[main] 会话评估 K 线不足', { got: candles.length, need: minSessionCandles() });
     }
 
-    // ── Settle the PREVIOUS cycle's bet (Chainlink; OHLCV used for cross-check) ──
+    // ── Settle the PREVIOUS cycle's bet (OKX K 线 or Chainlink) ──
     if (pendingBet) {
       await trySettlePending(pendingBet, { candles });
     }
@@ -561,7 +564,7 @@ async function runCycle(cycleStartTs) {
 }
 
 // ─────────────────────────────────────────
-// Pending bet + Chainlink settlement
+// Pending bet + settlement (OKX K 线 or Chainlink)
 // ─────────────────────────────────────────
 
 function registerPendingBet({
@@ -576,7 +579,9 @@ function registerPendingBet({
   volRegime,
   volRegimeReason,
 }) {
-  const openSnap = getChainlinkOpenPrice(config.symbol, cycleStartTs);
+  const openSnap = usesChainlinkSettlement()
+    ? getChainlinkOpenPrice(config.symbol, cycleStartTs)
+    : null;
   pendingBet = {
     cycleStartTs,
     signal,
@@ -636,17 +641,18 @@ function writeSettlementLog(entry) {
 }
 
 /**
- * Apply Chainlink settlement for a pending bet.
+ * Apply settlement for a pending bet.
  * Returns true when settled; false when not ready or pending changed.
  */
-async function applyChainlinkSettlement(pending, { candles } = {}) {
+async function applySettlement(pending, { candles } = {}) {
   if (!pending || pending !== pendingBet) return false;
 
-  const result = await computeChainlinkSettlement(pending);
+  const result = await computeSettlement(pending, { candles });
   if (!result.ready) {
     logger.debug('[settle] 结算尚未就绪', {
       window: formatBeijingTime(pending.cycleStartTs),
       reason: result.reason,
+      source: config.settleSource,
     });
     return false;
   }
@@ -655,8 +661,10 @@ async function applyChainlinkSettlement(pending, { candles } = {}) {
     return false;
   }
 
-  const candle = candles?.find((k) => k.t === pending.cycleStartTs);
-  const cross = crossCheckWithCandle(result, candle);
+  const candle = result.candle ?? candles?.find((k) => k.t === pending.cycleStartTs);
+  const cross = usesChainlinkSettlement()
+    ? crossCheckWithCandle(result, candle)
+    : null;
   if (cross?.mismatch) {
     logger.warn('[settle] Chainlink 与交易所 K 线方向不一致', {
       window: formatBeijingTime(pending.cycleStartTs),
@@ -674,13 +682,14 @@ async function applyChainlinkSettlement(pending, { candles } = {}) {
   const side = signal === 'UP' ? '📈 UP' : '📉 DOWN';
   const windowLabel = formatBeijingTime(cycleStartTs);
   const pnlUsd = stats.computeSettlementPnl(won, actualBet, entryPrice ?? limitPrice);
+  const sourceLabel = settleSourceLabel();
 
   const { halted } = martingale.onSettled(won);
   if (!won) recordLoss(actualBet);
   stats.recordSettlement({ won, pnlUsd });
   if (halted) stats.recordStopLoss();
 
-  logger.info('[settle] Chainlink 结算结果', {
+  logger.info(`[settle] ${sourceLabel} 结算结果`, {
     window: windowLabel,
     targetPrice,
     closePrice,
@@ -714,8 +723,8 @@ async function applyChainlinkSettlement(pending, { candles } = {}) {
     targetPrice,
     closePrice,
     settleDelta,
-    settleSource: 'chainlink',
-    exchangeDirection: cross?.exchangeDirection ?? null,
+    settleSource: config.settleSource,
+    exchangeDirection: cross?.exchangeDirection ?? candleDirection(candle),
     crossMismatch: cross?.mismatch ?? false,
     martingaleHalted: halted,
     dryRun: config.dryRun,
@@ -740,11 +749,15 @@ async function applyChainlinkSettlement(pending, { candles } = {}) {
     ? `\n⚠️ <b>马丁连亏止损触发</b> — 下周期重置为基础注`
     : '';
 
+  const priceLine = usesChainlinkSettlement()
+    ? `目标价: $${targetPrice.toFixed(2)} → 收盘价: $${closePrice.toFixed(2)}\n`
+    : `开盘: $${targetPrice.toFixed(2)} → 收盘: $${closePrice.toFixed(2)}\n`;
+
   await notifyTelegram(
-    `${resultEmoji} <b>结算${resultText}</b> (Chainlink)\n` +
+    `${resultEmoji} <b>结算${resultText}</b> (${sourceLabel})\n` +
     `窗口: ${windowLabel}\n` +
     `下注: ${side} $${actualBet}\n` +
-    `目标价: $${targetPrice.toFixed(2)} → 收盘价: $${closePrice.toFixed(2)}\n` +
+    priceLine +
     `结果: <b>${winningOutcome}</b> (Δ ${settleDelta >= 0 ? '+' : ''}${settleDelta.toFixed(2)})\n` +
     `本单盈亏: <b>${stats.formatPnlUsd(pnlUsd)}</b>` +
     mismatchNote + haltNote + '\n' +
@@ -801,7 +814,7 @@ async function scheduler() {
     cycleMinutes: config.cycleMinutes,
     signalDelayMs: config.signalDelayMs,
     cycleTimeoutMs: config.cycleTimeoutMs,
-    settlement: 'chainlink-rtds',
+    settlement: config.settleSource,
     volatilityStrategy: {
       barTimeframe: config.volatilityBarTimeframe,
       mode: 'high_continuation_only',
@@ -828,7 +841,7 @@ async function scheduler() {
 
   initChainlinkSettler({
     getPendingBet: () => pendingBet,
-    settleFn: applyChainlinkSettlement,
+    settleFn: applySettlement,
   });
 
   initRestingFillWatcher(async (ctx) => {
@@ -870,7 +883,11 @@ async function scheduler() {
     );
   });
 
-  await startRtdsBuffer([config.symbol]);
+  if (usesChainlinkSettlement()) {
+    await startRtdsBuffer([config.symbol]);
+  } else {
+    logger.info('[settle] 使用 OKX 永续 5m K 线结算，Chainlink RTDS 已跳过');
+  }
   startChainlinkSettler();
 
   try {
@@ -879,7 +896,7 @@ async function scheduler() {
   } catch (err) {
     logger.error('[main] CLOB 预热失败 — 退出', { error: err?.message });
     stopChainlinkSettler();
-    stopRtdsBuffer();
+    if (usesChainlinkSettlement()) stopRtdsBuffer();
     process.exit(1);
   }
 

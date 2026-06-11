@@ -159,6 +159,9 @@ const config = {
     bigMoveEndBars: num('BIG_MOVE_END_BARS', 3),
   },
 
+  /** Settlement source: okx (OKX 永续 5m K 线) | chainlink (Polymarket RTDS oracle) */
+  settleSource: optional('SETTLE_SOURCE', 'okx').toLowerCase(),
+
   // Chainlink RTDS settlement (Polymarket official oracle)
   chainlink: {
     settleBufferMs: num('CHAINLINK_SETTLE_BUFFER_MS', 3000),

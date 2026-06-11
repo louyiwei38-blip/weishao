@@ -1,18 +1,31 @@
 /**
- * Chainlink-based settlement for Polymarket Up/Down markets.
- * Settlement rule: close >= target → UP, else DOWN (official oracle).
+ * Settlement for Polymarket Up/Down markets.
+ * Default: OKX 永续 5m K 线 (open vs close). Fallback: Chainlink RTDS oracle.
  */
 
 import config from '../config.js';
 import logger from '../utils/logger.js';
 import { sleep } from '../utils/retry.js';
 import { formatBeijingTime } from '../utils/datetime.js';
+import { fetchClosedCandleAt } from '../collector/binance.js';
 import {
   getChainlinkPriceAt,
   getChainlinkOpenPrice,
   getLatestPrice,
   resolveOutcomeFromPrices,
 } from '../collector/chainlink.js';
+
+export function usesChainlinkSettlement() {
+  return config.settleSource === 'chainlink';
+}
+
+export function usesOkxSettlement() {
+  return !usesChainlinkSettlement();
+}
+
+export function settleSourceLabel() {
+  return usesChainlinkSettlement() ? 'Chainlink' : 'OKX 永续 K 线';
+}
 
 /** @type {Map<string, NodeJS.Timeout>} */
 const scheduledTimers = new Map();
@@ -71,6 +84,79 @@ async function fetchClosePriceAtEnd(cycleStartTs) {
   }
 
   return null;
+}
+
+async function resolveCandleForCycle(cycleStartTs, candles) {
+  const fromBatch = candles?.find((k) => k.t === cycleStartTs);
+  if (fromBatch) return fromBatch;
+
+  const deadline = Date.now() + config.chainlink.settleMaxWaitMs;
+  let lastErr = null;
+
+  while (Date.now() <= deadline) {
+    try {
+      return await fetchClosedCandleAt(cycleStartTs);
+    } catch (err) {
+      lastErr = err;
+      await sleep(500);
+    }
+  }
+
+  if (lastErr) {
+    logger.warn('[settle] OKX K 线拉取超时', {
+      window: formatBeijingTime(cycleStartTs),
+      error: lastErr?.message,
+    });
+  }
+  return null;
+}
+
+/**
+ * Compute OKX perpetual 5m candle settlement (open vs close).
+ * @returns {Promise<{ ready: boolean, reason?: string, won?: boolean, winningOutcome?: string, targetPrice?: number, closePrice?: number, closeTickTs?: number, settleDelta?: number, candle?: object }>}
+ */
+export async function computeOkxSettlement(pendingBet, { candles } = {}) {
+  const { cycleStartTs } = pendingBet;
+
+  const wakeMs = settleWakeMs(cycleStartTs);
+  if (Date.now() < wakeMs) {
+    return { ready: false, reason: 'cycle_not_ended' };
+  }
+
+  const candle = await resolveCandleForCycle(cycleStartTs, candles);
+  if (!candle) {
+    return { ready: false, reason: 'no_candle' };
+  }
+
+  const targetPrice = Number(candle.open);
+  const closePrice = Number(candle.close);
+  const winningOutcome = resolveOutcomeFromPrices(targetPrice, closePrice);
+  if (!winningOutcome) {
+    return { ready: false, reason: 'invalid_prices' };
+  }
+
+  const won = directionWon(pendingBet.signal, winningOutcome);
+
+  return {
+    ready: true,
+    won,
+    winningOutcome,
+    targetPrice,
+    closePrice,
+    closeTickTs: cycleStartTs + config.cycleMinutes * 60 * 1000,
+    settleDelta: closePrice - targetPrice,
+    candle,
+  };
+}
+
+/**
+ * Route settlement to the configured source.
+ */
+export async function computeSettlement(pendingBet, ctx = {}) {
+  if (usesOkxSettlement()) {
+    return computeOkxSettlement(pendingBet, ctx);
+  }
+  return computeChainlinkSettlement(pendingBet);
 }
 
 /**
@@ -158,7 +244,8 @@ export function scheduleChainlinkSettlement(pendingBet) {
   const wakeMs = settleWakeMs(pendingBet.cycleStartTs);
   const delay = Math.max(0, wakeMs - Date.now());
 
-  logger.debug('[settle] 已调度 Chainlink 结算', {
+  logger.debug('[settle] 已调度结算', {
+    source: config.settleSource,
     window: formatBeijingTime(pendingBet.cycleStartTs),
     wakeAt: formatBeijingTime(wakeMs),
     delayMs: delay,
@@ -184,7 +271,8 @@ export async function settleAllDuePending(ctx = {}) {
 export function startChainlinkSettler() {
   if (safetyTimer) return;
 
-  logger.info('[settle] Chainlink 结算器已启动', {
+  logger.info('[settle] 结算器已启动', {
+    source: config.settleSource,
     bufferMs: config.chainlink.settleBufferMs,
     safetyIntervalMs: config.chainlink.safetyIntervalMs,
   });
@@ -208,7 +296,7 @@ export function stopChainlinkSettler() {
   if (safetyTimer) {
     clearInterval(safetyTimer);
     safetyTimer = null;
-    logger.info('[settle] Chainlink 结算器已停止');
+    logger.info('[settle] 结算器已停止');
   }
 }
 
