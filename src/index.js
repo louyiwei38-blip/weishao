@@ -13,7 +13,13 @@ import logger from './utils/logger.js';
 import { sleep } from './utils/retry.js';
 import { appendJsonl } from './utils/jsonl.js';
 import { writeHeartbeat } from './utils/heartbeat.js';
-import { fetchClosedCandles, fetchVolatilityCandles, fetchSessionCandles, isCandleFresh } from './collector/binance.js';
+import {
+  fetchClosedCandles,
+  fetchVolatilityCandles,
+  fetchSessionCandles,
+  isCandleFresh,
+  describeOhlcvSource,
+} from './collector/binance.js';
 import {
   startRtdsBuffer,
   stopRtdsBuffer,
@@ -773,9 +779,24 @@ async function sleepUntilShutdown(ms) {
 }
 
 async function scheduler() {
+  const signalOhlcv = describeOhlcvSource();
+  const volOhlcv = describeOhlcvSource(config.volatilityBarTimeframe);
+
   logger.info('▶ 机器人启动', {
     symbol: config.symbol,
     timeframe: config.timeframe,
+    signalOhlcv: {
+      exchange: signalOhlcv.exchange,
+      market: signalOhlcv.label,
+      symbol: signalOhlcv.symbol,
+      timeframe: signalOhlcv.timeframe,
+    },
+    volatilityOhlcv: {
+      exchange: volOhlcv.exchange,
+      market: volOhlcv.label,
+      symbol: volOhlcv.symbol,
+      timeframe: volOhlcv.timeframe,
+    },
     dryRun: config.dryRun,
     cycleMinutes: config.cycleMinutes,
     signalDelayMs: config.signalDelayMs,

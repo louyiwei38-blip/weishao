@@ -48,9 +48,9 @@ const config = {
     chainId: 137,
   },
 
-  // OHLCV data source (binance | okx | bybit). If primary fails, auto-fallback.
+  // OHLCV — strategy signals, session gate, rv metrics (Polymarket slug still uses TRADING_SYMBOL)
   ohlcvExchange: optional('OHLCV_EXCHANGE', 'okx'),
-  /** spot | swap — OKX USDT 永续用 swap */
+  /** spot | swap — default swap → OKX BTC/USDT:USDT 5m 永续 */
   ohlcvMarketType: optional('OHLCV_MARKET_TYPE', 'swap'),
   /** Override CCXT symbol; empty → swap: BTC/USDT:USDT from TRADING_SYMBOL */
   ohlcvSymbol: optional('OHLCV_SYMBOL', ''),
@@ -60,7 +60,7 @@ const config = {
     secret: optional('BINANCE_SECRET', ''),
   },
 
-  // Strategy
+  // Polymarket / Chainlink slug (not the OHLCV fetch symbol when OHLCV_MARKET_TYPE=swap)
   symbol: optional('TRADING_SYMBOL', 'BTC/USDT'),
   timeframe: optional('CANDLE_TIMEFRAME', '5m'),
   candleLimit: num('CANDLE_FETCH_LIMIT', 5),

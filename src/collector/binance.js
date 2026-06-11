@@ -32,6 +32,18 @@ export function resolveOhlcvMarket(marketType = config.ohlcvMarketType, symbolOv
   };
 }
 
+/** Resolved OHLCV source for strategy signals, session gate, and rv candles. */
+export function describeOhlcvSource(timeframe = config.timeframe) {
+  const market = resolveOhlcvMarket();
+  return {
+    exchange: config.ohlcvExchange,
+    marketType: market.marketType,
+    symbol: market.symbol,
+    label: market.label,
+    timeframe,
+  };
+}
+
 function swapSymbolFrom(symbol) {
   if (symbol.includes(':')) return symbol;
   const [base, quote] = symbol.split('/');
@@ -69,8 +81,10 @@ function getExchange(id) {
 
 /**
  * Internal OHLCV fetch; returns closed candles only.
+ * Uses resolveOhlcvMarket() — swap mode → OKX BTC/USDT:USDT 永续 when OHLCV_EXCHANGE=okx.
  */
-async function fetchOhlcvCandles(symbol, timeframe, limit) {
+async function fetchOhlcvCandles(timeframe, limit) {
+  const market = resolveOhlcvMarket();
   let lastErr;
 
   for (const exchangeId of EXCHANGE_CHAIN) {
@@ -79,7 +93,7 @@ async function fetchOhlcvCandles(symbol, timeframe, limit) {
       const fetchSymbol = getOhlcvSymbol(exchangeId);
       const raw = await withRetry(
         () => ex.fetchOHLCV(fetchSymbol, timeframe, undefined, limit + 1),
-        { label: `fetchOHLCV(${exchangeId},${timeframe})`, maxAttempts: 2, baseDelayMs: 1000 }
+        { label: `fetchOHLCV(${exchangeId},${fetchSymbol},${timeframe})`, maxAttempts: 2, baseDelayMs: 1000 }
       );
 
       if (!raw || raw.length < 2) {
@@ -101,7 +115,7 @@ async function fetchOhlcvCandles(symbol, timeframe, limit) {
 
       logger.debug('[collector] K 线已拉取', {
         exchange: exchangeId,
-        marketType: config.ohlcvMarketType,
+        marketType: market.marketType,
         symbol: fetchSymbol,
         timeframe,
         count: candles.length,
@@ -122,10 +136,10 @@ async function fetchOhlcvCandles(symbol, timeframe, limit) {
 }
 
 /**
- * Fetch the most recent closed OHLCV candles for the strategy timeframe.
+ * Fetch the most recent closed OHLCV candles for strategy signals (5m).
  */
 export async function fetchClosedCandles(limit = config.candleLimit) {
-  const candles = await fetchOhlcvCandles(config.symbol, config.timeframe, limit);
+  const candles = await fetchOhlcvCandles(config.timeframe, limit);
   if (candles.length < 2) {
     throw new Error(`too few strategy candles: ${candles.length}`);
   }
@@ -133,20 +147,20 @@ export async function fetchClosedCandles(limit = config.candleLimit) {
 }
 
 /**
- * Fetch finer-grained candles for realized-volatility risk checks.
+ * Fetch finer-grained candles for realized-volatility metrics (default 1m, same market).
  */
 export async function fetchVolatilityCandles(
   limit = config.volatilityCandleLimit,
   timeframe = config.volatilityBarTimeframe,
 ) {
-  return fetchOhlcvCandles(config.symbol, timeframe, limit);
+  return fetchOhlcvCandles(timeframe, limit);
 }
 
 /**
- * Fetch extended closed 5m candles for session gate evaluation.
+ * Fetch closed 5m candles for session gate volume evaluation (same source as signals).
  */
 export async function fetchSessionCandles(limit = config.sessionGate.candleLimit) {
-  const candles = await fetchOhlcvCandles(config.symbol, config.timeframe, limit);
+  const candles = await fetchOhlcvCandles(config.timeframe, limit);
   if (candles.length < 2) {
     throw new Error(`too few session candles: ${candles.length}`);
   }
