@@ -3,6 +3,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 import config from '../config.js';
+import { escapeHtml } from '../utils/telegram.js';
 import { computePeriodVolRatio, computeBarUsdtNotional, PERIOD_LONG_BARS } from '../utils/volumeFilter.js';
 import { evaluateCombinedEventWindow } from '../utils/usMarketOpen.js';
 
@@ -534,21 +535,21 @@ export function formatSessionTelegramBlock(sessionCtx) {
   const barStr = ev.barUsdt != null ? `${formatUsdtM(ev.barUsdt)} USDT` : '—';
   const burst = ev.volumeBurst;
   const burstLine = burst?.active
-    ? `\n放量窗: 至 ${burst.untilBj}${burst.barTriggered ? ' (本根刷新)' : ''}`
+    ? `\n放量窗: 至 ${escapeHtml(burst.untilBj)}${burst.barTriggered ? ' (本根刷新)' : ''}`
     : burst?.thresholdUsdt
       ? `\n放量触发: 本根 ≥ ${formatUsdtM(burst.thresholdUsdt)} → 开 ${burst.durationMinutes} 分钟`
       : '';
 
   const sched = ev.scheduledWindow?.pass
-    ? `\n定时: ✓ ${ev.scheduledWindow.detail}`
+    ? `\n定时: ✓ ${escapeHtml(ev.scheduledWindow.detail)}`
     : ev.scheduledWindow?.enabled !== false
-      ? `\n定时: ✗ ${ev.scheduledWindow?.detail ?? '非事件/美股时段'}`
+      ? `\n定时: ✗ ${escapeHtml(ev.scheduledWindow.detail ?? '非事件/美股时段')}`
       : '';
 
   return (
-    `\n🎯 <b>会话</b>: <b>${stateZh}</b> · ${modeZh} (${sessionCtx.action ?? '—'})\n` +
-    `门控: ${ev.evaluationPassed ? '✓ 开启' : '✗ 关闭'} — ${ev.passReason ?? '—'}\n` +
-    `本根成交额: ${barStr}` +
+    `\n🎯 <b>会话</b>: <b>${escapeHtml(stateZh)}</b> · ${escapeHtml(modeZh)} (${escapeHtml(sessionCtx.action ?? '—')})\n` +
+    `门控: ${ev.evaluationPassed ? '✓ 开启' : '✗ 关闭'} — ${escapeHtml(ev.passReason ?? '—')}\n` +
+    `本根成交额: ${escapeHtml(barStr)}` +
     sched +
     burstLine
   );
