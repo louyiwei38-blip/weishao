@@ -56,6 +56,7 @@ import {
   stopAllRestingFillWatchers,
 } from './trader/restingFillWatcher.js';
 import * as martingale from './martingale/manager.js';
+import { dynamicBaseBetEnabled, formatTierBetTable } from './martingale/dynamicBaseBet.js';
 import * as stats from './stats/manager.js';
 import { notifyTelegram, escapeHtml } from './utils/telegram.js';
 import { formatBeijingTime } from './utils/datetime.js';
@@ -393,10 +394,23 @@ async function runCycle(cycleStartTs) {
       return;
     }
 
-    const mgState  = martingale.getState();
-    martingale.refreshBaseBetIfNewStreak(candles);
-    const refreshed = martingale.getState();
+    const mgBefore = martingale.getState();
+    const dynamicCtx = martingale.refreshBaseBetIfNewStreak(candles);
+    const mg = martingale.getState();
     const { actualBet, skipReason } = martingale.prepareOrder(balance);
+
+    if (!skipReason && mgBefore.consecutiveLosses === 0) {
+      logger.info('[main] 本单下注额度', {
+        dynamicBaseBet: dynamicBaseBetEnabled(),
+        streakBaseBet: mg.streakBaseBet,
+        martingaleBet: mg.currentBet,
+        actualBet,
+        activityTier: mg.activityTier,
+        activityHits: mg.activityHits,
+        consecutiveLosses: mg.consecutiveLosses,
+        dynamicRefresh: dynamicCtx?.dynamic ?? false,
+      });
+    }
 
     if (skipReason) {
       cycleStatus = `martingale_${skipReason}`;
@@ -419,10 +433,12 @@ async function runCycle(cycleStartTs) {
       conditionId: market.conditionId,
       cycleStartTs,
       actualBet,
-      baseBet: refreshed.currentBet,
-      activityTier: refreshed.activityTier,
-      activityHits: refreshed.activityHits,
-      consecutiveLosses: mgState.consecutiveLosses,
+      baseBet: mg.streakBaseBet ?? mg.currentBet,
+      martingaleBet: mg.currentBet,
+      activityTier: mg.activityTier,
+      activityHits: mg.activityHits,
+      dynamicBaseBet: dynamicBaseBetEnabled(),
+      consecutiveLosses: mg.consecutiveLosses,
       yesPrice: pricePolicy.yesPrice ?? market.yesPrice,
       noPrice: pricePolicy.noPrice ?? market.noPrice,
       maxLimitPrice: pricePolicy.maxLimitPrice,
@@ -451,9 +467,9 @@ async function runCycle(cycleStartTs) {
         cycleStartTs,
         signal: signalObj.signal,
         actualBet: spent,
-        baseBet: refreshed.currentBet,
-        activityTier: refreshed.activityTier,
-        activityHits: refreshed.activityHits,
+        baseBet: mg.streakBaseBet ?? mg.currentBet,
+        activityTier: mg.activityTier,
+        activityHits: mg.activityHits,
         orderId: orderResult.orderId,
         limitPrice: orderResult.limitPrice,
         fill: orderResult.fill,
@@ -479,8 +495,8 @@ async function runCycle(cycleStartTs) {
         `原因: ${escapeHtml(signalObj.reason)}\n` +
         capNote +
         priceOdds +
-        `金额: <b>${escapeHtml(fillNote || `$${spent.toFixed(2)}`)}</b>  (连败 ${mgState.consecutiveLosses}` +
-        (refreshed.activityTier != null ? ` · ${refreshed.activityTier}档` : '') +
+        `金额: <b>${escapeHtml(fillNote || `$${spent.toFixed(2)}`)}</b>  (连败 ${mg.consecutiveLosses}` +
+        (mg.activityTier != null ? ` · ${mg.activityTier}档首注$${(mg.streakBaseBet ?? mg.currentBet).toFixed(2)}` : '') +
         `)\n` +
         `类型: ${orderResult.orderType ?? config.orderType}\n` +
         await formatBalanceTelegramLine(balance) +
@@ -506,9 +522,9 @@ async function runCycle(cycleStartTs) {
         cycleEndMs,
         limitPrice: orderResult.limitPrice,
         actualBet,
-        baseBet: refreshed.currentBet,
-        activityTier: refreshed.activityTier,
-        activityHits: refreshed.activityHits,
+        baseBet: mg.streakBaseBet ?? mg.currentBet,
+        activityTier: mg.activityTier,
+        activityHits: mg.activityHits,
         ...snapshotForPending(volCtx, signalObj),
       });
 
@@ -529,8 +545,8 @@ async function runCycle(cycleStartTs) {
         `原因: ${escapeHtml(signalObj.reason)}\n` +
         capNote +
         priceOdds +
-        `预算: $${actualBet}  (连败 ${mgState.consecutiveLosses}` +
-        (refreshed.activityTier != null ? ` · ${refreshed.activityTier}档` : '') +
+        `预算: $${actualBet}  (连败 ${mg.consecutiveLosses}` +
+        (mg.activityTier != null ? ` · ${mg.activityTier}档首注$${(mg.streakBaseBet ?? mg.currentBet).toFixed(2)}` : '') +
         `)\n` +
         await formatBalanceTelegramLine(balance) +
         `盘口: ${market.slug}\n` +
@@ -864,6 +880,17 @@ async function scheduler() {
   });
 
   martingale.init();
+  if (dynamicBaseBetEnabled()) {
+    logger.info('[martingale] 动态首注已启用（12档混合）', {
+      tiers: formatTierBetTable(),
+      ...config.dynamicBaseBet,
+    });
+  } else {
+    logger.warn('[martingale] 动态首注已关闭 — 每轮固定 TRADE_BUDGET_USD', {
+      tradeBudgetUsd: config.tradeBudgetUsd,
+      hint: '设置 DYNAMIC_BASE_BET_ENABLED=true 启用',
+    });
+  }
   stats.init();
   initDailyLoss();
   loadPending();

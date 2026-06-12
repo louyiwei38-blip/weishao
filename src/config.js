@@ -29,7 +29,7 @@ function num(name, defaultValue) {
 
 function bool(name, defaultValue) {
   const v = process.env[name];
-  if (v === undefined) return defaultValue;
+  if (v === undefined || v === '') return defaultValue;
   return v.toLowerCase() === 'true';
 }
 

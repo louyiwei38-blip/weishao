@@ -44,6 +44,16 @@ console.log('\n--- L2 API creds (optional) ---');
 console.log(`${hasApi ? 'OK' : '—'}  POLY_API_KEY + SECRET + PASSPHRASE`);
 console.log('    If missing: auto createOrDeriveApiKey() when private key is set');
 
+console.log('\n--- Dynamic base bet ---');
+const dynRaw = process.env.DYNAMIC_BASE_BET_ENABLED;
+const dynEnabled = dynRaw === undefined || dynRaw === '' || dynRaw.toLowerCase() === 'true';
+console.log(`${dynEnabled ? 'OK' : 'OFF'}  DYNAMIC_BASE_BET_ENABLED (${dynEnabled ? '12-tier hybrid' : 'fixed TRADE_BUDGET_USD'})`);
+if (dynEnabled) {
+  console.log(`     tier1=$${process.env.BASE_BET_TIER1_USD ?? '2'} weak=$${process.env.BASE_BET_WEAK_MIN_USD ?? '2'}-$${process.env.BASE_BET_WEAK_MAX_USD ?? '3'} amp=$${process.env.BASE_BET_AMP_MIN_USD ?? '4'}-$${process.env.BASE_BET_AMP_MAX_USD ?? '12'}`);
+} else {
+  status('TRADE_BUDGET_USD');
+}
+
 console.log('\n--- Recommended ---');
 status('OHLCV_EXCHANGE');
 

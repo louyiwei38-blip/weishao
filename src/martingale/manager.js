@@ -18,6 +18,7 @@ const MARTINGALE_KEY = `${config.symbol}:${config.timeframe}`;
 /** @type {Record<string, {
  *   consecutiveLosses: number,
  *   currentBet: number,
+ *   streakBaseBet: number|null,
  *   isHalted: boolean,
  *   activityTier?: number|null,
  *   activityHits?: number|null,
@@ -31,6 +32,7 @@ function defaultBaseBet() {
 function applyBaseBetResolved(resolved) {
   const s = state[MARTINGALE_KEY];
   s.currentBet = resolved.baseBet;
+  s.streakBaseBet = resolved.baseBet;
   s.activityTier = resolved.tier ?? null;
   s.activityHits = resolved.hits ?? null;
 }
@@ -54,12 +56,16 @@ function loadState() {
     state[MARTINGALE_KEY] = {
       consecutiveLosses: 0,
       currentBet: defaultBaseBet(),
+      streakBaseBet: defaultBaseBet(),
       isHalted: false,
       activityTier: null,
       activityHits: null,
     };
   } else if (state[MARTINGALE_KEY].consecutiveLosses === 0 && !dynamicBaseBetEnabled()) {
     state[MARTINGALE_KEY].currentBet = defaultBaseBet();
+    state[MARTINGALE_KEY].streakBaseBet = defaultBaseBet();
+  } else if (state[MARTINGALE_KEY].streakBaseBet == null) {
+    state[MARTINGALE_KEY].streakBaseBet = state[MARTINGALE_KEY].currentBet;
   }
 }
 
@@ -88,9 +94,13 @@ export function refreshBaseBetIfNewStreak(candles5m) {
 
   if (!dynamicBaseBetEnabled()) {
     s.currentBet = defaultBaseBet();
+    s.streakBaseBet = defaultBaseBet();
     s.activityTier = null;
     s.activityHits = null;
     persist();
+    logger.debug('[martingale] 动态首注已关闭，使用 TRADE_BUDGET_USD', {
+      baseBet: s.currentBet,
+    });
     return { baseBet: s.currentBet, dynamic: false };
   }
 
@@ -125,6 +135,7 @@ export function prepareOrder(availableBalance) {
     s.consecutiveLosses = 0;
     if (!dynamicBaseBetEnabled()) {
       s.currentBet = defaultBaseBet();
+      s.streakBaseBet = defaultBaseBet();
     }
     s.activityTier = null;
     s.activityHits = null;
@@ -166,6 +177,7 @@ export function onSettled(won) {
     s.isHalted = false;
     s.activityTier = null;
     s.activityHits = null;
+    s.streakBaseBet = null;
     if (!dynamicBaseBetEnabled()) {
       s.currentBet = defaultBaseBet();
     }
@@ -181,6 +193,7 @@ export function onSettled(won) {
       s.consecutiveLosses = 0;
       s.activityTier = null;
       s.activityHits = null;
+      s.streakBaseBet = null;
       if (!dynamicBaseBetEnabled()) {
         s.currentBet = defaultBaseBet();
       }
