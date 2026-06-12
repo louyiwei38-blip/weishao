@@ -124,27 +124,27 @@ const config = {
   /** High-vol continuation: skip when rv_5m/rv_15m >= this (0 = disabled) */
   rvRatioMax: num('RV_RATIO_MAX', 0),
 
-  /** Session gate: burst-only by default — 5m bar volume ≥ threshold opens gate (refresh, no stack) */
+  /** Session gate: shrink-only — 5m bar USDT notional ≤ threshold opens gate (refresh, no stack) */
   sessionGate: {
     enabled: bool('SESSION_GATE_ENABLED', true),
     /** 5m bars fetched for bar-volume evaluation (≥ activityWindowBars when dynamic gate on) */
     candleLimit: num('SESSION_CANDLE_LIMIT', 12),
+    /** @deprecated scheduled windows removed from production gate */
     eventWindowEnabled: bool('EVENT_WINDOW_ENABLED', false),
     eventWindowHours: num('EVENT_WINDOW_HOURS', 1),
-    /** Fixed US session window in Beijing time (NY trading days only) */
     usMarketOpenEnabled: bool('US_MARKET_OPEN_ENABLED', false),
     usMarketWindowStartBj: optional('US_MARKET_WINDOW_START_BJ', '19:30'),
     usMarketWindowEndBj: optional('US_MARKET_WINDOW_END_BJ', '23:59'),
-    /** Fixed burst trigger when dynamicThresholdEnabled=false; also fallback threshold */
-    barVolumeUsdtMin: num('BAR_VOLUME_USDT_MIN', 25_000_000),
-    /** Burst gate duration after trigger; re-trigger refreshes from now (no stack) */
+    /** Fixed shrink trigger when dynamicThresholdEnabled=false */
+    barVolumeUsdtMin: num('BAR_VOLUME_USDT_MIN', 7_500_000),
+    /** Shrink gate duration after trigger; re-trigger refreshes from now (no stack) */
     volumeBurstMinutes: num('VOLUME_BURST_MINUTES', 21),
-    /** Dynamic burst trigger: freq of probe hits over activityWindowBars → thresh min..max */
+    /** Dynamic shrink trigger: cold market → lo, hot market → hi */
     dynamicThresholdEnabled: bool('DYNAMIC_THRESHOLD_ENABLED', true),
     activityWindowBars: num('ACTIVITY_WINDOW_BARS', 12),
-    activityProbeUsdtMin: num('ACTIVITY_PROBE_USDT_MIN', 25_000_000),
-    barVolumeUsdtMinDynamic: num('BAR_VOLUME_USDT_MIN_DYNAMIC', 20_000_000),
-    barVolumeUsdtMaxDynamic: num('BAR_VOLUME_USDT_MAX_DYNAMIC', 37_000_000),
+    activityProbeUsdtMin: num('ACTIVITY_PROBE_USDT_MIN', 5_000_000),
+    barVolumeUsdtMinDynamic: num('BAR_VOLUME_USDT_MIN_DYNAMIC', 5_000_000),
+    barVolumeUsdtMaxDynamic: num('BAR_VOLUME_USDT_MAX_DYNAMIC', 10_000_000),
     /** @deprecated legacy compress/volume gate — unused in production gate v2 */
     volCompressLookback: num('VOL_COMPRESS_LOOKBACK', 96),
     volCompressPercentile: num('VOL_COMPRESS_PERCENTILE', 0.40),

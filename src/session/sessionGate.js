@@ -52,13 +52,13 @@ export function computeActivityFreq(candles5m, idx) {
   };
 }
 
-/** Map activity freq → burst trigger threshold (high freq → lower threshold). */
+/** Map activity freq → shrink trigger threshold (high freq → higher threshold). */
 export function computeDynamicThreshold(freq) {
   const { barVolumeUsdtMinDynamic, barVolumeUsdtMaxDynamic } = sg();
   const lo = Math.min(barVolumeUsdtMinDynamic, barVolumeUsdtMaxDynamic);
   const hi = Math.max(barVolumeUsdtMinDynamic, barVolumeUsdtMaxDynamic);
   const clamped = Math.min(1, Math.max(0, freq));
-  return Math.round(hi - clamped * (hi - lo));
+  return Math.round(lo + clamped * (hi - lo));
 }
 
 /**
@@ -395,7 +395,7 @@ function detectBigMoveEnded(candles5m, idx, volCompression, volumeAnomaly) {
 }
 
 /**
- * Session gate: volume burst (default) or optional scheduled windows; burst refresh, no stack.
+ * Session gate: volume shrink — bar USDT notional ≤ threshold opens gate; refresh, no stack.
  * @param {Array} candles5m closed 5m OHLCV, oldest first
  * @param {number} [nowMs]
  * @param {{ volumeBurstUntilMs?: number|null }} [prevState]
@@ -407,7 +407,7 @@ export function evaluateSession(candles5m, nowMs = Date.now(), prevState = {}) {
       evaluationPassed: true,
       tradeAllowed: true,
       gateMode: 'disabled',
-      scheduledWindow: { pass: true, detail: '门控已关闭' },
+      scheduledWindow: null,
       volumeBurst: null,
       barUsdt: null,
       volumeBurstUntilMs: null,
@@ -420,23 +420,18 @@ export function evaluateSession(candles5m, nowMs = Date.now(), prevState = {}) {
   const barUsdt = computeBarUsdtNotional(bar);
   const { volumeBurstMinutes } = sg();
   const { thresholdUsdt, dynamic, activity } = resolveBurstThresholdUsdt(candles5m, idx);
-  const scheduledWindow = evaluateScheduledWindow(nowMs);
 
   let volumeBurstUntilMs = prevState.volumeBurstUntilMs ?? null;
-  const barTriggered = barUsdt != null && barUsdt >= thresholdUsdt;
+  const barTriggered = barUsdt != null && barUsdt <= thresholdUsdt;
   if (barTriggered) {
     volumeBurstUntilMs = nowMs + volumeBurstMinutes * 60_000;
   }
 
   const burstActive = volumeBurstUntilMs != null && nowMs < volumeBurstUntilMs;
-  const scheduledActive = scheduledWindow.pass;
 
   let gateMode = 'idle';
   let tradeAllowed = false;
-  if (scheduledActive) {
-    gateMode = 'scheduled';
-    tradeAllowed = true;
-  } else if (burstActive) {
+  if (burstActive) {
     gateMode = 'volume_burst';
     tradeAllowed = true;
   }
@@ -445,18 +440,16 @@ export function evaluateSession(candles5m, nowMs = Date.now(), prevState = {}) {
     ? `活跃 ${activity.hits}/${activity.windowBars} (探测≥${formatUsdtM(activity.probeLineUsdt)}) → 触发线 ${formatUsdtM(thresholdUsdt)}`
     : `触发线 ${formatUsdtM(thresholdUsdt)}`;
 
-  const passReason = scheduledActive
-    ? `定时常开: ${scheduledWindow.detail}`
-    : burstActive
-      ? `放量窗口至 ${new Date(volumeBurstUntilMs).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })} (本根 ${formatUsdtM(barUsdt)}${barTriggered ? ' 触发刷新' : ''}; ${activityHint})`
-      : barUsdt != null
-        ? `休眠 — 本根 ${formatUsdtM(barUsdt)} < ${formatUsdtM(thresholdUsdt)} (${activityHint})`
-        : '休眠 — 成交额不可用';
+  const passReason = burstActive
+    ? `缩量窗口至 ${new Date(volumeBurstUntilMs).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })} (本根 ${formatUsdtM(barUsdt)}${barTriggered ? ' 触发刷新' : ''}; ${activityHint})`
+    : barUsdt != null
+      ? `休眠 — 本根 ${formatUsdtM(barUsdt)} > ${formatUsdtM(thresholdUsdt)} (${activityHint})`
+      : '休眠 — 成交额不可用';
 
   return {
     sessionGateEnabled: true,
     barTime: bar?.t ?? null,
-    scheduledWindow,
+    scheduledWindow: null,
     volumeBurst: {
       active: burstActive,
       untilMs: volumeBurstUntilMs,
@@ -599,8 +592,7 @@ export function formatSessionTelegramBlock(sessionCtx) {
   const state = sessionCtx.sessionState ?? 'IDLE';
   const stateZh = { IDLE: '休眠', ACTIVE: '运行中', RUNNING_BIG_MOVE: '运行中' }[state] ?? state;
   const modeZh = {
-    scheduled: '定时常开',
-    volume_burst: '放量窗口',
+    volume_burst: '缩量窗口',
     idle: '休眠',
     disabled: '门控关闭',
   }[ev.gateMode] ?? ev.gateMode ?? '—';
@@ -616,15 +608,9 @@ export function formatSessionTelegramBlock(sessionCtx) {
       ? `\n触发线: <b>${escapeHtml(formatUsdtM(burst.thresholdUsdt))}</b> (固定)`
       : '';
   const burstLine = burst?.active
-    ? `\n放量窗: 至 ${escapeHtml(burst.untilBj)}${burst.barTriggered ? ' (本根刷新)' : ''}`
+    ? `\n缩量窗: 至 ${escapeHtml(burst.untilBj)}${burst.barTriggered ? ' (本根刷新)' : ''}`
     : burst?.thresholdUsdt
-      ? `\n放量触发: 本根 ≥ ${escapeHtml(formatUsdtM(burst.thresholdUsdt))} → 开 ${burst.durationMinutes} 分钟`
-      : '';
-
-  const sched = ev.scheduledWindow?.pass
-    ? `\n定时: ✓ ${escapeHtml(ev.scheduledWindow.detail)}`
-    : ev.scheduledWindow?.enabled !== false
-      ? `\n定时: ✗ ${escapeHtml(ev.scheduledWindow.detail ?? '非事件/美股时段')}`
+      ? `\n缩量触发: 本根 ≤ ${escapeHtml(formatUsdtM(burst.thresholdUsdt))} → 开 ${burst.durationMinutes} 分钟`
       : '';
 
   return (
@@ -632,7 +618,6 @@ export function formatSessionTelegramBlock(sessionCtx) {
     `门控: ${ev.evaluationPassed ? '✓ 开启' : '✗ 关闭'} — ${escapeHtml(ev.passReason ?? '—')}\n` +
     `本根成交额: ${escapeHtml(barStr)}` +
     activityLine +
-    sched +
     burstLine
   );
 }

@@ -1,7 +1,7 @@
 /**
  * Volatility-regime reversal / continuation strategy
  *
- * Production: always high-vol continuation (S1→DOWN, S2→UP).
+ * Production: always low-vol reversal (S1→UP, S2→DOWN).
  *
  * High vol — continuation:
  *   S1: K[-2]=BULL, K[-1]=BEAR  → signal DOWN  (buy NO)

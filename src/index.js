@@ -161,8 +161,8 @@ async function fetchVolatilityContext() {
     logger.error('[main] 波动率 K 线拉取失败', { error: err?.message });
     return {
       rv: null,
-      regime: 'high',
-      regimeReason: '固定高波动延续（K 线拉取失败，仍按延续模式）',
+      regime: 'low',
+      regimeReason: '固定低波动反转（K 线拉取失败，仍按反转模式）',
       partial: true,
     };
   }
@@ -174,13 +174,13 @@ async function fetchVolatilityContext() {
     rv_1m: rv.rv_1m,
     rv_5m: rv.rv_5m,
     rv_15m: rv.rv_15m,
-    mode: 'high_continuation_only',
+    mode: 'low_reversal_only',
   });
 
   return {
     rv,
-    regime: 'high',
-    regimeReason: '固定高波动延续模式',
+    regime: 'low',
+    regimeReason: '固定低波动反转模式',
     partial: false,
   };
 }
@@ -243,7 +243,7 @@ async function runCycle(cycleStartTs) {
       return;
     }
 
-    // ── Session gate: 5m bar volume burst (default burst-only; optional scheduled windows) ──
+    // ── Session gate: 5m bar volume shrink (≤ threshold opens gate; refresh, no stack) ──
     const evaluation = evaluateSession(candles, Date.now(), sessionCtx);
     sessionCtx = advanceSessionState(sessionCtx, evaluation, candles);
     sessionCtx.evaluation = evaluation;
@@ -295,7 +295,7 @@ async function runCycle(cycleStartTs) {
       return;
     }
 
-    // ── FR-2: Signal evaluation (S1/S2 high continuation) ──
+    // ── FR-2: Signal evaluation (S1/S2 low-vol reversal) ──
     const volCtx = await fetchVolatilityContext();
     lastVolCtx = volCtx;
     const signalObj = buildSignal(
@@ -303,7 +303,7 @@ async function runCycle(cycleStartTs) {
       kMinus1,
       config.symbol,
       config.timeframe,
-      'high',
+      'low',
     );
     lastSignal = signalObj.signal;
     writeSignalLog({
@@ -817,7 +817,7 @@ async function scheduler() {
     settlement: config.settleSource,
     volatilityStrategy: {
       barTimeframe: config.volatilityBarTimeframe,
-      mode: 'high_continuation_only',
+      mode: 'low_reversal_only',
     },
     sessionGate: {
       enabled: config.sessionGate.enabled,
