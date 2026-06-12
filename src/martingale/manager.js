@@ -3,6 +3,11 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import config from '../config.js';
 import logger from '../utils/logger.js';
+import {
+  dynamicBaseBetEnabled,
+  resolveBaseBetFromCandles,
+  formatDynamicBaseBetSummary,
+} from './dynamicBaseBet.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = join(__dirname, '..', '..', 'logs', 'martingale-state.json');
@@ -10,8 +15,25 @@ const LOGS_DIR = join(__dirname, '..', '..', 'logs');
 
 const MARTINGALE_KEY = `${config.symbol}:${config.timeframe}`;
 
-/** @type {Record<string, { consecutiveLosses: number, currentBet: number, isHalted: boolean }>} */
+/** @type {Record<string, {
+ *   consecutiveLosses: number,
+ *   currentBet: number,
+ *   isHalted: boolean,
+ *   activityTier?: number|null,
+ *   activityHits?: number|null,
+ * }>} */
 let state = {};
+
+function defaultBaseBet() {
+  return config.tradeBudgetUsd;
+}
+
+function applyBaseBetResolved(resolved) {
+  const s = state[MARTINGALE_KEY];
+  s.currentBet = resolved.baseBet;
+  s.activityTier = resolved.tier ?? null;
+  s.activityHits = resolved.hits ?? null;
+}
 
 // ─────────────────────────────────────────
 // Persistence
@@ -28,15 +50,16 @@ function loadState() {
       state = {};
     }
   }
-  // Ensure the key exists with defaults
   if (!state[MARTINGALE_KEY]) {
     state[MARTINGALE_KEY] = {
       consecutiveLosses: 0,
-      currentBet: config.tradeBudgetUsd,
+      currentBet: defaultBaseBet(),
       isHalted: false,
+      activityTier: null,
+      activityHits: null,
     };
-  } else if (state[MARTINGALE_KEY].consecutiveLosses === 0) {
-    state[MARTINGALE_KEY].currentBet = config.tradeBudgetUsd;
+  } else if (state[MARTINGALE_KEY].consecutiveLosses === 0 && !dynamicBaseBetEnabled()) {
+    state[MARTINGALE_KEY].currentBet = defaultBaseBet();
   }
 }
 
@@ -49,18 +72,46 @@ function persist() {
 // Public API
 // ─────────────────────────────────────────
 
-/**
- * Call once at startup to restore persisted state.
- */
 export function init() {
   loadState();
 }
 
 /**
- * Called before placing an order. Returns the actual bet size to use,
- * or a skipReason string if the order should be skipped.
- *
- * @param {number} availableBalance  – current pUSD balance
+ * Refresh base bet from activity when starting a new martingale streak.
+ * Call before prepareOrder each cycle (no-op while consecutiveLosses > 0).
+ */
+export function refreshBaseBetIfNewStreak(candles5m) {
+  const s = state[MARTINGALE_KEY];
+  if (s.consecutiveLosses !== 0) {
+    return null;
+  }
+
+  if (!dynamicBaseBetEnabled()) {
+    s.currentBet = defaultBaseBet();
+    s.activityTier = null;
+    s.activityHits = null;
+    persist();
+    return { baseBet: s.currentBet, dynamic: false };
+  }
+
+  const resolved = resolveBaseBetFromCandles(candles5m);
+  applyBaseBetResolved(resolved);
+  persist();
+
+  logger.info('[martingale] 动态首注已更新', {
+    key: MARTINGALE_KEY,
+    baseBet: resolved.baseBet,
+    tier: resolved.tier,
+    hits: resolved.hits,
+    windowBars: resolved.windowBars,
+    summary: formatDynamicBaseBetSummary(resolved),
+  });
+
+  return resolved;
+}
+
+/**
+ * @param {number} availableBalance
  * @returns {{ actualBet: number, skipReason: string | null }}
  */
 export function prepareOrder(availableBalance) {
@@ -72,7 +123,11 @@ export function prepareOrder(availableBalance) {
     });
     s.isHalted = false;
     s.consecutiveLosses = 0;
-    s.currentBet = config.tradeBudgetUsd;
+    if (!dynamicBaseBetEnabled()) {
+      s.currentBet = defaultBaseBet();
+    }
+    s.activityTier = null;
+    s.activityHits = null;
     persist();
     return { actualBet: 0, skipReason: 'halted' };
   }
@@ -80,7 +135,7 @@ export function prepareOrder(availableBalance) {
   const actualBet = Math.min(
     s.currentBet,
     config.maxBetUsd,
-    availableBalance
+    availableBalance,
   );
 
   if (actualBet <= 0) {
@@ -91,7 +146,6 @@ export function prepareOrder(availableBalance) {
 }
 
 /**
- * Call after a Polymarket market resolves.
  * @param {boolean} won
  * @returns {{ halted: boolean }}
  */
@@ -102,11 +156,19 @@ export function onSettled(won) {
   if (won) {
     logger.info('[martingale] 赢 — 重置下注', {
       key: MARTINGALE_KEY,
-      prev: { consecutiveLosses: s.consecutiveLosses, currentBet: s.currentBet },
+      prev: {
+        consecutiveLosses: s.consecutiveLosses,
+        currentBet: s.currentBet,
+        activityTier: s.activityTier,
+      },
     });
     s.consecutiveLosses = 0;
-    s.currentBet = config.tradeBudgetUsd;
     s.isHalted = false;
+    s.activityTier = null;
+    s.activityHits = null;
+    if (!dynamicBaseBetEnabled()) {
+      s.currentBet = defaultBaseBet();
+    }
   } else {
     s.consecutiveLosses += 1;
 
@@ -117,7 +179,11 @@ export function onSettled(won) {
       });
       s.isHalted = true;
       s.consecutiveLosses = 0;
-      s.currentBet = config.tradeBudgetUsd;
+      s.activityTier = null;
+      s.activityHits = null;
+      if (!dynamicBaseBetEnabled()) {
+        s.currentBet = defaultBaseBet();
+      }
       halted = true;
     } else {
       s.currentBet = s.currentBet * config.martingaleMultiplier;
@@ -125,6 +191,7 @@ export function onSettled(won) {
         key: MARTINGALE_KEY,
         consecutiveLosses: s.consecutiveLosses,
         nextBet: s.currentBet,
+        activityTier: s.activityTier,
       });
     }
   }
@@ -133,9 +200,6 @@ export function onSettled(won) {
   return { halted };
 }
 
-/**
- * Return a snapshot of current martingale state (read-only).
- */
 export function getState() {
   return { ...state[MARTINGALE_KEY] };
 }

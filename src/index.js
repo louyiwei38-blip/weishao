@@ -394,6 +394,8 @@ async function runCycle(cycleStartTs) {
     }
 
     const mgState  = martingale.getState();
+    martingale.refreshBaseBetIfNewStreak(candles);
+    const refreshed = martingale.getState();
     const { actualBet, skipReason } = martingale.prepareOrder(balance);
 
     if (skipReason) {
@@ -417,7 +419,9 @@ async function runCycle(cycleStartTs) {
       conditionId: market.conditionId,
       cycleStartTs,
       actualBet,
-      baseBet: config.tradeBudgetUsd,
+      baseBet: refreshed.currentBet,
+      activityTier: refreshed.activityTier,
+      activityHits: refreshed.activityHits,
       consecutiveLosses: mgState.consecutiveLosses,
       yesPrice: pricePolicy.yesPrice ?? market.yesPrice,
       noPrice: pricePolicy.noPrice ?? market.noPrice,
@@ -447,6 +451,9 @@ async function runCycle(cycleStartTs) {
         cycleStartTs,
         signal: signalObj.signal,
         actualBet: spent,
+        baseBet: refreshed.currentBet,
+        activityTier: refreshed.activityTier,
+        activityHits: refreshed.activityHits,
         orderId: orderResult.orderId,
         limitPrice: orderResult.limitPrice,
         fill: orderResult.fill,
@@ -472,7 +479,9 @@ async function runCycle(cycleStartTs) {
         `原因: ${escapeHtml(signalObj.reason)}\n` +
         capNote +
         priceOdds +
-        `金额: <b>${escapeHtml(fillNote || `$${spent.toFixed(2)}`)}</b>  (连败 ${mgState.consecutiveLosses})\n` +
+        `金额: <b>${escapeHtml(fillNote || `$${spent.toFixed(2)}`)}</b>  (连败 ${mgState.consecutiveLosses}` +
+        (refreshed.activityTier != null ? ` · ${refreshed.activityTier}档` : '') +
+        `)\n` +
         `类型: ${orderResult.orderType ?? config.orderType}\n` +
         await formatBalanceTelegramLine(balance) +
         `盘口: ${market.slug}\n` +
@@ -496,6 +505,10 @@ async function runCycle(cycleStartTs) {
         signalReason: signalObj.reason,
         cycleEndMs,
         limitPrice: orderResult.limitPrice,
+        actualBet,
+        baseBet: refreshed.currentBet,
+        activityTier: refreshed.activityTier,
+        activityHits: refreshed.activityHits,
         ...snapshotForPending(volCtx, signalObj),
       });
 
@@ -516,7 +529,9 @@ async function runCycle(cycleStartTs) {
         `原因: ${escapeHtml(signalObj.reason)}\n` +
         capNote +
         priceOdds +
-        `预算: $${actualBet}  (连败 ${mgState.consecutiveLosses})\n` +
+        `预算: $${actualBet}  (连败 ${mgState.consecutiveLosses}` +
+        (refreshed.activityTier != null ? ` · ${refreshed.activityTier}档` : '') +
+        `)\n` +
         await formatBalanceTelegramLine(balance) +
         `盘口: ${market.slug}\n` +
         `周期内自动监视成交\n` +
@@ -571,6 +586,9 @@ function registerPendingBet({
   cycleStartTs,
   signal,
   actualBet,
+  baseBet,
+  activityTier,
+  activityHits,
   orderId,
   limitPrice,
   entryPrice,
@@ -586,6 +604,9 @@ function registerPendingBet({
     cycleStartTs,
     signal,
     actualBet,
+    baseBet: baseBet ?? null,
+    activityTier: activityTier ?? null,
+    activityHits: activityHits ?? null,
     targetPrice: openSnap?.price,
     orderId,
     limitPrice,
@@ -600,6 +621,9 @@ function registerPendingBet({
     cycleStartTs: formatBeijingTime(cycleStartTs),
     signal,
     actualBet,
+    baseBet: pendingBet.baseBet,
+    activityTier: pendingBet.activityTier,
+    activityHits: pendingBet.activityHits,
     orderId,
     targetPrice: pendingBet.targetPrice,
     volRegime,
@@ -716,6 +740,9 @@ async function applySettlement(pending, { candles } = {}) {
     cycleStartTs,
     signal,
     actualBet,
+    baseBet: pending.baseBet ?? null,
+    activityTier: pending.activityTier ?? null,
+    activityHits: pending.activityHits ?? null,
     entryPrice: entryPrice ?? limitPrice ?? null,
     pnlUsd,
     won,
@@ -823,6 +850,16 @@ async function scheduler() {
       enabled: config.sessionGate.enabled,
       state: sessionCtx.sessionState,
     },
+    dynamicBaseBet: config.dynamicBaseBet.enabled
+      ? {
+          enabled: true,
+          tier1Usd: config.dynamicBaseBet.tier1Usd,
+          weakMinUsd: config.dynamicBaseBet.weakMinUsd,
+          weakMaxUsd: config.dynamicBaseBet.weakMaxUsd,
+          ampMinUsd: config.dynamicBaseBet.ampMinUsd,
+          ampMaxUsd: config.dynamicBaseBet.ampMaxUsd,
+        }
+      : { enabled: false, fallbackUsd: config.tradeBudgetUsd },
     ...stats.formatLogFields(),
   });
 
@@ -853,6 +890,9 @@ async function scheduler() {
       cycleStartTs: ctx.cycleStartTs,
       signal: ctx.signal,
       actualBet: ctx.actualBet,
+      baseBet: ctx.baseBet,
+      activityTier: ctx.activityTier,
+      activityHits: ctx.activityHits,
       orderId: ctx.orderId,
       limitPrice: ctx.limitPrice,
       fill: ctx.fill,
