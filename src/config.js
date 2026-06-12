@@ -136,15 +136,15 @@ const config = {
     usMarketWindowStartBj: optional('US_MARKET_WINDOW_START_BJ', '19:30'),
     usMarketWindowEndBj: optional('US_MARKET_WINDOW_END_BJ', '23:59'),
     /** Fixed shrink trigger when dynamicThresholdEnabled=false */
-    barVolumeUsdtMin: num('BAR_VOLUME_USDT_MIN', 7_500_000),
+    barVolumeUsdtMin: num('BAR_VOLUME_USDT_MIN', 5_000_000),
     /** Shrink gate duration after trigger; re-trigger refreshes from now (no stack) */
     volumeBurstMinutes: num('VOLUME_BURST_MINUTES', 21),
-    /** Dynamic shrink trigger: cold market → lo, hot market → hi */
+    /** Dynamic shrink trigger: cold market → lo (3M), hot market → hi (7M) — 90d backtest ROI leader */
     dynamicThresholdEnabled: bool('DYNAMIC_THRESHOLD_ENABLED', true),
     activityWindowBars: num('ACTIVITY_WINDOW_BARS', 12),
-    activityProbeUsdtMin: num('ACTIVITY_PROBE_USDT_MIN', 5_000_000),
-    barVolumeUsdtMinDynamic: num('BAR_VOLUME_USDT_MIN_DYNAMIC', 5_000_000),
-    barVolumeUsdtMaxDynamic: num('BAR_VOLUME_USDT_MAX_DYNAMIC', 10_000_000),
+    activityProbeUsdtMin: num('ACTIVITY_PROBE_USDT_MIN', 3_000_000),
+    barVolumeUsdtMinDynamic: num('BAR_VOLUME_USDT_MIN_DYNAMIC', 3_000_000),
+    barVolumeUsdtMaxDynamic: num('BAR_VOLUME_USDT_MAX_DYNAMIC', 7_000_000),
     /** @deprecated legacy compress/volume gate — unused in production gate v2 */
     volCompressLookback: num('VOL_COMPRESS_LOOKBACK', 96),
     volCompressPercentile: num('VOL_COMPRESS_PERCENTILE', 0.40),
