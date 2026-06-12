@@ -27,9 +27,9 @@ async function main() {
 
   const volCandles = await fetchVolatilityCandles();
   const rv = computeSignalVolatility(volCandles);
-  console.log('\n[0] Volatility (log only):', { rv_5m: rv.rv_5m, rv_15m: rv.rv_15m, mode: 'high_continuation_only' });
+  console.log('\n[0] Volatility (log only):', { rv_5m: rv.rv_5m, rv_15m: rv.rv_15m, mode: 'low_reversal_only' });
 
-  const signalObj = buildSignal(kMinus2, kMinus1, config.symbol, config.timeframe, 'high');
+  const signalObj = buildSignal(kMinus2, kMinus1, config.symbol, config.timeframe, 'low');
   console.log('\n[1] Signal:', signalObj.signal, signalObj.signalId, '-', signalObj.reason);
 
   if (signalObj.signal === 'NONE') {
