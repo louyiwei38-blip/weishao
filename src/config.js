@@ -138,13 +138,13 @@ const config = {
     /** Fixed burst trigger when dynamicThresholdEnabled=false; also fallback threshold */
     barVolumeUsdtMin: num('BAR_VOLUME_USDT_MIN', 25_000_000),
     /** Burst gate duration after trigger; re-trigger refreshes from now (no stack) */
-    volumeBurstMinutes: num('VOLUME_BURST_MINUTES', 20),
+    volumeBurstMinutes: num('VOLUME_BURST_MINUTES', 21),
     /** Dynamic burst trigger: freq of probe hits over activityWindowBars → thresh min..max */
     dynamicThresholdEnabled: bool('DYNAMIC_THRESHOLD_ENABLED', true),
     activityWindowBars: num('ACTIVITY_WINDOW_BARS', 12),
     activityProbeUsdtMin: num('ACTIVITY_PROBE_USDT_MIN', 25_000_000),
-    barVolumeUsdtMinDynamic: num('BAR_VOLUME_USDT_MIN_DYNAMIC', 15_000_000),
-    barVolumeUsdtMaxDynamic: num('BAR_VOLUME_USDT_MAX_DYNAMIC', 35_000_000),
+    barVolumeUsdtMinDynamic: num('BAR_VOLUME_USDT_MIN_DYNAMIC', 20_000_000),
+    barVolumeUsdtMaxDynamic: num('BAR_VOLUME_USDT_MAX_DYNAMIC', 37_000_000),
     /** @deprecated legacy compress/volume gate — unused in production gate v2 */
     volCompressLookback: num('VOL_COMPRESS_LOOKBACK', 96),
     volCompressPercentile: num('VOL_COMPRESS_PERCENTILE', 0.40),
