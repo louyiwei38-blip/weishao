@@ -135,12 +135,12 @@ const config = {
     usMarketOpenEnabled: bool('US_MARKET_OPEN_ENABLED', false),
     usMarketWindowStartBj: optional('US_MARKET_WINDOW_START_BJ', '19:30'),
     usMarketWindowEndBj: optional('US_MARKET_WINDOW_END_BJ', '23:59'),
-    /** Fixed shrink trigger when dynamicThresholdEnabled=false */
-    barVolumeUsdtMin: num('BAR_VOLUME_USDT_MIN', 5_000_000),
+    /** Fixed shrink trigger (default 3M); used when dynamicThresholdEnabled=false */
+    barVolumeUsdtMin: num('BAR_VOLUME_USDT_MIN', 3_000_000),
     /** Shrink gate duration after trigger; re-trigger refreshes from now (no stack) */
     volumeBurstMinutes: num('VOLUME_BURST_MINUTES', 21),
-    /** Dynamic shrink trigger: cold market → lo (3M), hot market → hi (7M) — 90d backtest ROI leader */
-    dynamicThresholdEnabled: bool('DYNAMIC_THRESHOLD_ENABLED', true),
+    /** false = fixed BAR_VOLUME_USDT_MIN; true = dynamic min..max by activity freq */
+    dynamicThresholdEnabled: bool('DYNAMIC_THRESHOLD_ENABLED', false),
     activityWindowBars: num('ACTIVITY_WINDOW_BARS', 12),
     activityProbeUsdtMin: num('ACTIVITY_PROBE_USDT_MIN', 3_000_000),
     barVolumeUsdtMinDynamic: num('BAR_VOLUME_USDT_MIN_DYNAMIC', 3_000_000),

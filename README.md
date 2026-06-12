@@ -32,27 +32,20 @@ Polymarket 5 分钟涨跌盘口自动交易机器人：OKX 永续 5m K 线形态
 
 默认 **开启**（`SESSION_GATE_ENABLED=true`）。门控关闭时等同常开。
 
-每根 5m K 线收盘后，用该根 **USDT 成交额**（`volume × close`）与动态触发线比较：
+每根 5m K 线收盘后，用该根 **USDT 成交额**（`volume × close`）与固定触发线比较：
 
 ```
-本根成交额 ≤ 触发线  →  开门 21 分钟（VOLUME_BURST_MINUTES）
-再次触发              →  从当前时刻刷新，不叠加
-窗口内                →  tradeAllowed = true，执行 S1/S2
-窗口外                →  IDLE，本周期不新开单（仍结算 pending 注单）
+本根成交额 ≤ 3M USDT  →  开门 21 分钟（VOLUME_BURST_MINUTES）
+再次触发               →  从当前时刻刷新，不叠加
+窗口内                 →  tradeAllowed = true，执行 S1/S2
+窗口外                 →  IDLE，本周期不新开单（仍结算 pending 注单）
 ```
 
-### 动态触发线
+### 固定触发线
 
-`DYNAMIC_THRESHOLD_ENABLED=true`（默认）时，近 **12 根**（1h）统计「成交额 ≥ 探测线（3M USDT）」的占比：
+默认 **`DYNAMIC_THRESHOLD_ENABLED=false`**，触发线 **`BAR_VOLUME_USDT_MIN=3M`**（90 天回测门控组 ROI 最高 2.9%）。
 
-| 市场活跃度 | 触发线 |
-|------------|--------|
-| **低**（冷市） | **3M** — `BAR_VOLUME_USDT_MIN_DYNAMIC` |
-| **高**（热市） | **7M** — `BAR_VOLUME_USDT_MAX_DYNAMIC` |
-
-关闭动态门控时，使用固定线 **5M**（`BAR_VOLUME_USDT_MIN`）。
-
-> 默认参数来自 90 天回测：**动态 3–7M / 探测 3M** 在门控组中 ROI 最高（1.3%）。
+若改回动态门控，设 `DYNAMIC_THRESHOLD_ENABLED=true` 并配置 `BAR_VOLUME_USDT_MIN_DYNAMIC` / `MAX_DYNAMIC` / `ACTIVITY_PROBE_USDT_MIN`。
 
 > 定时常开（宏观日历 / 美股时段）已从生产门控移除，**仅缩量窗**。
 
@@ -98,11 +91,8 @@ scripts/
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | `SESSION_GATE_ENABLED` | true | false = 常开 |
-| `DYNAMIC_THRESHOLD_ENABLED` | true | false = 固定 5M |
-| `ACTIVITY_PROBE_USDT_MIN` | 3000000 | 活跃度探测线 |
-| `BAR_VOLUME_USDT_MIN_DYNAMIC` | 3000000 | 冷市触发线 |
-| `BAR_VOLUME_USDT_MAX_DYNAMIC` | 7000000 | 热市触发线 |
-| `BAR_VOLUME_USDT_MIN` | 5000000 | 固定模式触发线 |
+| `DYNAMIC_THRESHOLD_ENABLED` | false | true = 动态 min..max |
+| `BAR_VOLUME_USDT_MIN` | 3000000 | 固定触发线（≤ 即开门） |
 | `VOLUME_BURST_MINUTES` | 21 | 触发后开门时长 |
 
 ### 马丁 / 风控 / 下单
