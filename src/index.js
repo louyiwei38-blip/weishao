@@ -1,5 +1,5 @@
 /**
- * Polymarket Reversal Continuation Bot — entry point
+ * Polymarket Single-Candle Follow Bot — entry point
  * PRD v2.2 | BTC/USDT 5m | Martingale 4-loss stop
  */
 
@@ -234,7 +234,6 @@ async function runCycle(cycleStartTs) {
       await trySettlePending(pendingBet, { candles });
     }
 
-    const kMinus2 = candles.at(-2);
     const kMinus1 = candles.at(-1);
 
     if (!isCandleFresh(kMinus1, CYCLE_MS)) {
@@ -295,11 +294,10 @@ async function runCycle(cycleStartTs) {
       return;
     }
 
-    // ── FR-2: Signal evaluation (S1/S2 high continuation) ──
+    // ── FR-2: Signal evaluation (K[-1] single-candle follow) ──
     const volCtx = await fetchVolatilityContext();
     lastVolCtx = volCtx;
     const signalObj = buildSignal(
-      kMinus2,
       kMinus1,
       config.symbol,
       config.timeframe,
@@ -817,7 +815,7 @@ async function scheduler() {
     settlement: config.settleSource,
     volatilityStrategy: {
       barTimeframe: config.volatilityBarTimeframe,
-      mode: 'high_continuation_only',
+      mode: 'k_minus1_follow',
     },
     sessionGate: {
       enabled: config.sessionGate.enabled,

@@ -22,14 +22,13 @@ async function main() {
   const cycleStartTs = Math.floor(Date.now() / CYCLE_MS) * CYCLE_MS;
 
   const candles = await fetchClosedCandles(config.candleLimit);
-  const kMinus2 = candles.at(-2);
   const kMinus1 = candles.at(-1);
 
   const volCandles = await fetchVolatilityCandles();
   const rv = computeSignalVolatility(volCandles);
   console.log('\n[0] Volatility (log only):', { rv_5m: rv.rv_5m, rv_15m: rv.rv_15m, mode: 'high_continuation_only' });
 
-  const signalObj = buildSignal(kMinus2, kMinus1, config.symbol, config.timeframe, 'high');
+  const signalObj = buildSignal(kMinus1, config.symbol, config.timeframe, 'high');
   console.log('\n[1] Signal:', signalObj.signal, signalObj.signalId, '-', signalObj.reason);
 
   if (signalObj.signal === 'NONE') {
