@@ -55,6 +55,37 @@ function hasFlag(name) {
   return process.argv.includes(`--${name}`);
 }
 
+function parseHybridOpts() {
+  const weakMin = Number(parseArg('weak-min', null));
+  const weakMax = Number(parseArg('weak-max', null));
+  const ampMin = Number(parseArg('amp-min', null));
+  const ampMax = Number(parseArg('amp-max', null));
+  const tier12Usd = Number(parseArg('tier12', null));
+  if ([weakMin, weakMax, ampMin, ampMax].every((n) => Number.isFinite(n))) {
+    return {
+      weakMin,
+      weakMax,
+      ampMin,
+      ampMax,
+      ...(Number.isFinite(tier12Usd) ? { tier12Usd } : {}),
+    };
+  }
+  return { ...RECOMMENDED_HYBRID_OPTS };
+}
+
+function formatHybridParamLabel(opts) {
+  if (opts.tier12Usd != null) {
+    const weak = opts.weakMin === opts.weakMax
+      ? `1-8档=$${opts.weakMin}`
+      : `1档=$${opts.weakMin} | 2-6档 $${opts.weakMin}→$${opts.weakMax} | 7-8档=$${opts.weakMax}`;
+    return `${weak} | 9-11档 $${opts.ampMin}→$${opts.ampMax} | 12档=$${opts.tier12Usd}`;
+  }
+  if (opts.weakMin === opts.weakMax) {
+    return `1-8档=$${opts.weakMin} | 9-12档 $${opts.ampMin}→$${opts.ampMax}`;
+  }
+  return `1档=$${opts.weakMin} | 2-6档 $${opts.weakMin}→$${opts.weakMax} | 7-8档=$${opts.weakMax} | 9-12档 $${opts.ampMin}→$${opts.ampMax}`;
+}
+
 function fmtTs(ms) {
   return new Date(ms).toISOString().replace('T', ' ').slice(0, 16);
 }
@@ -83,13 +114,15 @@ export function resolveTierBaseBet(tier, minBet, maxBet) {
 }
 
 /**
- * Hybrid: tier 1→$2, tier 2-6 linear $2-$3, tier 7-8 flat $3, tier 9-12 linear ampMin-ampMax.
+ * Hybrid: tier 1→weakMin, tier 2-6 linear, tier 7-8 flat weakMax,
+ * tier 9-12 linear ampMin-ampMax (or tier 9-11 linear + tier12Usd when set).
  */
 export function resolveHybridTierBaseBet(tier, {
   weakMin = 2,
   weakMax = 3,
   ampMin = 4,
   ampMax = 12,
+  tier12Usd = null,
 } = {}) {
   const t = Math.max(1, Math.min(TIER_COUNT, tier));
   const lo = Math.min(weakMin, weakMax);
@@ -100,14 +133,18 @@ export function resolveHybridTierBaseBet(tier, {
   if (t <= 1) return lo;
   if (t <= 6) return lo + ((t - 2) / (6 - 2)) * (hi - lo);
   if (t <= 8) return hi;
+  if (tier12Usd != null && Number.isFinite(tier12Usd)) {
+    if (t >= 12) return tier12Usd;
+    return ampLo + ((t - 9) / (11 - 9)) * (ampHi - ampLo);
+  }
   return ampLo + ((t - 9) / (12 - 9)) * (ampHi - ampLo);
 }
 
-function buildHybridTierBetTable({ weakMin = 2, weakMax = 3, ampMin = 4, ampMax = 12 } = {}) {
+function buildHybridTierBetTable(opts = {}) {
   return Array.from({ length: TIER_COUNT }, (_, i) => ({
     tier: i + 1,
     hitsRange: tierHitsRange(i + 1),
-    baseBet: Number(resolveHybridTierBaseBet(i + 1, { weakMin, weakMax, ampMin, ampMax }).toFixed(2)),
+    baseBet: Number(resolveHybridTierBaseBet(i + 1, opts).toFixed(2)),
   }));
 }
 
@@ -502,9 +539,9 @@ async function runTier12HybridBacktest({
 async function runRecommendedHybridBacktest(ctx) {
   const {
     c5, rawTrades, fromMs, toMs, days, marketCtx, gateOpenPct, fixedBase,
+    hybridOpts = RECOMMENDED_HYBRID_OPTS,
   } = ctx;
   const sg = config.sessionGate;
-  const hybridOpts = RECOMMENDED_HYBRID_OPTS;
 
   const baseline = simulateMartingaleBetting(rawTrades, c5, { fixedBase });
   delete baseline.tradeDetails;
@@ -524,10 +561,16 @@ async function runRecommendedHybridBacktest(ctx) {
   const report = {
     mode: 'tier12_recommended',
     params: {
-      tier1: '$2',
-      tier2to6: '$2 → $3',
-      tier7to8: '$3',
-      tier9to12: '$4 → $12',
+      tier1to8: hybridOpts.weakMin === hybridOpts.weakMax
+        ? `$${hybridOpts.weakMin}`
+        : `$${hybridOpts.weakMin} → $${hybridOpts.weakMax}`,
+      tier9to11: hybridOpts.tier12Usd != null
+        ? `$${hybridOpts.ampMin} → $${hybridOpts.ampMax}`
+        : undefined,
+      tier9to12: hybridOpts.tier12Usd == null
+        ? `$${hybridOpts.ampMin} → $${hybridOpts.ampMax}`
+        : undefined,
+      tier12: hybridOpts.tier12Usd != null ? `$${hybridOpts.tier12Usd}` : undefined,
       ...hybridOpts,
     },
     range: { from: fmtTs(fromMs), to: fmtTs(toMs), days },
@@ -549,7 +592,7 @@ async function runRecommendedHybridBacktest(ctx) {
     tierBetTable,
     result: {
       ...result,
-      label: '推荐混合 2-6:$2-3 | 7-8:$3 | 9-12:$4-12',
+      label: `推荐混合 ${formatHybridParamLabel(hybridOpts)}`,
       pnlDeltaVsFixed: result.pnl - baseline.pnl,
       pnlDeltaVsFullTier12: result.pnl - fullTier12.pnl,
       maxDdDeltaVsFixed: result.maxDrawdown - baseline.maxDrawdown,
@@ -562,7 +605,7 @@ async function runRecommendedHybridBacktest(ctx) {
 
   const r = report.result;
   console.log(`\n=== 推荐上线参数回测 · OKX ${marketCtx.label} · ${days}d ===`);
-  console.log('参数: 1档=$2 | 2-6档 $2→$3 | 7-8档=$3 | 9-12档 $4→$12');
+  console.log(`参数: ${formatHybridParamLabel(hybridOpts)}`);
   console.log(`门控: 放量窗 ${sg.volumeBurstMinutes}min | 动态阈值 ${sg.barVolumeUsdtMinDynamic / 1e6}M–${sg.barVolumeUsdtMaxDynamic / 1e6}M`);
   console.log(`门控开启: ${(gateOpenPct * 100).toFixed(1)}% | 信号: ${rawTrades.length}笔 | 成交: ${r.trades}笔`);
 
@@ -833,6 +876,7 @@ async function main() {
       marketCtx,
       gateOpenPct,
       fixedBase,
+      hybridOpts: parseHybridOpts(),
     });
     return;
   }

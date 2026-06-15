@@ -75,12 +75,26 @@ Polymarket 5 分钟涨跌盘口自动交易机器人：OKX 永续 5m K 线形态
 
 默认 **开启**（`DYNAMIC_BASE_BET_ENABLED=true`）。在新马丁序列开始时（`consecutiveLosses === 0`），按近窗活跃度映射 12 档，决定本序列**首注金额**；连亏中仍按 `MARTINGALE_MULTIPLIER` 加倍，**不在连亏中途改档**。
 
+### 生产默认（`.env`）
+
 | 档位 | 活跃度（探测命中） | 默认首注 |
 |------|-------------------|----------|
 | 1 档 | 0 根 | $2 |
 | 2–6 档 | 冷 → 温 | $2 → $3 线性 |
 | 7–8 档 | 持平 | $3 |
 | 9–12 档 | 热 | $4 → $12 线性 |
+
+### 回测推荐（365d OKX 永续 + 放量窗）
+
+回测脚本支持 `--weak-min` / `--weak-max` / `--amp-min` / `--amp-max` / `--tier12` 覆盖档位金额。当前推荐混合参数：
+
+| 档位 | 首注 |
+|------|------|
+| 1–8 档 | $1（冷/温档压注） |
+| 9–11 档 | $3 → $8 线性 |
+| 12 档 | $24（热档加码） |
+
+365 天回测（`--recommended --weak-min=1 --weak-max=1 --amp-min=3 --amp-max=8 --tier12=24`）：PnL **+$7,685**、ROI **4.05%**、最大回撤 **$3,030**（对比固定 $3 基线 PnL -$264）。详见 `logs/backtest-dynamic-base-bet-tier12-recommended.json`。
 
 - **赢一局**或**连亏 4 次停机**：下一序列重新按活跃度刷新首注
 - 关闭：`DYNAMIC_BASE_BET_ENABLED=false` → 始终使用 `TRADE_BUDGET_USD`
@@ -124,7 +138,9 @@ src/
 └── utils/                           # logger, retry, telegram, volatility, usMarketOpen…
 scripts/
 ├── backtest-session-gate-v2.js      # 放量窗门控回测
-├── backtest-dynamic-base-bet.js       # 动态首注回测
+├── backtest-dynamic-base-bet.js     # 动态首注回测（--recommended / --tier12-hybrid）
+├── analyze-tier-only-roi.js         # 单档 vs 全档混合 ROI 对比
+├── backtest-tier9-12-by-regime.js   # 9-12 档按行情段（月/季/波动）拆解
 ├── backtest-daily-vol-pnl.js        # 日成交量 vs 盈亏回测
 ├── backtest-volume-filter-realtime.js
 └── test-cycle.js                    # 单次周期空跑测试
@@ -252,7 +268,11 @@ Polymarket / 钱包 / Telegram 变量见 `.env.example`。
 | `node scripts/check-env.js` | 检查配置 |
 | `DRY_RUN=true node scripts/test-cycle.js` | 单次周期测试 |
 | `node scripts/backtest-session-gate-v2.js` | 放量窗门控回测 |
-| `node scripts/backtest-dynamic-base-bet.js` | 动态首注回测 |
+| `node scripts/backtest-dynamic-base-bet.js --days=365 --recommended` | 推荐混合档位回测（默认 2-6:$2-3 · 7-8:$3 · 9-12:$4-12） |
+| `node scripts/backtest-dynamic-base-bet.js --days=365 --recommended --weak-min=1 --weak-max=1 --amp-min=3 --amp-max=8 --tier12=24` | 回测推荐参数（1-8:$1 · 9-11:$3-8 · 12:$24） |
+| `node scripts/backtest-dynamic-base-bet.js --days=365 --tier12-hybrid` | 混合档位网格搜索 |
+| `node scripts/analyze-tier-only-roi.js --days=365` | 单档 vs 全档 ROI 对比（输出 `logs/analyze-tier-only-roi.json`） |
+| `node scripts/backtest-tier9-12-by-regime.js --days=365` | 9-12 档按行情段拆解（月/季/波动/自定义窗口） |
 | `node scripts/backtest-daily-vol-pnl.js --days=365` | 日成交量 vs 盈亏回测 |
 | `node scripts/backtest-volume-filter-realtime.js` | 成交量过滤器回测（离线） |
 
