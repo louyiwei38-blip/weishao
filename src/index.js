@@ -869,11 +869,10 @@ async function scheduler() {
     dynamicBaseBet: config.dynamicBaseBet.enabled
       ? {
           enabled: true,
-          tier1Usd: config.dynamicBaseBet.tier1Usd,
-          weakMinUsd: config.dynamicBaseBet.weakMinUsd,
-          weakMaxUsd: config.dynamicBaseBet.weakMaxUsd,
-          ampMinUsd: config.dynamicBaseBet.ampMinUsd,
-          ampMaxUsd: config.dynamicBaseBet.ampMaxUsd,
+          tier1_9Usd: config.dynamicBaseBet.tier1_9Usd,
+          tier10Usd: config.dynamicBaseBet.tier10Usd,
+          tier11Usd: config.dynamicBaseBet.tier11Usd,
+          tier12Usd: config.dynamicBaseBet.tier12Usd,
         }
       : { enabled: false, fallbackUsd: config.tradeBudgetUsd },
     ...stats.formatLogFields(),
@@ -881,7 +880,7 @@ async function scheduler() {
 
   martingale.init();
   if (dynamicBaseBetEnabled()) {
-    logger.info('[martingale] 动态首注已启用（12档混合）', {
+    logger.info('[martingale] 动态首注已启用（1-9/10/11/12 四档）', {
       tiers: formatTierBetTable(),
       ...config.dynamicBaseBet,
     });

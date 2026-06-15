@@ -1,6 +1,6 @@
 /**
- * 12-tier hybrid base bet from session-gate activity (probe hits in last N bars).
- * Default: tier1=$2 | tier2-6 $2→$3 | tier7-8 $3 | tier9-12 $4→$12
+ * 12-tier activity → 4-bucket base bet (1-9 / 10 / 11 / 12).
+ * Default: 1-9=$1 | 10=$6 | 11=$8 | 12=$24
  */
 
 import config from '../config.js';
@@ -20,11 +20,10 @@ export function dynamicBaseBetEnabled() {
 export function getDynamicBaseBetOpts() {
   const c = config.dynamicBaseBet;
   return {
-    tier1Usd: c.tier1Usd,
-    weakMinUsd: c.weakMinUsd,
-    weakMaxUsd: c.weakMaxUsd,
-    ampMinUsd: c.ampMinUsd,
-    ampMaxUsd: c.ampMaxUsd,
+    tier1_9Usd: c.tier1_9Usd,
+    tier10Usd: c.tier10Usd,
+    tier11Usd: c.tier11Usd,
+    tier12Usd: c.tier12Usd,
   };
 }
 
@@ -36,23 +35,28 @@ export function activityHitsToTier(hits, windowBars = TIER_COUNT) {
 }
 
 /**
- * Hybrid tier → base bet USD.
+ * Activity tier 1..12 → base bet USD (4 buckets).
  * @param {number} tier 1..12
  * @param {object} [opts] override config.dynamicBaseBet fields
  */
-export function resolveHybridTierBaseBet(tier, opts = null) {
+export function resolveTierBaseBet(tier, opts = null) {
   const c = opts ?? config.dynamicBaseBet;
-  const tier1 = Number(c.tier1Usd ?? c.weakMinUsd);
-  const weakMin = Math.min(Number(c.weakMinUsd), Number(c.weakMaxUsd));
-  const weakMax = Math.max(Number(c.weakMinUsd), Number(c.weakMaxUsd));
-  const ampMin = Math.min(Number(c.ampMinUsd), Number(c.ampMaxUsd));
-  const ampMax = Math.max(Number(c.ampMinUsd), Number(c.ampMaxUsd));
   const t = Math.max(1, Math.min(TIER_COUNT, tier));
 
-  if (t <= 1) return roundBet(tier1);
-  if (t <= 6) return roundBet(weakMin + ((t - 2) / (6 - 2)) * (weakMax - weakMin));
-  if (t <= 8) return roundBet(weakMax);
-  return roundBet(ampMin + ((t - 9) / (12 - 9)) * (ampMax - ampMin));
+  if (t <= 9) return roundBet(Number(c.tier1_9Usd));
+  if (t === 10) return roundBet(Number(c.tier10Usd));
+  if (t === 11) return roundBet(Number(c.tier11Usd));
+  return roundBet(Number(c.tier12Usd));
+}
+
+/** @deprecated Use resolveTierBaseBet */
+export function resolveHybridTierBaseBet(tier, opts = null) {
+  return resolveTierBaseBet(tier, opts);
+}
+
+export function formatTierParamLabel(opts = null) {
+  const c = opts ?? config.dynamicBaseBet;
+  return `1-9档=$${c.tier1_9Usd} | 10档=$${c.tier10Usd} | 11档=$${c.tier11Usd} | 12档=$${c.tier12Usd}`;
 }
 
 /**
@@ -83,7 +87,7 @@ export function resolveBaseBetFromCandles(candles5m) {
   const idx = candles5m.length - 1;
   const activity = computeActivityFreq(candles5m, idx);
   const tier = activityHitsToTier(activity.hits, activity.windowBars);
-  const baseBet = resolveHybridTierBaseBet(tier);
+  const baseBet = resolveTierBaseBet(tier);
 
   return {
     baseBet,
@@ -98,7 +102,7 @@ export function resolveBaseBetFromCandles(candles5m) {
 export function formatTierBetTable() {
   return Array.from({ length: TIER_COUNT }, (_, i) => ({
     tier: i + 1,
-    baseBet: resolveHybridTierBaseBet(i + 1),
+    baseBet: resolveTierBaseBet(i + 1),
   }));
 }
 

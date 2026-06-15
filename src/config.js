@@ -125,19 +125,19 @@ const config = {
   rvRatioMax: num('RV_RATIO_MAX', 0),
 
   /**
-   * Dynamic first bet by session-gate activity tier (12 tiers).
+   * Dynamic first bet by session-gate activity tier (12 tiers → 4 bet buckets).
    * Disabled → TRADE_BUDGET_USD for every new streak.
    */
   dynamicBaseBet: {
     enabled: bool('DYNAMIC_BASE_BET_ENABLED', true),
-    /** Tier 1 (0 probe hits) */
-    tier1Usd: num('BASE_BET_TIER1_USD', 2),
-    /** Tier 2–6 linear range (cold weak band) */
-    weakMinUsd: num('BASE_BET_WEAK_MIN_USD', 2),
-    weakMaxUsd: num('BASE_BET_WEAK_MAX_USD', 3),
-    /** Tier 7–8 flat at weakMax; tier 9–12 linear ampMin→ampMax */
-    ampMinUsd: num('BASE_BET_AMP_MIN_USD', 4),
-    ampMaxUsd: num('BASE_BET_AMP_MAX_USD', 12),
+    /** Activity tiers 1–9 (cold→warm) */
+    tier1_9Usd: num('BASE_BET_TIER1_9_USD', 1),
+    /** Activity tier 10 */
+    tier10Usd: num('BASE_BET_TIER10_USD', 6),
+    /** Activity tier 11 */
+    tier11Usd: num('BASE_BET_TIER11_USD', 8),
+    /** Activity tier 12 (hottest) */
+    tier12Usd: num('BASE_BET_TIER12_USD', 24),
   },
 
   /** Session gate: burst-only by default — 5m bar volume ≥ threshold opens gate (refresh, no stack) */

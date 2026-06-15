@@ -71,30 +71,16 @@ Polymarket 5 分钟涨跌盘口自动交易机器人：OKX 永续 5m K 线形态
 
 ---
 
-## 动态首注（12 档）
+## 动态首注（活跃度 12 档 → 首注 4 桶）
 
-默认 **开启**（`DYNAMIC_BASE_BET_ENABLED=true`）。在新马丁序列开始时（`consecutiveLosses === 0`），按近窗活跃度映射 12 档，决定本序列**首注金额**；连亏中仍按 `MARTINGALE_MULTIPLIER` 加倍，**不在连亏中途改档**。
+默认 **开启**（`DYNAMIC_BASE_BET_ENABLED=true`）。近窗活跃度仍映射 **12 档**（0–12 根命中），但首注金额合并为 **4 桶**：**1–9 档同注**、**10 / 11 / 12 档各一注**。在新马丁序列开始时（`consecutiveLosses === 0`）按当前活跃度刷新首注；连亏中仍按 `MARTINGALE_MULTIPLIER` 加倍，**不在连亏中途改档**。
 
-### 生产默认（`.env`）
-
-| 档位 | 活跃度（探测命中） | 默认首注 |
-|------|-------------------|----------|
-| 1 档 | 0 根 | $2 |
-| 2–6 档 | 冷 → 温 | $2 → $3 线性 |
-| 7–8 档 | 持平 | $3 |
-| 9–12 档 | 热 | $4 → $12 线性 |
-
-### 回测推荐（365d OKX 永续 + 放量窗）
-
-回测脚本支持 `--weak-min` / `--weak-max` / `--amp-min` / `--amp-max` / `--tier12` 覆盖档位金额。当前推荐混合参数：
-
-| 档位 | 首注 |
-|------|------|
-| 1–8 档 | $1（冷/温档压注） |
-| 9–11 档 | $3 → $8 线性 |
-| 12 档 | $24（热档加码） |
-
-365 天回测（`--recommended --weak-min=1 --weak-max=1 --amp-min=3 --amp-max=8 --tier12=24`）：PnL **+$7,685**、ROI **4.05%**、最大回撤 **$3,030**（对比固定 $3 基线 PnL -$264）。详见 `logs/backtest-dynamic-base-bet-tier12-recommended.json`。
+| 活跃度档位 | 首注（默认） |
+|-----------|-------------|
+| 1–9 档 | $1 |
+| 10 档 | $6 |
+| 11 档 | $8 |
+| 12 档 | $24 |
 
 - **赢一局**或**连亏 4 次停机**：下一序列重新按活跃度刷新首注
 - 关闭：`DYNAMIC_BASE_BET_ENABLED=false` → 始终使用 `TRADE_BUDGET_USD`
@@ -129,7 +115,7 @@ src/
 ├── stats/manager.js                 # 盈亏 / 胜率 / 止损统计
 ├── martingale/
 │   ├── manager.js                   # 马丁格尔序列
-│   └── dynamicBaseBet.js            # 12 档动态首注
+│   └── dynamicBaseBet.js            # 4 桶动态首注（1-9/10/11/12）
 ├── trader/
 │   ├── executor.js                  # CLOB 下单 GTC/FOK
 │   ├── fillSync.js                  # 成交解析 + 短时轮询
@@ -199,11 +185,10 @@ logs/
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | `DYNAMIC_BASE_BET_ENABLED` | true | false = 始终 `TRADE_BUDGET_USD` |
-| `BASE_BET_TIER1_USD` | 2 | 1 档（0 根命中） |
-| `BASE_BET_WEAK_MIN_USD` | 2 | 2 档起（弱档下限） |
-| `BASE_BET_WEAK_MAX_USD` | 3 | 6–8 档（弱档上限） |
-| `BASE_BET_AMP_MIN_USD` | 4 | 9 档起（热档下限） |
-| `BASE_BET_AMP_MAX_USD` | 12 | 12 档（热档上限） |
+| `BASE_BET_TIER1_9_USD` | 1 | 活跃度 1–9 档首注 |
+| `BASE_BET_TIER10_USD` | 6 | 活跃度 10 档首注 |
+| `BASE_BET_TIER11_USD` | 8 | 活跃度 11 档首注 |
+| `BASE_BET_TIER12_USD` | 24 | 活跃度 12 档首注 |
 
 ### 下单 / 成交
 
@@ -268,9 +253,9 @@ Polymarket / 钱包 / Telegram 变量见 `.env.example`。
 | `node scripts/check-env.js` | 检查配置 |
 | `DRY_RUN=true node scripts/test-cycle.js` | 单次周期测试 |
 | `node scripts/backtest-session-gate-v2.js` | 放量窗门控回测 |
-| `node scripts/backtest-dynamic-base-bet.js --days=365 --recommended` | 推荐混合档位回测（默认 2-6:$2-3 · 7-8:$3 · 9-12:$4-12） |
-| `node scripts/backtest-dynamic-base-bet.js --days=365 --recommended --weak-min=1 --weak-max=1 --amp-min=3 --amp-max=8 --tier12=24` | 回测推荐参数（1-8:$1 · 9-11:$3-8 · 12:$24） |
-| `node scripts/backtest-dynamic-base-bet.js --days=365 --tier12-hybrid` | 混合档位网格搜索 |
+| `node scripts/backtest-dynamic-base-bet.js --days=365 --recommended` | 四档首注回测（默认 1-9:$1 · 10:$6 · 11:$8 · 12:$24） |
+| `node scripts/backtest-dynamic-base-bet.js --days=365 --recommended --tier1-9=1 --tier10=6 --tier11=8 --tier12=24` | 自定义四档金额回测 |
+| `node scripts/backtest-dynamic-base-bet.js --days=365 --tier12-hybrid` | 10/11/12 档金额网格搜索 |
 | `node scripts/analyze-tier-only-roi.js --days=365` | 单档 vs 全档 ROI 对比（输出 `logs/analyze-tier-only-roi.json`） |
 | `node scripts/backtest-tier9-12-by-regime.js --days=365` | 9-12 档按行情段拆解（月/季/波动/自定义窗口） |
 | `node scripts/backtest-daily-vol-pnl.js --days=365` | 日成交量 vs 盈亏回测 |

@@ -2,7 +2,7 @@
  * Tier 9-12 only backtest broken down by market regime segments.
  * Usage:
  *   node scripts/backtest-tier9-12-by-regime.js --days=365
- *   node scripts/backtest-tier9-12-by-regime.js --days=365 --weak-min=1 --weak-max=1 --amp-min=3 --amp-max=8 --tier12=24
+ *   node scripts/backtest-tier9-12-by-regime.js --days=365 --tier1-9=1 --tier10=6 --tier11=8 --tier12=24
  */
 import { writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
@@ -18,12 +18,17 @@ import {
 } from '../src/session/sessionGate.js';
 import { resolveOhlcvMarket } from '../src/collector/binance.js';
 import { ensureOkxCandles } from './lib/okxOhlcv.js';
+import {
+  activityHitsToTier,
+  resolveTierBaseBet,
+  formatTierParamLabel,
+  TIER_COUNT,
+} from '../src/martingale/dynamicBaseBet.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = join(__dirname, '..', 'logs');
 const OUT_FILE = join(OUT_DIR, 'backtest-tier9-12-by-regime.json');
 const TF_MS = 5 * 60_000;
-const TIER_COUNT = 12;
 const MARTINGALE_MAX = config.martingaleMaxLosses;
 const MULTIPLIER = config.martingaleMultiplier;
 const ENTRY_PRICE = 0.5;
@@ -40,48 +45,17 @@ function parseArg(name, fallback = null) {
   return hit ? hit.split('=')[1] : fallback;
 }
 
-function parseHybridOpts() {
-  const weakMin = Number(parseArg('weak-min', '1'));
-  const weakMax = Number(parseArg('weak-max', '1'));
-  const ampMin = Number(parseArg('amp-min', '3'));
-  const ampMax = Number(parseArg('amp-max', '8'));
-  const tier12Usd = Number(parseArg('tier12', '24'));
+function parseTierOpts() {
+  const tier1_9 = Number(parseArg('tier1-9', String(config.dynamicBaseBet.tier1_9Usd)));
+  const tier10 = Number(parseArg('tier10', String(config.dynamicBaseBet.tier10Usd)));
+  const tier11 = Number(parseArg('tier11', String(config.dynamicBaseBet.tier11Usd)));
+  const tier12 = Number(parseArg('tier12', String(config.dynamicBaseBet.tier12Usd)));
   return {
-    weakMin,
-    weakMax,
-    ampMin,
-    ampMax,
-    ...(Number.isFinite(tier12Usd) ? { tier12Usd } : {}),
+    tier1_9Usd: tier1_9,
+    tier10Usd: tier10,
+    tier11Usd: tier11,
+    tier12Usd: tier12,
   };
-}
-
-function activityHitsToTier(hits, windowBars = TIER_COUNT) {
-  const h = Math.min(Math.max(0, hits), windowBars);
-  if (windowBars <= 0) return 1;
-  return Math.max(1, Math.min(TIER_COUNT, Math.round((h / windowBars) * (TIER_COUNT - 1)) + 1));
-}
-
-function resolveHybridTierBaseBet(tier, {
-  weakMin = 1,
-  weakMax = 1,
-  ampMin = 3,
-  ampMax = 8,
-  tier12Usd = null,
-} = {}) {
-  const t = Math.max(1, Math.min(TIER_COUNT, tier));
-  const lo = Math.min(weakMin, weakMax);
-  const hi = Math.max(weakMin, weakMax);
-  const ampLo = Math.min(ampMin, ampMax);
-  const ampHi = Math.max(ampMin, ampMax);
-
-  if (t <= 1) return lo;
-  if (t <= 6) return lo + ((t - 2) / (6 - 2)) * (hi - lo);
-  if (t <= 8) return hi;
-  if (tier12Usd != null && Number.isFinite(tier12Usd)) {
-    if (t >= 12) return tier12Usd;
-    return ampLo + ((t - 9) / (11 - 9)) * (ampHi - ampLo);
-  }
-  return ampLo + ((t - 9) / (12 - 9)) * (ampHi - ampLo);
 }
 
 function dayKey(ms) {
@@ -200,10 +174,10 @@ function buildGatedTrades(c5, timeline, fromMs, toMs) {
   return raw;
 }
 
-function simulateTierMin(trades, c5, hybridOpts, tierMin = 9) {
+function simulateTierMin(trades, c5, tierOpts, tierMin = 9) {
   const idxByT = new Map(c5.map((b, i) => [b.t, i]));
   let consecutiveLosses = 0;
-  let currentBet = hybridOpts.weakMin;
+  let currentBet = tierOpts.tier1_9Usd;
   let skipNext = false;
   let halts = 0;
   let streakTier = null;
@@ -222,7 +196,7 @@ function simulateTierMin(trades, c5, hybridOpts, tierMin = 9) {
       const { tier } = getActivityAt(c5, idx);
       if (tier < tierMin) continue;
       streakTier = tier;
-      currentBet = resolveHybridTierBaseBet(tier, hybridOpts);
+      currentBet = resolveTierBaseBet(tier, tierOpts);
     } else if (streakTier < tierMin) {
       continue;
     }
@@ -285,19 +259,19 @@ function summarizeTrades(trades) {
   };
 }
 
-function summarizeByTier(trades) {
+function summarizeByTier(trades, tierOpts) {
   return [9, 10, 11, 12].map((tier) => {
     const slice = trades.filter((t) => t.entryTier === tier);
     const s = summarizeTrades(slice);
     return {
       tier,
-      baseBet: resolveHybridTierBaseBet(tier, parseHybridOpts()),
+      baseBet: resolveTierBaseBet(tier, tierOpts),
       ...s,
     };
   });
 }
 
-function groupAndSummarize(trades, keyFn, labels = null) {
+function groupAndSummarize(trades, keyFn, tierOpts, labels = null) {
   const groups = new Map();
   for (const t of trades) {
     const key = keyFn(t);
@@ -316,7 +290,7 @@ function groupAndSummarize(trades, keyFn, labels = null) {
       key,
       label: labels?.get(key) ?? key,
       halts,
-      byTier: summarizeByTier(slice),
+      byTier: summarizeByTier(slice, tierOpts),
       ...s,
     };
   });
@@ -361,7 +335,7 @@ async function main() {
   const days = Number(parseArg('days', '365'));
   const toMs = Date.now();
   const fromMs = toMs - days * 24 * 60 * 60_000;
-  const hybridOpts = parseHybridOpts();
+  const tierOpts = parseTierOpts();
   const marketCtx = resolveOhlcvMarket('swap');
 
   const { c5 } = await ensureOkxCandles({
@@ -384,7 +358,7 @@ async function main() {
   const { bucketByDay, thresholds: dailyThresholds } = buildDailyVolumeMap(c5, fromMs, toMs);
   const idxByT = new Map(c5.map((b, i) => [b.t, i]));
 
-  const { executed, halts } = simulateTierMin(rawTrades, c5, hybridOpts, 9);
+  const { executed, halts } = simulateTierMin(rawTrades, c5, tierOpts, 9);
   const overall = { ...summarizeTrades(executed), halts };
 
   const enrich = (t) => {
@@ -405,10 +379,10 @@ async function main() {
   };
   const enriched = executed.map(enrich);
 
-  const monthly = groupAndSummarize(enriched, (t) => t.month);
-  const quarterly = groupAndSummarize(enriched, (t) => t.quarter);
-  const volPeriod = groupAndSummarize(enriched, (t) => t.volPeriod);
-  const dailyVolBucket = groupAndSummarize(enriched, (t) => t.dailyVolBucket);
+  const monthly = groupAndSummarize(enriched, (t) => t.month, tierOpts);
+  const quarterly = groupAndSummarize(enriched, (t) => t.quarter, tierOpts);
+  const volPeriod = groupAndSummarize(enriched, (t) => t.volPeriod, tierOpts);
+  const dailyVolBucket = groupAndSummarize(enriched, (t) => t.dailyVolBucket, tierOpts);
 
   const customWindows = CUSTOM_WINDOWS.map((w) => {
     const from = Date.parse(`${w.from}T00:00:00.000Z`);
@@ -419,18 +393,18 @@ async function main() {
       ...w,
       ...s,
       halts: slice.filter((t) => t.lossStreakPos === 4).length,
-      byTier: summarizeByTier(slice),
+      byTier: summarizeByTier(slice, tierOpts),
     };
   });
 
   const output = {
     strategy: 'tier_9_12_only',
-    hybridOpts,
+    tierOpts,
     range: { from: new Date(fromMs).toISOString(), to: new Date(toMs).toISOString(), days },
     thresholds: { volPeriod: periodThresholds, dailyBarUsdt: dailyThresholds },
     gateSignals: rawTrades.length,
     overall,
-    byTier: summarizeByTier(enriched),
+    byTier: summarizeByTier(enriched, tierOpts),
     monthly,
     quarterly,
     volPeriod,
@@ -442,7 +416,7 @@ async function main() {
   writeFileSync(OUT_FILE, JSON.stringify(output, null, 2));
 
   console.log(`\n=== 9-12档 · 不同行情段回测 · ${days}d · OKX ${marketCtx.label} ===`);
-  console.log(`参数: 1-8=$${hybridOpts.weakMin} | 9-11=$${hybridOpts.ampMin}→$${hybridOpts.ampMax} | 12=$${hybridOpts.tier12Usd ?? hybridOpts.ampMax}`);
+  console.log(`参数: ${formatTierParamLabel(tierOpts)}`);
   console.log(`门控信号: ${rawTrades.length} | 9-12档成交: ${overall.trades} (${fmtPct(overall.trades / rawTrades.length)} 覆盖)`);
   console.log(`整体: PnL $${overall.pnl.toFixed(0)} | ROI ${fmtPct(overall.roi)} | WR ${fmtPct(overall.winRate)} | 止损 ${halts} | 回撤 $${overall.maxDrawdown.toFixed(0)}`);
 

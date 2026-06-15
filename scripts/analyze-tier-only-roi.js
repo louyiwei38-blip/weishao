@@ -2,7 +2,7 @@
  * Compare ROI: full hybrid vs single-tier-only trading.
  * Usage:
  *   node scripts/analyze-tier-only-roi.js --days=365
- *   node scripts/analyze-tier-only-roi.js --days=365 --weak-min=1 --weak-max=1 --amp-min=3 --amp-max=8 --tier12=24
+ *   node scripts/analyze-tier-only-roi.js --days=365 --tier1-9=1 --tier10=6 --tier11=8 --tier12=24
  */
 import { writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
@@ -20,8 +20,10 @@ import { resolveOhlcvMarket } from '../src/collector/binance.js';
 import { ensureOkxCandles } from './lib/okxOhlcv.js';
 import {
   activityHitsToTier,
-  resolveHybridTierBaseBet,
-} from './backtest-dynamic-base-bet.js';
+  resolveTierBaseBet,
+  formatTierParamLabel,
+  TIER_COUNT,
+} from '../src/martingale/dynamicBaseBet.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = join(__dirname, '..', 'logs');
@@ -30,25 +32,22 @@ const TF_MS = 5 * 60_000;
 const MARTINGALE_MAX = config.martingaleMaxLosses;
 const MULTIPLIER = config.martingaleMultiplier;
 const ENTRY_PRICE = 0.5;
-const TIER_COUNT = 12;
 
 function parseArg(name, fallback = null) {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
   return hit ? hit.split('=')[1] : fallback;
 }
 
-function parseHybridOpts() {
-  const weakMin = Number(parseArg('weak-min', '1'));
-  const weakMax = Number(parseArg('weak-max', '1'));
-  const ampMin = Number(parseArg('amp-min', '3'));
-  const ampMax = Number(parseArg('amp-max', '8'));
-  const tier12Usd = Number(parseArg('tier12', '24'));
+function parseTierOpts() {
+  const tier1_9 = Number(parseArg('tier1-9', String(config.dynamicBaseBet.tier1_9Usd)));
+  const tier10 = Number(parseArg('tier10', String(config.dynamicBaseBet.tier10Usd)));
+  const tier11 = Number(parseArg('tier11', String(config.dynamicBaseBet.tier11Usd)));
+  const tier12 = Number(parseArg('tier12', String(config.dynamicBaseBet.tier12Usd)));
   return {
-    weakMin,
-    weakMax,
-    ampMin,
-    ampMax,
-    ...(Number.isFinite(tier12Usd) ? { tier12Usd } : {}),
+    tier1_9Usd: tier1_9,
+    tier10Usd: tier10,
+    tier11Usd: tier11,
+    tier12Usd: tier12,
   };
 }
 
@@ -99,10 +98,10 @@ function buildGatedTrades(c5, timeline, fromMs, toMs) {
   return raw;
 }
 
-function simulate(trades, c5, { hybridOpts, tierOnly = null, tierMin = null, fixedBase = null } = {}) {
+function simulate(trades, c5, { tierOpts, tierOnly = null, tierMin = null, fixedBase = null } = {}) {
   const idxByT = new Map(c5.map((b, i) => [b.t, i]));
   let consecutiveLosses = 0;
-  let currentBet = fixedBase ?? hybridOpts?.weakMin ?? 3;
+  let currentBet = fixedBase ?? tierOpts?.tier1_9Usd ?? 3;
   let skipNext = false;
   let halts = 0;
   let streakTier = null;
@@ -130,7 +129,7 @@ function simulate(trades, c5, { hybridOpts, tierOnly = null, tierMin = null, fix
       if (fixedBase != null) {
         currentBet = fixedBase;
       } else {
-        currentBet = resolveHybridTierBaseBet(tier, hybridOpts);
+        currentBet = resolveTierBaseBet(tier, tierOpts);
       }
     } else if (tierOnly != null && streakTier !== tierOnly) {
       continue;
@@ -193,7 +192,7 @@ async function main() {
   const days = Number(parseArg('days', '365'));
   const toMs = Date.now();
   const fromMs = toMs - days * 24 * 60 * 60_000;
-  const hybridOpts = parseHybridOpts();
+  const tierOpts = parseTierOpts();
   const marketCtx = resolveOhlcvMarket('swap');
 
   const { c5 } = await ensureOkxCandles({ fromMs, toMs, marketType: marketCtx.marketType, symbol: marketCtx.symbol });
@@ -210,20 +209,20 @@ async function main() {
   const gateSignals = rawTrades.length;
 
   const scenarios = [
-    { key: 'full_hybrid', label: '全档位混合（当前推荐）', opts: { hybridOpts } },
+    { key: 'full_hybrid', label: '全四档混合（当前推荐）', opts: { tierOpts } },
     ...Array.from({ length: TIER_COUNT }, (_, i) => {
       const tier = i + 1;
-      const baseBet = resolveHybridTierBaseBet(tier, hybridOpts);
+      const baseBet = resolveTierBaseBet(tier, tierOpts);
       return {
         key: `tier_${tier}_only`,
         label: `仅${tier}档 (${tierHitsRange(tier)} · $${baseBet})`,
-        opts: { hybridOpts, tierOnly: tier },
+        opts: { tierOpts, tierOnly: tier },
         tier,
         baseBet,
       };
     }),
-    { key: 'tier_ge_9', label: '仅9-12档', opts: { hybridOpts, tierMin: 9 } },
-    { key: 'tier_ge_11', label: '仅11-12档', opts: { hybridOpts, tierMin: 11 } },
+    { key: 'tier_ge_9', label: '仅9-12档', opts: { tierOpts, tierMin: 9 } },
+    { key: 'tier_ge_11', label: '仅11-12档', opts: { tierOpts, tierMin: 11 } },
     { key: 'tier_12_fixed24', label: '仅12档 · 固定$24无马丁', opts: { fixedBase: 24, tierOnly: 12 } },
   ];
 
@@ -243,7 +242,7 @@ async function main() {
 
   const output = {
     range: { from: new Date(fromMs).toISOString(), to: new Date(toMs).toISOString(), days },
-    hybridOpts,
+    tierOpts,
     gateSignals,
     results,
     bestRoi: byRoi[0],
@@ -254,7 +253,7 @@ async function main() {
   writeFileSync(OUT_FILE, JSON.stringify(output, null, 2));
 
   console.log(`\n=== 单档 vs 全档 ROI 分析 · ${days}d · OKX ${marketCtx.label} ===`);
-  console.log(`混合参数: 1-8=$${hybridOpts.weakMin} | 9-11=$${hybridOpts.ampMin}→$${hybridOpts.ampMax} | 12=$${hybridOpts.tier12Usd ?? hybridOpts.ampMax}`);
+  console.log(`四档参数: ${formatTierParamLabel(tierOpts)}`);
   console.log(`门控信号: ${gateSignals} 笔\n`);
 
   console.log('策略                    | 成交  | 覆盖率 | 止损 | PnL      | ROI    | 回撤    | 均注');

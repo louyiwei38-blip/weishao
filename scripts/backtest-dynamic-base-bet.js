@@ -20,6 +20,15 @@ import {
 } from '../src/session/sessionGate.js';
 import { resolveOhlcvMarket } from '../src/collector/binance.js';
 import { ensureOkxCandles } from './lib/okxOhlcv.js';
+import {
+  activityHitsToTier,
+  resolveTierBaseBet,
+  formatTierParamLabel,
+  TIER_COUNT,
+} from '../src/martingale/dynamicBaseBet.js';
+
+export { activityHitsToTier, resolveTierBaseBet };
+export const resolveHybridTierBaseBet = resolveTierBaseBet;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = join(__dirname, '..', 'logs');
@@ -28,19 +37,11 @@ const OUT_TIER12 = join(OUT_DIR, 'backtest-dynamic-base-bet-tier12.json');
 const OUT_TIER12_HYBRID = join(OUT_DIR, 'backtest-dynamic-base-bet-tier12-hybrid.json');
 const OUT_TIER12_RECOMMENDED = join(OUT_DIR, 'backtest-dynamic-base-bet-tier12-recommended.json');
 
-/** 推荐上线：2-6档 $2→$3 · 7-8档 $3 · 9-12档 $4→$12 */
-export const RECOMMENDED_HYBRID_OPTS = {
-  weakMin: 2,
-  weakMax: 3,
-  ampMin: 4,
-  ampMax: 12,
-};
 const TF_MS = 5 * 60_000;
 
 const MARTINGALE_MAX = config.martingaleMaxLosses;
 const MULTIPLIER = config.martingaleMultiplier;
 const ENTRY_PRICE = Number(parseArg('entry', '0.5'));
-const TIER_COUNT = 12;
 
 const BASE_MIN_OPTS = [2, 3, 4];
 const BASE_MAX_OPTS = [6, 8, 10, 12];
@@ -55,35 +56,26 @@ function hasFlag(name) {
   return process.argv.includes(`--${name}`);
 }
 
-function parseHybridOpts() {
-  const weakMin = Number(parseArg('weak-min', null));
-  const weakMax = Number(parseArg('weak-max', null));
-  const ampMin = Number(parseArg('amp-min', null));
-  const ampMax = Number(parseArg('amp-max', null));
-  const tier12Usd = Number(parseArg('tier12', null));
-  if ([weakMin, weakMax, ampMin, ampMax].every((n) => Number.isFinite(n))) {
+function parseTierOpts() {
+  const tier1_9 = Number(parseArg('tier1-9', null));
+  const tier10 = Number(parseArg('tier10', null));
+  const tier11 = Number(parseArg('tier11', null));
+  const tier12 = Number(parseArg('tier12', null));
+  if ([tier1_9, tier10, tier11, tier12].every((n) => Number.isFinite(n))) {
     return {
-      weakMin,
-      weakMax,
-      ampMin,
-      ampMax,
-      ...(Number.isFinite(tier12Usd) ? { tier12Usd } : {}),
+      tier1_9Usd: tier1_9,
+      tier10Usd: tier10,
+      tier11Usd: tier11,
+      tier12Usd: tier12,
     };
   }
-  return { ...RECOMMENDED_HYBRID_OPTS };
-}
-
-function formatHybridParamLabel(opts) {
-  if (opts.tier12Usd != null) {
-    const weak = opts.weakMin === opts.weakMax
-      ? `1-8档=$${opts.weakMin}`
-      : `1档=$${opts.weakMin} | 2-6档 $${opts.weakMin}→$${opts.weakMax} | 7-8档=$${opts.weakMax}`;
-    return `${weak} | 9-11档 $${opts.ampMin}→$${opts.ampMax} | 12档=$${opts.tier12Usd}`;
-  }
-  if (opts.weakMin === opts.weakMax) {
-    return `1-8档=$${opts.weakMin} | 9-12档 $${opts.ampMin}→$${opts.ampMax}`;
-  }
-  return `1档=$${opts.weakMin} | 2-6档 $${opts.weakMin}→$${opts.weakMax} | 7-8档=$${opts.weakMax} | 9-12档 $${opts.ampMin}→$${opts.ampMax}`;
+  const c = config.dynamicBaseBet;
+  return {
+    tier1_9Usd: c.tier1_9Usd,
+    tier10Usd: c.tier10Usd,
+    tier11Usd: c.tier11Usd,
+    tier12Usd: c.tier12Usd,
+  };
 }
 
 function fmtTs(ms) {
@@ -98,53 +90,19 @@ function resolveDynamicBaseBet(freq, minBet, maxBet, direction) {
   return hi - f * (hi - lo);
 }
 
-/** Map probe hits (0..windowBars) → tier 1..12 (cold→hot). */
-export function activityHitsToTier(hits, windowBars = TIER_COUNT) {
-  const h = Math.min(Math.max(0, hits), windowBars);
-  if (windowBars <= 0) return 1;
-  return Math.max(1, Math.min(TIER_COUNT, Math.round((h / windowBars) * (TIER_COUNT - 1)) + 1));
-}
-
-/** Tier 1 = minBet, tier 12 = maxBet (hot → larger). */
-export function resolveTierBaseBet(tier, minBet, maxBet) {
+/** Tier 1 = minBet, tier 12 = maxBet (hot → larger, linear legacy mode). */
+function resolveLinearTierBaseBet(tier, minBet, maxBet) {
   const lo = Math.min(minBet, maxBet);
   const hi = Math.max(minBet, maxBet);
   const t = (Math.max(1, Math.min(TIER_COUNT, tier)) - 1) / (TIER_COUNT - 1);
   return lo + t * (hi - lo);
 }
 
-/**
- * Hybrid: tier 1→weakMin, tier 2-6 linear, tier 7-8 flat weakMax,
- * tier 9-12 linear ampMin-ampMax (or tier 9-11 linear + tier12Usd when set).
- */
-export function resolveHybridTierBaseBet(tier, {
-  weakMin = 2,
-  weakMax = 3,
-  ampMin = 4,
-  ampMax = 12,
-  tier12Usd = null,
-} = {}) {
-  const t = Math.max(1, Math.min(TIER_COUNT, tier));
-  const lo = Math.min(weakMin, weakMax);
-  const hi = Math.max(weakMin, weakMax);
-  const ampLo = Math.min(ampMin, ampMax);
-  const ampHi = Math.max(ampMin, ampMax);
-
-  if (t <= 1) return lo;
-  if (t <= 6) return lo + ((t - 2) / (6 - 2)) * (hi - lo);
-  if (t <= 8) return hi;
-  if (tier12Usd != null && Number.isFinite(tier12Usd)) {
-    if (t >= 12) return tier12Usd;
-    return ampLo + ((t - 9) / (11 - 9)) * (ampHi - ampLo);
-  }
-  return ampLo + ((t - 9) / (12 - 9)) * (ampHi - ampLo);
-}
-
-function buildHybridTierBetTable(opts = {}) {
+function buildTierBetTable(opts = {}) {
   return Array.from({ length: TIER_COUNT }, (_, i) => ({
     tier: i + 1,
     hitsRange: tierHitsRange(i + 1),
-    baseBet: Number(resolveHybridTierBaseBet(i + 1, opts).toFixed(2)),
+    baseBet: Number(resolveTierBaseBet(i + 1, opts).toFixed(2)),
   }));
 }
 
@@ -218,7 +176,7 @@ function simulateMartingaleBetting(trades, c5, {
   baseMax = 8,
   direction = 'hot_higher',
   tier12 = false,
-  tier12Hybrid = null,
+  tierOpts = null,
 } = {}) {
   const idxByT = new Map(c5.map((b, i) => [b.t, i]));
   let consecutiveLosses = 0;
@@ -250,10 +208,10 @@ function simulateMartingaleBetting(trades, c5, {
         const activity = getActivityAt(c5, idx);
         activityTier = activity.tier;
         streakTier = activity.tier;
-        if (tier12Hybrid) {
-          currentBet = resolveHybridTierBaseBet(activity.tier, tier12Hybrid);
+        if (tierOpts) {
+          currentBet = resolveTierBaseBet(activity.tier, tierOpts);
         } else if (tier12) {
-          currentBet = resolveTierBaseBet(activity.tier, baseMin, baseMax);
+          currentBet = resolveLinearTierBaseBet(activity.tier, baseMin, baseMax);
         } else {
           currentBet = resolveDynamicBaseBet(activity.freq, baseMin, baseMax, direction);
         }
@@ -309,11 +267,11 @@ function simulateMartingaleBetting(trades, c5, {
   };
 }
 
-function summarizeByTier(tradeDetails, baseMin, baseMax) {
+function summarizeByTierLinear(tradeDetails, baseMin, baseMax) {
   const tiers = Array.from({ length: TIER_COUNT }, (_, i) => ({
     tier: i + 1,
     hitsRange: tierHitsRange(i + 1),
-    baseBet: resolveTierBaseBet(i + 1, baseMin, baseMax),
+    baseBet: resolveLinearTierBaseBet(i + 1, baseMin, baseMax),
     trades: 0,
     wins: 0,
     pnl: 0,
@@ -377,11 +335,11 @@ function summarizeTierEdgeAtFixedStake(trades, c5, fixedStake = 3) {
   }));
 }
 
-function summarizeByTierHybrid(tradeDetails, hybridOpts) {
+function summarizeByTier(tradeDetails, tierOpts) {
   const tiers = Array.from({ length: TIER_COUNT }, (_, i) => ({
     tier: i + 1,
     hitsRange: tierHitsRange(i + 1),
-    baseBet: resolveHybridTierBaseBet(i + 1, hybridOpts),
+    baseBet: resolveTierBaseBet(i + 1, tierOpts),
     trades: 0,
     wins: 0,
     pnl: 0,
@@ -428,46 +386,56 @@ async function runTier12HybridBacktest({
   const fullRef = { ...fullTier12, label: '$2-$12 全档' };
   delete fullRef.tradeDetails;
 
-  const AMP_MAX_OPTS = [8, 10, 12];
-  const AMP_MIN_OPTS = [4, 5, 6];
+  const TIER1_9 = config.dynamicBaseBet.tier1_9Usd;
+  const TIER10_OPTS = [4, 5, 6, 8];
+  const TIER11_OPTS = [6, 8, 10, 12];
+  const TIER12_OPTS = [12, 16, 20, 24];
   const sweep = [];
 
-  for (const ampMax of AMP_MAX_OPTS) {
-    for (const ampMin of AMP_MIN_OPTS) {
-      if (ampMin >= ampMax) continue;
-      const hybridOpts = { weakMin: 2, weakMax: 3, ampMin, ampMax };
-      const r = simulateMartingaleBetting(rawTrades, c5, { tier12Hybrid: hybridOpts });
-      const { tradeDetails, ...summary } = r;
-      sweep.push({
-        ...hybridOpts,
-        label: `弱2-6:$2-3 | 7-8:$3 | 9-12:$${ampMin}-$${ampMax}`,
-        pnlDeltaVsFixed: summary.pnl - baseline.pnl,
-        pnlDeltaVsFullTier12: summary.pnl - fullRef.pnl,
-        maxDdDeltaVsFixed: summary.maxDrawdown - baseline.maxDrawdown,
-        ...summary,
-      });
+  for (const tier10 of TIER10_OPTS) {
+    for (const tier11 of TIER11_OPTS) {
+      if (tier11 < tier10) continue;
+      for (const tier12 of TIER12_OPTS) {
+        if (tier12 < tier11) continue;
+        const opts = {
+          tier1_9Usd: TIER1_9,
+          tier10Usd: tier10,
+          tier11Usd: tier11,
+          tier12Usd: tier12,
+        };
+        const r = simulateMartingaleBetting(rawTrades, c5, { tierOpts: opts });
+        const { tradeDetails, ...summary } = r;
+        sweep.push({
+          ...opts,
+          label: formatTierParamLabel(opts),
+          pnlDeltaVsFixed: summary.pnl - baseline.pnl,
+          pnlDeltaVsFullTier12: summary.pnl - fullRef.pnl,
+          maxDdDeltaVsFixed: summary.maxDrawdown - baseline.maxDrawdown,
+          ...summary,
+        });
+      }
     }
   }
   sweep.sort((a, b) => b.pnl - a.pnl);
 
   const best = sweep[0];
-  const bestHybridOpts = best
-    ? { weakMin: 2, weakMax: 3, ampMin: best.ampMin, ampMax: best.ampMax }
-    : { weakMin: 2, weakMax: 3, ampMin: 4, ampMax: 12 };
-  const bestRun = simulateMartingaleBetting(rawTrades, c5, { tier12Hybrid: bestHybridOpts });
-  const tierTable = summarizeByTierHybrid(bestRun.tradeDetails, bestHybridOpts);
-  const tierBetTable = buildHybridTierBetTable(bestHybridOpts);
+  const bestTierOpts = best
+    ? {
+      tier1_9Usd: best.tier1_9Usd,
+      tier10Usd: best.tier10Usd,
+      tier11Usd: best.tier11Usd,
+      tier12Usd: best.tier12Usd,
+    }
+    : parseTierOpts();
+  const bestRun = simulateMartingaleBetting(rawTrades, c5, { tierOpts: bestTierOpts });
+  const tierTable = summarizeByTier(bestRun.tradeDetails, bestTierOpts);
+  const tierBetTable = buildTierBetTable(bestTierOpts);
 
   const report = {
     mode: 'tier12_hybrid',
     range: { from: fmtTs(fromMs), to: fmtTs(toMs), days },
     ohlcv: { marketType: marketCtx.marketType, symbol: marketCtx.symbol, label: marketCtx.label },
-    mapping: {
-      tier1: '$2',
-      tier2to6: '$2 → $3 线性',
-      tier7to8: '$3 持平',
-      tier9to12: `$${bestHybridOpts.ampMin} → $${bestHybridOpts.ampMax} 线性`,
-    },
+    mapping: formatTierParamLabel(bestTierOpts),
     sessionGate: {
       volumeBurstMinutes: sg.volumeBurstMinutes,
       activityWindowBars: sg.activityWindowBars,
@@ -485,8 +453,8 @@ async function runTier12HybridBacktest({
 
   writeFileSync(OUT_TIER12_HYBRID, JSON.stringify(report, null, 2));
 
-  console.log(`\n=== 12档混合首注回测 · OKX ${marketCtx.label} · ${days}d ===`);
-  console.log('规则: 1档=$2 | 2-6档 $2→$3 | 7-8档=$3 | 9-12档放大');
+  console.log(`\n=== 4档首注扫参回测 · OKX ${marketCtx.label} · ${days}d ===`);
+  console.log(`固定 1-9档=$${TIER1_9}，扫参 10/11/12 档金额`);
   console.log(`门控开启: ${(gateOpenPct * 100).toFixed(1)}% | 信号: ${rawTrades.length}笔`);
   console.log(`\n--- 对照 ---`);
   console.log(
@@ -502,12 +470,13 @@ async function runTier12HybridBacktest({
     console.log(`${String(row.tier).padStart(4)} | ${row.hitsRange.padStart(6)} | $${row.baseBet.toFixed(2)}`);
   }
 
-  console.log('\n--- 9-12档放大扫参（弱档 $2-3）---');
-  console.log('9档起 | 12档止 | 交易 | 胜率  | 止损 | PnL      | 回撤    | Δ固定 | Δ全档');
+  console.log('\n--- 10/11/12 档扫参 ---');
+  console.log('  10档 |  11档 |  12档 | 交易 | 胜率  | 止损 | PnL      | 回撤    | Δ固定 | Δ全档');
   for (const r of sweep) {
     console.log(
-      `$${r.ampMin}`.padStart(6) + ' | ' +
-      `$${r.ampMax}`.padStart(6) + ' | ' +
+      `$${r.tier10Usd}`.padStart(6) + ' | ' +
+      `$${r.tier11Usd}`.padStart(6) + ' | ' +
+      `$${r.tier12Usd}`.padStart(6) + ' | ' +
       `${String(r.trades).padStart(4)} | ` +
       `${(r.winRate * 100).toFixed(1).padStart(4)}% | ` +
       `${String(r.halts).padStart(4)} | ` +
@@ -539,7 +508,7 @@ async function runTier12HybridBacktest({
 async function runRecommendedHybridBacktest(ctx) {
   const {
     c5, rawTrades, fromMs, toMs, days, marketCtx, gateOpenPct, fixedBase,
-    hybridOpts = RECOMMENDED_HYBRID_OPTS,
+    tierOpts = parseTierOpts(),
   } = ctx;
   const sg = config.sessionGate;
 
@@ -553,25 +522,16 @@ async function runRecommendedHybridBacktest(ctx) {
   });
   delete fullTier12.tradeDetails;
 
-  const run = simulateMartingaleBetting(rawTrades, c5, { tier12Hybrid: hybridOpts });
+  const run = simulateMartingaleBetting(rawTrades, c5, { tierOpts });
   const { tradeDetails, ...result } = run;
-  const tierTable = summarizeByTierHybrid(tradeDetails, hybridOpts);
-  const tierBetTable = buildHybridTierBetTable(hybridOpts);
+  const tierTable = summarizeByTier(tradeDetails, tierOpts);
+  const tierBetTable = buildTierBetTable(tierOpts);
 
   const report = {
     mode: 'tier12_recommended',
     params: {
-      tier1to8: hybridOpts.weakMin === hybridOpts.weakMax
-        ? `$${hybridOpts.weakMin}`
-        : `$${hybridOpts.weakMin} → $${hybridOpts.weakMax}`,
-      tier9to11: hybridOpts.tier12Usd != null
-        ? `$${hybridOpts.ampMin} → $${hybridOpts.ampMax}`
-        : undefined,
-      tier9to12: hybridOpts.tier12Usd == null
-        ? `$${hybridOpts.ampMin} → $${hybridOpts.ampMax}`
-        : undefined,
-      tier12: hybridOpts.tier12Usd != null ? `$${hybridOpts.tier12Usd}` : undefined,
-      ...hybridOpts,
+      label: formatTierParamLabel(tierOpts),
+      ...tierOpts,
     },
     range: { from: fmtTs(fromMs), to: fmtTs(toMs), days },
     ohlcv: { marketType: marketCtx.marketType, symbol: marketCtx.symbol, label: marketCtx.label },
@@ -592,7 +552,7 @@ async function runRecommendedHybridBacktest(ctx) {
     tierBetTable,
     result: {
       ...result,
-      label: `推荐混合 ${formatHybridParamLabel(hybridOpts)}`,
+      label: `推荐四档 ${formatTierParamLabel(tierOpts)}`,
       pnlDeltaVsFixed: result.pnl - baseline.pnl,
       pnlDeltaVsFullTier12: result.pnl - fullTier12.pnl,
       maxDdDeltaVsFixed: result.maxDrawdown - baseline.maxDrawdown,
@@ -605,7 +565,7 @@ async function runRecommendedHybridBacktest(ctx) {
 
   const r = report.result;
   console.log(`\n=== 推荐上线参数回测 · OKX ${marketCtx.label} · ${days}d ===`);
-  console.log(`参数: ${formatHybridParamLabel(hybridOpts)}`);
+  console.log(`参数: ${formatTierParamLabel(tierOpts)}`);
   console.log(`门控: 放量窗 ${sg.volumeBurstMinutes}min | 动态阈值 ${sg.barVolumeUsdtMinDynamic / 1e6}M–${sg.barVolumeUsdtMaxDynamic / 1e6}M`);
   console.log(`门控开启: ${(gateOpenPct * 100).toFixed(1)}% | 信号: ${rawTrades.length}笔 | 成交: ${r.trades}笔`);
 
@@ -700,7 +660,7 @@ async function runTier12Backtest({
     baseMax: best.baseMax,
     tier12: true,
   });
-  const tierTable = summarizeByTier(bestRun.tradeDetails, best.baseMin, best.baseMax);
+  const tierTable = summarizeByTierLinear(bestRun.tradeDetails, best.baseMin, best.baseMax);
   const tierEdge = summarizeTierEdgeAtFixedStake(rawTrades, c5, fixedBase);
 
   const tierBetTable = Array.from({ length: TIER_COUNT }, (_, i) => ({
@@ -876,7 +836,7 @@ async function main() {
       marketCtx,
       gateOpenPct,
       fixedBase,
-      hybridOpts: parseHybridOpts(),
+      tierOpts: parseTierOpts(),
     });
     return;
   }
