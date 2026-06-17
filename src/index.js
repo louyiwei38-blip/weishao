@@ -56,7 +56,7 @@ import {
   stopAllRestingFillWatchers,
 } from './trader/restingFillWatcher.js';
 import * as martingale from './martingale/manager.js';
-import { dynamicBaseBetEnabled, formatTierBetTable } from './martingale/dynamicBaseBet.js';
+import { dynamicBaseBetEnabled, formatTierBetTable, minActivityTier } from './martingale/dynamicBaseBet.js';
 import * as stats from './stats/manager.js';
 import { notifyTelegram, escapeHtml } from './utils/telegram.js';
 import { formatBeijingTime } from './utils/datetime.js';
@@ -418,9 +418,41 @@ async function runCycle(cycleStartTs) {
         skipReason,
         signal: signalObj.signal,
         signalId: signalObj.signalId,
+        activityTier: mg.activityTier,
+        activityHits: mg.activityHits,
+        minActivityTier: minActivityTier(),
         ...formatVolatilityLogFields(volCtx),
         ...stats.formatLogFields(),
       });
+
+      const side = signalObj.signal === 'UP' ? '📈 买涨 UP' : '📉 买跌 DOWN';
+      let skipTitle = '策略跳过 — 本周期不下单';
+      let skipDetail = skipReason;
+      if (skipReason === 'cold_tier') {
+        skipTitle = '冷档跳过 — 活跃度不足';
+        skipDetail = `当前 ${mg.activityTier ?? '?'}档（${mg.activityHits ?? '?'}/${config.sessionGate.activityWindowBars} 命中）` +
+          ` · 最低 ${minActivityTier()}档才开仓`;
+      } else if (skipReason === 'halted') {
+        skipTitle = '连亏停机 — 跳过本周期';
+        skipDetail = '连亏 4 次触发停机，本周期重置序列';
+      } else if (skipReason === 'insufficient_balance') {
+        skipTitle = '余额不足 — 跳过本周期';
+        skipDetail = `可用余额 $${balance.toFixed(2)}`;
+      }
+
+      await notifyTelegram(
+        `⏭ <b>${skipTitle}</b>\n` +
+        `方向: <b>${side}</b> (${signalObj.signalId})\n` +
+        `原因: ${escapeHtml(signalObj.reason)}\n` +
+        `说明: ${escapeHtml(skipDetail)}\n` +
+        `窗口: ${formatBeijingTime(cycleStartTs)}\n` +
+        `标的: ${config.symbol}\n` +
+        await formatBalanceTelegramLine(balance) +
+        `波动率: ${escapeHtml(volCtx.regimeReason)}` +
+        formatVolatilityTelegramBlock(volCtx.rv, volCtx.regime) +
+        formatSessionTelegramBlock(sessionCtx) +
+        stats.formatTelegramBlock(),
+      );
       return;
     }
 
