@@ -49,12 +49,27 @@ const dynRaw = process.env.DYNAMIC_BASE_BET_ENABLED;
 const dynEnabled = dynRaw === undefined || dynRaw === '' || dynRaw.toLowerCase() === 'true';
 console.log(`${dynEnabled ? 'OK' : 'OFF'}  DYNAMIC_BASE_BET_ENABLED (${dynEnabled ? '4-bucket (1-9/10/11/12)' : 'fixed TRADE_BUDGET_USD'})`);
 if (dynEnabled) {
-  console.log(`     1-9=$${process.env.BASE_BET_TIER1_9_USD ?? '1'} | 10=$${process.env.BASE_BET_TIER10_USD ?? '6'} | 11=$${process.env.BASE_BET_TIER11_USD ?? '8'} | 12=$${process.env.BASE_BET_TIER12_USD ?? '24'}`);
+  console.log(`     1-9=$${process.env.BASE_BET_TIER1_9_USD ?? '1'} | 10=$${process.env.BASE_BET_TIER10_USD ?? '6'} | 11=$${process.env.BASE_BET_TIER11_USD ?? '6'} | 12=$${process.env.BASE_BET_TIER12_USD ?? '32'}`);
+  console.log(`     MIN_ACTIVITY_TIER=${process.env.MIN_ACTIVITY_TIER ?? '10'} (新序列 ≥此档才开仓)`);
+  console.log(`     ACTIVITY_PROBE_USDT_MIN=${process.env.ACTIVITY_PROBE_USDT_MIN ?? '28500000'}`);
 } else {
   status('TRADE_BUDGET_USD');
 }
 
 console.log('\n--- Recommended ---');
 status('OHLCV_EXCHANGE');
+
+console.log('\n--- Trading symbol ---');
+const { SUPPORTED_TRADING_SYMBOLS, describeTradingSymbol } = await import('../src/markets/symbols.js');
+const tradingSymbol = (process.env.TRADING_SYMBOL || 'BTC/USDT').trim();
+const market = describeTradingSymbol(tradingSymbol);
+if (market) {
+  console.log(`OK  TRADING_SYMBOL=${tradingSymbol} (${market.name})`);
+  console.log(`     slug: ${market.slugPattern}`);
+  console.log(`     chainlink: ${market.chainlink}`);
+} else {
+  console.log(`BAD TRADING_SYMBOL=${tradingSymbol}`);
+  console.log(`     supported: ${SUPPORTED_TRADING_SYMBOLS.join(', ')}`);
+}
 
 console.log('\nDocs: docs/ARCHITECTURE.md');

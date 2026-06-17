@@ -1,8 +1,8 @@
 # Polymarket Reversal Continuation Bot
 
-**PRD v2.4+** · BTC/USDT 5m · 高波动延续 · 放量窗会话门控 · 12 档动态首注 · Martingale 4-loss stop · CLOB V2 · OKX/Chainlink 结算 · GTC 限价
+**PRD v2.4+** · BTC/USDT 5m · 高波动延续 · 门控常开 + 热档过滤 · 12 档动态首注 · Martingale 4-loss stop · CLOB V2 · OKX/Chainlink 结算 · GTC 限价
 
-Polymarket 5 分钟涨跌盘口自动交易机器人：OKX 永续 5m K 线形态产生 S1/S2 信号，**放量窗**（可选定时常开）控制是否下单，CLOB 限价/市价下单，OKX K 线或 Chainlink oracle 结算，马丁格尔 + **活跃度 12 档动态首注**管理仓位。
+Polymarket 5 分钟涨跌盘口自动交易机器人：OKX 永续 5m K 线形态产生 S1/S2 信号，**默认门控常开**，通过 **活跃度最低档**（`MIN_ACTIVITY_TIER=10`）跳过冷档新开单；CLOB 限价/市价下单，OKX K 线或 Chainlink oracle 结算，马丁格尔 + **活跃度 12 档动态首注**管理仓位。
 
 > 详细架构见 **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)**（信号 / 下单 / 成交监视 / 结算全链路）
 
@@ -24,7 +24,7 @@ Polymarket 5 分钟涨跌盘口自动交易机器人：OKX 永续 5m K 线形态
 
 ## 会话启停（放量窗）
 
-默认 **开启**（`SESSION_GATE_ENABLED=true`）。生产门控为 **放量窗**：单根 5m K 线 USDT 成交额 ≥ 触发线时开门，持续 `VOLUME_BURST_MINUTES`（默认 21 分钟）；窗口内再次触发只**刷新**截止时间，不叠加。
+默认 **常开**（`SESSION_GATE_ENABLED=false`）。可选开启 **放量窗**门控：单根 5m K 线 USDT 成交额 ≥ 触发线时开门，持续 `VOLUME_BURST_MINUTES`（默认 21 分钟）；窗口内再次触发只**刷新**截止时间，不叠加。
 
 ### 触发线（动态 / 固定）
 
@@ -71,19 +71,33 @@ Polymarket 5 分钟涨跌盘口自动交易机器人：OKX 永续 5m K 线形态
 
 ---
 
-## 动态首注（活跃度 12 档 → 首注 4 桶）
+关闭门控：`SESSION_GATE_ENABLED=false`（**默认**，与回测「门控常开」一致）。开启放量窗：设 `SESSION_GATE_ENABLED=true`。
 
-默认 **开启**（`DYNAMIC_BASE_BET_ENABLED=true`）。近窗活跃度仍映射 **12 档**（0–12 根命中），但首注金额合并为 **4 桶**：**1–9 档同注**、**10 / 11 / 12 档各一注**。在新马丁序列开始时（`consecutiveLosses === 0`）按当前活跃度刷新首注；连亏中仍按 `MARTINGALE_MULTIPLIER` 加倍，**不在连亏中途改档**。
+## 动态首注（活跃度 12 档 → 首注 4 桶 + 热档过滤）
+
+默认 **开启**（`DYNAMIC_BASE_BET_ENABLED=true`）。近窗活跃度映射 **12 档**（0–12 根命中），首注合并为 **4 桶**：**1–9 档同注**、**10 / 11 / 12 档各一注**。在新马丁序列开始时（`consecutiveLosses === 0`）按当前活跃度刷新首注；连亏中仍按 `MARTINGALE_MULTIPLIER` 加倍，**不在连亏中途改档**。
+
+**回测推荐（OKX BTC 永续 365d）：** `ACTIVITY_PROBE_USDT_MIN=28500000` · 四档 **1 / 6 / 6 / 32** · **`MIN_ACTIVITY_TIER=10`**（1–9 档不新开单，仅 10–12 档开仓；连亏序列中仍继续马丁）。
 
 | 活跃度档位 | 首注（默认） |
 |-----------|-------------|
-| 1–9 档 | $1 |
+| 1–9 档 | $1（`MIN_ACTIVITY_TIER=10` 时不新开单） |
 | 10 档 | $6 |
-| 11 档 | $8 |
-| 12 档 | $24 |
+| 11 档 | $6 |
+| 12 档 | $32 |
 
-- **赢一局**或**连亏 4 次停机**：下一序列重新按活跃度刷新首注
-- 关闭：`DYNAMIC_BASE_BET_ENABLED=false` → 始终使用 `TRADE_BUDGET_USD`
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `ACTIVITY_PROBE_USDT_MIN` | 28500000 | 近 12 根内 ≥ 此 USDT 成交额计为命中 |
+| `MIN_ACTIVITY_TIER` | 10 | 新序列活跃度 **低于此档则跳过**；连亏中不中断 |
+| `BASE_BET_TIER1_9_USD` | 1 | 1–9 档首注 |
+| `BASE_BET_TIER10_USD` | 6 | 10 档首注 |
+| `BASE_BET_TIER11_USD` | 6 | 11 档首注 |
+| `BASE_BET_TIER12_USD` | 32 | 12 档首注 |
+
+- **赢一局**或**连亏 4 次停机**：下一序列重新按活跃度刷新首注并重新评估 `MIN_ACTIVITY_TIER`
+- 关闭动态首注：`DYNAMIC_BASE_BET_ENABLED=false` → 始终使用 `TRADE_BUDGET_USD`
+- 恢复全档开仓：`MIN_ACTIVITY_TIER=1`
 
 ---
 
@@ -167,11 +181,11 @@ logs/
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `SESSION_GATE_ENABLED` | true | false = 常开 |
+| `SESSION_GATE_ENABLED` | false | true = 放量窗门控；false = 常开（默认） |
 | `SESSION_CANDLE_LIMIT` | 12 | 评估拉取 5m K 线根数 |
 | `DYNAMIC_THRESHOLD_ENABLED` | true | false = 固定 `BAR_VOLUME_USDT_MIN` |
 | `ACTIVITY_WINDOW_BARS` | 12 | 活跃度统计窗口（12×5m = 1h） |
-| `ACTIVITY_PROBE_USDT_MIN` | 25000000 | 探测线：统计近窗内 ≥ 此值的根数 |
+| `ACTIVITY_PROBE_USDT_MIN` | 28500000 | 探测线：统计近窗内 ≥ 此值的根数 |
 | `BAR_VOLUME_USDT_MIN_DYNAMIC` | 20000000 | 市场热时最低触发线 |
 | `BAR_VOLUME_USDT_MAX_DYNAMIC` | 37000000 | 市场冷时最高触发线 |
 | `BAR_VOLUME_USDT_MIN` | 25000000 | 固定模式触发线 |
@@ -185,10 +199,11 @@ logs/
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | `DYNAMIC_BASE_BET_ENABLED` | true | false = 始终 `TRADE_BUDGET_USD` |
+| `MIN_ACTIVITY_TIER` | 10 | 新序列 ≥ 此档才开仓（10 = 仅热档 10–12） |
 | `BASE_BET_TIER1_9_USD` | 1 | 活跃度 1–9 档首注 |
 | `BASE_BET_TIER10_USD` | 6 | 活跃度 10 档首注 |
-| `BASE_BET_TIER11_USD` | 8 | 活跃度 11 档首注 |
-| `BASE_BET_TIER12_USD` | 24 | 活跃度 12 档首注 |
+| `BASE_BET_TIER11_USD` | 6 | 活跃度 11 档首注 |
+| `BASE_BET_TIER12_USD` | 32 | 活跃度 12 档首注 |
 
 ### 下单 / 成交
 
@@ -222,11 +237,12 @@ Polymarket / 钱包 / Telegram 变量见 `.env.example`。
 ```
 每 5m 周期
   │
-  ├─ CCXT 拉 OKX 永续 5m K 线（门控开启时扩展至 SESSION_CANDLE_LIMIT 根）
+  ├─ CCXT 拉 OKX 永续 5m K 线
   ├─ 结算上一笔 pending-bet（SETTLE_SOURCE=okx | chainlink）
-  ├─ 会话评估：放量窗 / 定时常开 → IDLE / ACTIVE
+  ├─ 会话评估：默认常开 ACTIVE；可选放量窗 → IDLE / ACTIVE
   │     └─ IDLE → 本周期结束（不新开单）
   ├─ 动态首注：新马丁序列时按活跃度刷新 base bet
+  │     └─ tier < MIN_ACTIVITY_TIER → 跳过新开单（连亏序列不受影响）
   ├─ 5m 形态 → S1/S2/NONE（固定高波延续）
   ├─ 风控：日亏损上限 / 马丁停机 / 余额
   ├─ Gamma 发现 Polymarket 5m 盘口 → CLOB 下单
@@ -234,7 +250,7 @@ Polymarket / 钱包 / Telegram 变量见 `.env.example`。
 ```
 
 - **会话 IDLE**：本周期不新开单，仍结算 pending。
-- **无信号**或**风控拦截**：本周期不下单，马丁不变。
+- **无信号**、**冷档跳过**或**风控拦截**：本周期不下单，马丁不变（连亏中冷档过滤不生效）
 - **连亏 4 次**：下一周期跳过并重置序列（动态首注下次按活跃度刷新）。
 - **赢一局**：马丁重置；动态首注下次按活跃度刷新。
 - GTC 未成交不计入马丁；FOK 流动性不足会重试后跳过。
@@ -253,8 +269,9 @@ Polymarket / 钱包 / Telegram 变量见 `.env.example`。
 | `node scripts/check-env.js` | 检查配置 |
 | `DRY_RUN=true node scripts/test-cycle.js` | 单次周期测试 |
 | `node scripts/backtest-session-gate-v2.js` | 放量窗门控回测 |
-| `node scripts/backtest-dynamic-base-bet.js --days=365 --recommended` | 四档首注回测（默认 1-9:$1 · 10:$6 · 11:$8 · 12:$24） |
-| `node scripts/backtest-dynamic-base-bet.js --days=365 --recommended --tier1-9=1 --tier10=6 --tier11=8 --tier12=24` | 自定义四档金额回测 |
+| `node scripts/backtest-btc-always-on-optimize.js --days=365` | 门控常开多方法寻优 + ROI 峰值 |
+| `node scripts/backtest-btc-tier-pnl-table.js --days=365` | 各参数组 12 档 PnL/ROI 分段 |
+| `node scripts/backtest-dynamic-base-bet.js --days=365 --recommended` | 四档首注回测 |
 | `node scripts/backtest-dynamic-base-bet.js --days=365 --tier12-hybrid` | 10/11/12 档金额网格搜索 |
 | `node scripts/analyze-tier-only-roi.js --days=365` | 单档 vs 全档 ROI 对比（输出 `logs/analyze-tier-only-roi.json`） |
 | `node scripts/backtest-tier9-12-by-regime.js --days=365` | 9-12 档按行情段拆解（月/季/波动/自定义窗口） |
@@ -282,7 +299,7 @@ pm2 start src/index.js --name pmfanz2 --time
 - 钱包需有足够 **pUSD**（≥ `MIN_BALANCE_USD`）
 - 国内服务器：`OHLCV_EXCHANGE=okx`、`OHLCV_MARKET_TYPE=swap`；Chainlink 模式需能访问 `wss://ws-live-data.polymarket.com`
 - 默认 `SETTLE_SOURCE=okx`，不依赖 RTDS；若改 `chainlink`，首次部署建议 `DRY_RUN=true` 空跑，日志应出现 `[chainlink] RTDS buffer ready`
-- 会话门控默认开启；若需与旧版「常开」一致，设 `SESSION_GATE_ENABLED=false`
-- 放量触发线与活跃度档位可在 `.env` 长期观察后微调
+- 会话门控默认**常开**；若需放量窗过滤，设 `SESSION_GATE_ENABLED=true`
+- 动态首注默认 **probe=28.5M · 1/6/6/32 · MIN_ACTIVITY_TIER=10**；可在 `.env` 微调
 - 服务器 `.env` 若仍保留 `VOL_COMPRESS_*`、`VOL_SPIKE_*`、`SESSION_OBSERVATION_BARS` 等旧压缩门控变量，可删除；生产门控不再读取
 - 若仍保留 `RV_RATIO_MAX=1.05` 或 `VOLUME_FILTER_MODE=…`，请删除或置空；当前代码已不再使用

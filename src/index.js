@@ -840,6 +840,8 @@ async function scheduler() {
 
   logger.info('▶ 机器人启动', {
     symbol: config.symbol,
+    market: config.market?.name,
+    slugPattern: config.market?.slugPattern,
     timeframe: config.timeframe,
     signalOhlcv: {
       exchange: signalOhlcv.exchange,
@@ -873,6 +875,7 @@ async function scheduler() {
           tier10Usd: config.dynamicBaseBet.tier10Usd,
           tier11Usd: config.dynamicBaseBet.tier11Usd,
           tier12Usd: config.dynamicBaseBet.tier12Usd,
+          minActivityTier: config.dynamicBaseBet.minActivityTier,
         }
       : { enabled: false, fallbackUsd: config.tradeBudgetUsd },
     ...stats.formatLogFields(),
@@ -882,6 +885,8 @@ async function scheduler() {
   if (dynamicBaseBetEnabled()) {
     logger.info('[martingale] 动态首注已启用（1-9/10/11/12 四档）', {
       tiers: formatTierBetTable(),
+      minActivityTier: config.dynamicBaseBet.minActivityTier,
+      probeUsdtMin: config.sessionGate.activityProbeUsdtMin,
       ...config.dynamicBaseBet,
     });
   } else {

@@ -3,6 +3,10 @@ import { existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { resolvePrivateKey } from './utils/secrets.js';
+import {
+  assertSupportedTradingSymbol,
+  describeTradingSymbol,
+} from './markets/symbols.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const envPath = join(__dirname, '..', '.env');
@@ -135,14 +139,16 @@ const config = {
     /** Activity tier 10 */
     tier10Usd: num('BASE_BET_TIER10_USD', 6),
     /** Activity tier 11 */
-    tier11Usd: num('BASE_BET_TIER11_USD', 8),
+    tier11Usd: num('BASE_BET_TIER11_USD', 6),
     /** Activity tier 12 (hottest) */
-    tier12Usd: num('BASE_BET_TIER12_USD', 24),
+    tier12Usd: num('BASE_BET_TIER12_USD', 32),
+    /** New streak only: skip open when activity tier < this (1=all tiers). Backtest: 10 = hot 10–12 only */
+    minActivityTier: num('MIN_ACTIVITY_TIER', 10),
   },
 
   /** Session gate: burst-only by default — 5m bar volume ≥ threshold opens gate (refresh, no stack) */
   sessionGate: {
-    enabled: bool('SESSION_GATE_ENABLED', true),
+    enabled: bool('SESSION_GATE_ENABLED', false),
     /** 5m bars fetched for bar-volume evaluation (≥ activityWindowBars when dynamic gate on) */
     candleLimit: num('SESSION_CANDLE_LIMIT', 12),
     eventWindowEnabled: bool('EVENT_WINDOW_ENABLED', false),
@@ -158,7 +164,7 @@ const config = {
     /** Dynamic burst trigger: freq of probe hits over activityWindowBars → thresh min..max */
     dynamicThresholdEnabled: bool('DYNAMIC_THRESHOLD_ENABLED', true),
     activityWindowBars: num('ACTIVITY_WINDOW_BARS', 12),
-    activityProbeUsdtMin: num('ACTIVITY_PROBE_USDT_MIN', 25_000_000),
+    activityProbeUsdtMin: num('ACTIVITY_PROBE_USDT_MIN', 28_500_000),
     barVolumeUsdtMinDynamic: num('BAR_VOLUME_USDT_MIN_DYNAMIC', 20_000_000),
     barVolumeUsdtMaxDynamic: num('BAR_VOLUME_USDT_MAX_DYNAMIC', 37_000_000),
     /** @deprecated legacy compress/volume gate — unused in production gate v2 */
@@ -187,5 +193,8 @@ const config = {
     safetyIntervalMs: num('CHAINLINK_SAFETY_INTERVAL_MS', 60_000),
   },
 };
+
+assertSupportedTradingSymbol(config.symbol);
+config.market = describeTradingSymbol(config.symbol);
 
 export default config;

@@ -7,6 +7,8 @@ import {
   dynamicBaseBetEnabled,
   resolveBaseBetFromCandles,
   formatDynamicBaseBetSummary,
+  activityTierTradeAllowed,
+  minActivityTier,
 } from './dynamicBaseBet.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -151,6 +153,21 @@ export function prepareOrder(availableBalance) {
 
   if (actualBet <= 0) {
     return { actualBet: 0, skipReason: 'insufficient_balance' };
+  }
+
+  if (
+    s.consecutiveLosses === 0
+    && dynamicBaseBetEnabled()
+    && minActivityTier() > 1
+    && !activityTierTradeAllowed(s.activityTier)
+  ) {
+    logger.info('[martingale] 活跃度低于最低档 — 跳过本周期新开单', {
+      key: MARTINGALE_KEY,
+      activityTier: s.activityTier,
+      minActivityTier: minActivityTier(),
+      hits: s.activityHits,
+    });
+    return { actualBet: 0, skipReason: 'cold_tier' };
   }
 
   return { actualBet, skipReason: null };
