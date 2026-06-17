@@ -210,9 +210,18 @@ async function runCycle(cycleStartTs) {
     // ── FR-1: Fetch OHLCV (extended when session gate enabled) ──
     let candles;
     try {
+      // Dynamic base bet tiers depend on activityWindowBars. If session gate is OFF,
+      // we still need enough 5m candles to compute the tier correctly (avoid 5/5 → 12档).
+      const needForActivity = dynamicBaseBetEnabled()
+        ? Math.max(2, Math.min(96, Math.round(Number(config.sessionGate.activityWindowBars) || 12)))
+        : 0;
+      const fetchLimit = config.sessionGate.enabled
+        ? Math.max(config.sessionGate.candleLimit, needForActivity)
+        : Math.max(config.candleLimit, needForActivity);
+
       candles = config.sessionGate.enabled
-        ? await fetchSessionCandles()
-        : await fetchClosedCandles(config.candleLimit);
+        ? await fetchSessionCandles(fetchLimit)
+        : await fetchClosedCandles(fetchLimit);
     } catch (err) {
       cycleStatus = 'ohlcv_failed';
       cycleError = err?.message;

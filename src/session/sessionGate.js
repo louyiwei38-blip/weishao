@@ -21,11 +21,18 @@ function sg() {
   return config.sessionGate;
 }
 
+function clampActivityWindowBars(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 12;
+  // Safety cap: prevents misconfig like 285 from skewing tier calc when only a few candles were fetched.
+  return Math.max(2, Math.min(96, Math.round(n)));
+}
+
 /** Minimum closed 5m bars for session gate evaluation. */
 export function minSessionCandles() {
   if (!config.sessionGate.enabled) return 2;
   if (sg().dynamicThresholdEnabled) {
-    return Math.max(2, sg().activityWindowBars);
+    return clampActivityWindowBars(sg().activityWindowBars);
   }
   return 2;
 }
@@ -35,7 +42,8 @@ export function minSessionCandles() {
  * @returns {{ freq: number, hits: number, windowBars: number, probeLineUsdt: number }}
  */
 export function computeActivityFreq(candles5m, idx) {
-  const { activityWindowBars, activityProbeUsdtMin } = sg();
+  const { activityWindowBars: rawWindowBars, activityProbeUsdtMin } = sg();
+  const activityWindowBars = clampActivityWindowBars(rawWindowBars);
   const windowBars = Math.min(activityWindowBars, idx + 1);
   const startIdx = idx - windowBars + 1;
   let hits = 0;
