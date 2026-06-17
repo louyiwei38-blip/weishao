@@ -438,6 +438,11 @@ async function runCycle(cycleStartTs) {
       } else if (skipReason === 'insufficient_balance') {
         skipTitle = '余额不足 — 跳过本周期';
         skipDetail = `可用余额 $${balance.toFixed(2)}`;
+      } else if (skipReason === 'invalid_bet_size') {
+        skipTitle = '下注额度无效 — 跳过本周期';
+        skipDetail = `余额 $${balance.toFixed(2)} · 马丁额度 $${Number(mg.currentBet) || 0}` +
+          ` · 上限 $${config.maxBetUsd} · 活跃 ${mg.activityTier ?? '?'}档` +
+          ` · 连亏 ${mg.consecutiveLosses}`;
       }
 
       await notifyTelegram(

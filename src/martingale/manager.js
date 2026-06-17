@@ -69,6 +69,12 @@ function loadState() {
   } else if (state[MARTINGALE_KEY].streakBaseBet == null) {
     state[MARTINGALE_KEY].streakBaseBet = state[MARTINGALE_KEY].currentBet;
   }
+  const s = state[MARTINGALE_KEY];
+  if (!Number.isFinite(s.currentBet) || s.currentBet <= 0) {
+    s.currentBet = Number.isFinite(s.streakBaseBet) && s.streakBaseBet > 0
+      ? s.streakBaseBet
+      : defaultBaseBet();
+  }
 }
 
 function persist() {
@@ -145,16 +151,6 @@ export function prepareOrder(availableBalance) {
     return { actualBet: 0, skipReason: 'halted' };
   }
 
-  const actualBet = Math.min(
-    s.currentBet,
-    config.maxBetUsd,
-    availableBalance,
-  );
-
-  if (actualBet <= 0) {
-    return { actualBet: 0, skipReason: 'insufficient_balance' };
-  }
-
   if (
     s.consecutiveLosses === 0
     && dynamicBaseBetEnabled()
@@ -168,6 +164,31 @@ export function prepareOrder(availableBalance) {
       hits: s.activityHits,
     });
     return { actualBet: 0, skipReason: 'cold_tier' };
+  }
+
+  const martingaleBet = Number(s.currentBet);
+  const normalizedBet = Number.isFinite(martingaleBet) && martingaleBet > 0
+    ? martingaleBet
+    : defaultBaseBet();
+  const actualBet = Math.min(
+    normalizedBet,
+    config.maxBetUsd,
+    availableBalance,
+  );
+
+  if (actualBet <= 0) {
+    const skipReason = availableBalance <= 0 ? 'insufficient_balance' : 'invalid_bet_size';
+    logger.warn('[martingale] 下注额度无效 — 跳过本周期', {
+      key: MARTINGALE_KEY,
+      skipReason,
+      martingaleBet: s.currentBet,
+      normalizedBet,
+      maxBetUsd: config.maxBetUsd,
+      availableBalance,
+      activityTier: s.activityTier,
+      consecutiveLosses: s.consecutiveLosses,
+    });
+    return { actualBet: 0, skipReason };
   }
 
   return { actualBet, skipReason: null };
@@ -216,7 +237,9 @@ export function onSettled(won) {
       }
       halted = true;
     } else {
-      s.currentBet = s.currentBet * config.martingaleMultiplier;
+      const prevBet = Number(s.currentBet);
+      const base = Number.isFinite(prevBet) && prevBet > 0 ? prevBet : defaultBaseBet();
+      s.currentBet = base * config.martingaleMultiplier;
       logger.info('[martingale] 输 — 加倍下注', {
         key: MARTINGALE_KEY,
         consecutiveLosses: s.consecutiveLosses,
