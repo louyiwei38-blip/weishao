@@ -66,7 +66,7 @@ export function minActivityTier() {
 
 /** New streak: allow open only when activity tier ≥ minActivityTier. */
 export function activityTierTradeAllowed(tier) {
-  if (tier == null) return true;
+  if (tier == null) return minActivityTier() <= 1;
   return tier >= minActivityTier();
 }
 
