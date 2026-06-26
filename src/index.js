@@ -443,7 +443,7 @@ async function runCycle(cycleStartTs) {
           ` · 最低 ${minActivityTier()}档才开仓`;
       } else if (skipReason === 'halted') {
         skipTitle = '连亏停机 — 跳过本周期';
-        skipDetail = '连亏 4 次触发停机，本周期重置序列';
+        skipDetail = '（旧版逻辑，已停用）';
       } else if (skipReason === 'insufficient_balance') {
         skipTitle = '余额不足 — 跳过本周期';
         skipDetail = `可用余额 $${balance.toFixed(2)}`;
@@ -835,7 +835,7 @@ async function applySettlement(pending, { candles } = {}) {
     : '';
 
   const haltNote = halted
-    ? `\n⚠️ <b>马丁连亏止损触发</b> — 下周期重置为基础注`
+    ? `\n⚠️ <b>马丁连亏止损触发</b> — 下周期按活跃度刷新首注继续`
     : '';
 
   const priceLine = usesChainlinkSettlement()

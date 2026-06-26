@@ -13,10 +13,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = join(__dirname, '..', '..', 'logs');
 const TF_MS = 5 * 60_000;
 
-export function cachePathForMarket(marketType = config.ohlcvMarketType) {
+export function cachePathForMarket(marketType = config.ohlcvMarketType, symbol = null) {
+  const ctx = resolveOhlcvMarket(marketType, symbol);
+  const slug = ctx.symbol.replace(/[/:]/g, '-').toLowerCase();
   return marketType === 'swap'
-    ? join(OUT_DIR, 'ohlcv-5m-okx-swap-cache.json')
-    : join(OUT_DIR, 'ohlcv-5m-cache.json');
+    ? join(OUT_DIR, `ohlcv-5m-okx-swap-${slug}-cache.json`)
+    : join(OUT_DIR, `ohlcv-5m-${slug}-cache.json`);
 }
 
 export async function fetchAllCandles(exchange, symbol, timeframe, since, until) {
@@ -49,7 +51,7 @@ export async function ensureOkxCandles({
 } = {}) {
   const ctx = resolveOhlcvMarket(marketType, symbol);
   const needSince = fromMs - warmupMs;
-  const cacheFile = cachePathForMarket(ctx.marketType);
+  const cacheFile = cachePathForMarket(ctx.marketType, symbol ?? ctx.symbol);
   let c5 = existsSync(cacheFile) ? JSON.parse(readFileSync(cacheFile, 'utf8')) : [];
   const cacheStart = c5[0]?.t ?? Infinity;
   const cacheEnd = c5.at(-1)?.t ?? 0;

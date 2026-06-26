@@ -37,26 +37,120 @@ export function minSessionCandles() {
   return 2;
 }
 
-/**
- * Activity freq: share of recent 5m bars with USDT notional ≥ probe line.
- * @returns {{ freq: number, hits: number, windowBars: number, probeLineUsdt: number }}
- */
-export function computeActivityFreq(candles5m, idx) {
-  const { activityWindowBars: rawWindowBars, activityProbeUsdtMin } = sg();
-  const activityWindowBars = clampActivityWindowBars(rawWindowBars);
-  const windowBars = Math.min(activityWindowBars, idx + 1);
-  const startIdx = idx - windowBars + 1;
+function countProbeHits(candles5m, idx, probeUsdt, windowBars) {
+  const w = Math.min(windowBars, idx + 1);
+  const startIdx = idx - w + 1;
   let hits = 0;
   for (let i = startIdx; i <= idx; i += 1) {
     const usdt = computeBarUsdtNotional(candles5m[i]);
-    if (usdt != null && usdt >= activityProbeUsdtMin) hits += 1;
+    if (usdt != null && usdt >= probeUsdt) hits += 1;
   }
+  return { hits, windowBars: w };
+}
+
+/** Map 12-bar hit freq → dynamic probe line (high freq → lower probe). */
+export function computeDynamicProbeLine(freq, overrides = {}) {
+  const cfg = { ...sg(), ...overrides };
+  const lo = Math.min(cfg.activityProbeUsdtMinDynamic, cfg.activityProbeUsdtMaxDynamic);
+  const hi = Math.max(cfg.activityProbeUsdtMinDynamic, cfg.activityProbeUsdtMaxDynamic);
+  const clamped = Math.min(1, Math.max(0, freq));
+  return Math.round(hi - clamped * (hi - lo));
+}
+
+/**
+ * Resolve activity probe line (fixed or freq-mapped dynamic).
+ * Dynamic: 近 activityWindowBars 根过线占比 → 探测线（与放量触发线同构）；2-pass 收敛。
+ */
+export function resolveProbeLineUsdt(candles5m, idx, overrides = {}) {
+  const cfg = { ...sg(), ...overrides };
+  const {
+    dynamicProbeEnabled,
+    activityProbeUsdtMin,
+    activityProbeUsdtMinDynamic,
+    activityProbeUsdtMaxDynamic,
+    activityWindowBars: rawWindowBars,
+  } = cfg;
+
+  if (!dynamicProbeEnabled) {
+    return {
+      probeLineUsdt: activityProbeUsdtMin,
+      dynamic: false,
+      mapFreq: null,
+      mapHits: null,
+    };
+  }
+
+  const lo = Math.min(activityProbeUsdtMinDynamic, activityProbeUsdtMaxDynamic);
+  const hi = Math.max(activityProbeUsdtMinDynamic, activityProbeUsdtMaxDynamic);
+  const activityWindowBars = clampActivityWindowBars(rawWindowBars);
+
+  let probeLineUsdt = hi;
+  let mapHits = 0;
+  let mapFreq = 0;
+  let mapWindowBars = 0;
+  for (let pass = 0; pass < 2; pass += 1) {
+    const counted = countProbeHits(candles5m, idx, probeLineUsdt, activityWindowBars);
+    mapHits = counted.hits;
+    mapWindowBars = counted.windowBars;
+    mapFreq = mapWindowBars > 0 ? mapHits / mapWindowBars : 0;
+    probeLineUsdt = computeDynamicProbeLine(mapFreq, overrides);
+  }
+
+  return {
+    probeLineUsdt,
+    dynamic: true,
+    mapFreq,
+    mapHits,
+    mapWindowBars,
+    probeMin: lo,
+    probeMax: hi,
+  };
+}
+
+/**
+ * Activity freq: share of recent 5m bars with USDT notional ≥ probe line.
+ */
+export function computeActivityFreq(candles5m, idx, overrides = {}) {
+  const { activityWindowBars: rawWindowBars } = { ...sg(), ...overrides };
+  const {
+    probeLineUsdt,
+    dynamic,
+    mapFreq,
+    mapHits,
+    mapWindowBars,
+    probeMin,
+    probeMax,
+  } = resolveProbeLineUsdt(candles5m, idx, overrides);
+
+  if (dynamic) {
+    return {
+      freq: mapFreq,
+      hits: mapHits,
+      windowBars: mapWindowBars,
+      probeLineUsdt,
+      dynamic,
+      mapFreq,
+      mapHits,
+      mapWindowBars,
+      probeMin: probeMin ?? null,
+      probeMax: probeMax ?? null,
+    };
+  }
+
+  const activityWindowBars = clampActivityWindowBars(rawWindowBars);
+  const { hits, windowBars } = countProbeHits(candles5m, idx, probeLineUsdt, activityWindowBars);
   const freq = windowBars > 0 ? hits / windowBars : 0;
   return {
     freq,
     hits,
     windowBars,
-    probeLineUsdt: activityProbeUsdtMin,
+    probeLineUsdt,
+    dynamic,
+    mapFreq: null,
+    mapHits: null,
+    mapWindowBars: null,
+    probeMin: probeMin ?? null,
+    probeMax: probeMax ?? null,
   };
 }
 

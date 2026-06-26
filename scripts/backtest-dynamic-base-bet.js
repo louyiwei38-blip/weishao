@@ -56,12 +56,19 @@ function hasFlag(name) {
   return process.argv.includes(`--${name}`);
 }
 
+function parseTierOptNumber(name) {
+  const raw = parseArg(name, null);
+  if (raw == null) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
 function parseTierOpts() {
-  const tier1_9 = Number(parseArg('tier1-9', null));
-  const tier10 = Number(parseArg('tier10', null));
-  const tier11 = Number(parseArg('tier11', null));
-  const tier12 = Number(parseArg('tier12', null));
-  if ([tier1_9, tier10, tier11, tier12].every((n) => Number.isFinite(n))) {
+  const tier1_9 = parseTierOptNumber('tier1-9');
+  const tier10 = parseTierOptNumber('tier10');
+  const tier11 = parseTierOptNumber('tier11');
+  const tier12 = parseTierOptNumber('tier12');
+  if ([tier1_9, tier10, tier11, tier12].every((n) => n != null)) {
     return {
       tier1_9Usd: tier1_9,
       tier10Usd: tier10,
@@ -797,7 +804,10 @@ async function main() {
   const days = Number(parseArg('days', '365'));
   const toMs = parseArg('to') ? Date.parse(parseArg('to')) : Date.now();
   const fromMs = parseArg('from') ? Date.parse(parseArg('from')) : toMs - days * 24 * 60 * 60_000;
-  const marketCtx = resolveOhlcvMarket('swap');
+  const marketCtx = resolveOhlcvMarket(
+    (parseArg('market', config.ohlcvMarketType) || 'swap').toLowerCase() === 'spot' ? 'spot' : 'swap',
+    parseArg('symbol', null),
+  );
 
   const { c5 } = await ensureOkxCandles({
     fromMs,

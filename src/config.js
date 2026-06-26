@@ -165,6 +165,10 @@ const config = {
     dynamicThresholdEnabled: bool('DYNAMIC_THRESHOLD_ENABLED', true),
     activityWindowBars: num('ACTIVITY_WINDOW_BARS', 12),
     activityProbeUsdtMin: num('ACTIVITY_PROBE_USDT_MIN', 28_500_000),
+    /** Dynamic probe: 12-bar hit freq (vs max probe) → probe line min..max */
+    dynamicProbeEnabled: bool('DYNAMIC_PROBE_ENABLED', false),
+    activityProbeUsdtMinDynamic: num('ACTIVITY_PROBE_USDT_MIN_DYNAMIC', 22_000_000),
+    activityProbeUsdtMaxDynamic: num('ACTIVITY_PROBE_USDT_MAX_DYNAMIC', 28_500_000),
     barVolumeUsdtMinDynamic: num('BAR_VOLUME_USDT_MIN_DYNAMIC', 20_000_000),
     barVolumeUsdtMaxDynamic: num('BAR_VOLUME_USDT_MAX_DYNAMIC', 37_000_000),
     /** @deprecated legacy compress/volume gate — unused in production gate v2 */

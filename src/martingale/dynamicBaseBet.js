@@ -110,6 +110,9 @@ export function resolveBaseBetFromCandles(candles5m) {
     dynamic: true,
     tradeAllowed,
     minActivityTier: minActivityTier(),
+    probeLineUsdt: activity.probeLineUsdt,
+    probeDynamic: activity.dynamic ?? false,
+    mapFreq: activity.mapFreq ?? null,
   };
 }
 
@@ -125,5 +128,8 @@ export function formatDynamicBaseBetSummary(ctx) {
   if (!ctx?.dynamic) return '';
   const minT = ctx.minActivityTier ?? minActivityTier();
   const gate = ctx.tradeAllowed === false ? ` · 低于${minT}档跳过` : '';
-  return `活跃 ${ctx.hits}/${ctx.windowBars} → ${ctx.tier}档 $${ctx.baseBet}${gate}`;
+  const probeHint = ctx.probeDynamic && ctx.probeLineUsdt != null
+    ? ` · 探测≥${(ctx.probeLineUsdt / 1e6).toFixed(1)}M`
+    : '';
+  return `活跃 ${ctx.hits}/${ctx.windowBars} → ${ctx.tier}档 $${ctx.baseBet}${probeHint}${gate}`;
 }

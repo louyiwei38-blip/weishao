@@ -7,15 +7,17 @@ import config from '../config.js';
 import logger from '../utils/logger.js';
 import { sleep } from '../utils/retry.js';
 import { resolveWebSocket, bindSocket, sendSocket } from '../utils/websocket.js';
+import {
+  chainlinkPairFromSymbol,
+  POLYMARKET_5M_MARKETS,
+} from '../markets/symbols.js';
 
 const RTDS_URL = 'wss://ws-live-data.polymarket.com';
 
-export const SYMBOL_CHAINLINK = {
-  'BTC/USDT': 'btc/usd',
-  'ETH/USDT': 'eth/usd',
-  'SOL/USDT': 'sol/usd',
-  'BNB/USDT': 'bnb/usd',
-};
+/** @deprecated prefer chainlinkPairFromSymbol() */
+export const SYMBOL_CHAINLINK = Object.fromEntries(
+  Object.entries(POLYMARKET_5M_MARKETS).map(([sym, meta]) => [sym, meta.chainlink])
+);
 
 /** @type {Map<string, Array<{ timestamp: number, value: number }>>} */
 const tickBuffers = new Map();
@@ -26,7 +28,7 @@ let started = false;
 let subscribedSymbols = [];
 
 function symbolToCl(symbol) {
-  return SYMBOL_CHAINLINK[symbol] || null;
+  return chainlinkPairFromSymbol(symbol);
 }
 
 function maxBufferTicks() {

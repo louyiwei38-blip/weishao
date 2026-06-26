@@ -3,6 +3,7 @@ import { classifyCandle, evaluateReversalContinuation } from '../../src/strategy
 import { computeBarUsdtNotional } from '../../src/utils/volumeFilter.js';
 import { calcWinNetProfit } from '../../src/trader/fillSync.js';
 import { activityHitsToTier, resolveTierBaseBet, formatTierParamLabel } from '../../src/martingale/dynamicBaseBet.js';
+import { computeActivityFreq } from '../../src/session/sessionGate.js';
 
 export const TF_MS = 5 * 60_000;
 export const MARTINGALE_MAX = config.martingaleMaxLosses;
@@ -120,9 +121,18 @@ export function isValidState(s) {
   return s.tier11 >= s.tier10 && s.tier12 >= s.tier11 && s.probeM > 0;
 }
 
-export function simulateMartingale(trades, c5, { fixedBase = null, tierOpts = null, probeUsdt = null } = {}) {
+export function simulateMartingale(trades, c5, {
+  fixedBase = null,
+  tierOpts = null,
+  probeUsdt = null,
+  probeOverrides = null,
+  minActivityTier = 1,
+  /** false = 连亏止损后立即按新活跃度开下一单（不停机跳过） */
+  skipAfterHalt = true,
+} = {}) {
   const idxByT = new Map(c5.map((b, i) => [b.t, i]));
   const probe = probeUsdt ?? config.sessionGate.activityProbeUsdtMin;
+  const useDynamicProbe = probeOverrides != null;
 
   let consecutiveLosses = 0;
   let currentBet = fixedBase ?? tierOpts?.tier1_9Usd ?? config.tradeBudgetUsd;
@@ -135,6 +145,10 @@ export function simulateMartingale(trades, c5, { fixedBase = null, tierOpts = nu
   let tradesCount = 0;
   let wins = 0;
   let hotTierTrades = 0;
+  let skippedCold = 0;
+  let probeSum = 0;
+  let probeSamples = 0;
+  const tierCounts = Array.from({ length: 12 }, () => 0);
 
   for (const t of trades) {
     if (skipNext) {
@@ -149,9 +163,24 @@ export function simulateMartingale(trades, c5, { fixedBase = null, tierOpts = nu
         currentBet = fixedBase;
       } else if (tierOpts) {
         const idx = idxByT.get(t.k1t) ?? 0;
-        const { hits, windowBars } = computeActivityFreqLocal(c5, idx, probe);
+        let hits;
+        let windowBars;
+        if (useDynamicProbe) {
+          const activity = computeActivityFreq(c5, idx, probeOverrides);
+          hits = activity.hits;
+          windowBars = activity.windowBars;
+          probeSum += activity.probeLineUsdt;
+          probeSamples += 1;
+        } else {
+          ({ hits, windowBars } = computeActivityFreqLocal(c5, idx, probe));
+        }
         tier = activityHitsToTier(hits, windowBars);
+        if (tier < minActivityTier) {
+          skippedCold += 1;
+          continue;
+        }
         currentBet = resolveTierBaseBet(tier, tierOpts);
+        tierCounts[tier - 1] += 1;
         if (tier >= 10) hotTierTrades += 1;
       }
     }
@@ -172,7 +201,7 @@ export function simulateMartingale(trades, c5, { fixedBase = null, tierOpts = nu
       if (consecutiveLosses >= MARTINGALE_MAX) {
         halts += 1;
         consecutiveLosses = 0;
-        skipNext = true;
+        if (skipAfterHalt) skipNext = true;
       } else {
         currentBet *= MULTIPLIER;
       }
@@ -189,14 +218,18 @@ export function simulateMartingale(trades, c5, { fixedBase = null, tierOpts = nu
     roi: totalStake > 0 ? cumPnl / totalStake : 0,
     avgStake: tradesCount ? totalStake / tradesCount : 0,
     hotTierPct: tradesCount ? hotTierTrades / tradesCount : 0,
+    skippedCold,
+    avgProbeUsdt: probeSamples ? probeSum / probeSamples : null,
+    tierCounts,
   };
 }
 
-export function evaluateState(s, trades, c5, objective = 'balanced') {
+export function evaluateState(s, trades, c5, objective = 'balanced', minActivityTier = 1) {
   if (!isValidState(s)) return null;
   const m = simulateMartingale(trades, c5, {
     tierOpts: stateToTierOpts(s),
     probeUsdt: s.probeM * 1e6,
+    minActivityTier,
   });
   return {
     ...m,

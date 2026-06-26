@@ -2,6 +2,7 @@ import config from '../config.js';
 import logger from '../utils/logger.js';
 import { formatBeijingTime } from '../utils/datetime.js';
 import { withRetry } from '../utils/retry.js';
+import { slugBaseFromSymbol } from '../markets/symbols.js';
 
 const GAMMA_API = config.poly.gammaApi;
 
@@ -10,9 +11,9 @@ let cache = { cycleTs: 0, market: null };
 
 /** e.g. ETH/USDT + 5m → eth-updown-5m-1780758600 */
 export function buildMarketSlug(windowStartSec, symbol = config.symbol, timeframe = config.timeframe) {
-  const [base] = symbol.split('/');
+  const base = slugBaseFromSymbol(symbol);
   if (!base) throw new Error(`Invalid TRADING_SYMBOL: ${symbol}`);
-  return `${base.toLowerCase()}-updown-${timeframe}-${windowStartSec}`;
+  return `${base}-updown-${timeframe}-${windowStartSec}`;
 }
 
 /**

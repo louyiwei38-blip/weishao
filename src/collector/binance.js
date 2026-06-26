@@ -16,6 +16,12 @@ function buildExchangeChain() {
 
 const exchangeCache = {};
 
+function swapSymbolFrom(symbol) {
+  if (symbol.includes(':')) return symbol;
+  const [base, quote] = symbol.split('/');
+  return `${base}/${quote}:${quote}`;
+}
+
 /** CCXT symbol + OKX options for spot or USDT-margined swap. */
 export function resolveOhlcvMarket(marketType = config.ohlcvMarketType, symbolOverride = null) {
   const market = (marketType || 'swap').toLowerCase();
@@ -23,7 +29,8 @@ export function resolveOhlcvMarket(marketType = config.ohlcvMarketType, symbolOv
     const symbol = symbolOverride || config.ohlcvSymbol || config.symbol;
     return { marketType: 'spot', symbol, okxOptions: {}, label: 'spot' };
   }
-  const symbol = symbolOverride || config.ohlcvSymbol || swapSymbolFrom(config.symbol);
+  const raw = symbolOverride || config.ohlcvSymbol || config.symbol;
+  const symbol = swapSymbolFrom(raw);
   return {
     marketType: 'swap',
     symbol,
@@ -42,12 +49,6 @@ export function describeOhlcvSource(timeframe = config.timeframe) {
     label: market.label,
     timeframe,
   };
-}
-
-function swapSymbolFrom(symbol) {
-  if (symbol.includes(':')) return symbol;
-  const [base, quote] = symbol.split('/');
-  return `${base}/${quote}:${quote}`;
 }
 
 function getExchangeOptions(exchangeId) {

@@ -70,6 +70,11 @@ function loadState() {
     state[MARTINGALE_KEY].streakBaseBet = state[MARTINGALE_KEY].currentBet;
   }
   const s = state[MARTINGALE_KEY];
+  if (s.isHalted) {
+    s.isHalted = false;
+    persist();
+    logger.info('[martingale] 清除旧版 isHalted 状态，止损后不再跳过');
+  }
   if (!Number.isFinite(s.currentBet) || s.currentBet <= 0) {
     s.currentBet = Number.isFinite(s.streakBaseBet) && s.streakBaseBet > 0
       ? s.streakBaseBet
@@ -134,22 +139,6 @@ export function refreshBaseBetIfNewStreak(candles5m) {
  */
 export function prepareOrder(availableBalance) {
   const s = state[MARTINGALE_KEY];
-
-  if (s.isHalted) {
-    logger.warn('[martingale] 已触发止损 — 跳过本信号并重置', {
-      key: MARTINGALE_KEY,
-    });
-    s.isHalted = false;
-    s.consecutiveLosses = 0;
-    if (!dynamicBaseBetEnabled()) {
-      s.currentBet = defaultBaseBet();
-      s.streakBaseBet = defaultBaseBet();
-    }
-    s.activityTier = null;
-    s.activityHits = null;
-    persist();
-    return { actualBet: 0, skipReason: 'halted' };
-  }
 
   if (
     s.consecutiveLosses === 0
@@ -223,11 +212,10 @@ export function onSettled(won) {
     s.consecutiveLosses += 1;
 
     if (s.consecutiveLosses >= config.martingaleMaxLosses) {
-      logger.warn('[martingale] 连亏止损触发', {
+      logger.warn('[martingale] 连亏止损触发 — 重置序列，下周期继续开单', {
         key: MARTINGALE_KEY,
         consecutiveLosses: s.consecutiveLosses,
       });
-      s.isHalted = true;
       s.consecutiveLosses = 0;
       s.activityTier = null;
       s.activityHits = null;
