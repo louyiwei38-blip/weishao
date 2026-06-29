@@ -29,6 +29,7 @@ module.exports = {
         ACTIVITY_PROBE_USDT_MIN: '30000000',
         ACTIVITY_MIN_HITS: '11',
         ACTIVITY_TIER_BETS: '3,3,3,3,3,3,3,3,6,9,15,24',
+        MIN_OPEN_TIERS: '8,9,10,11,12',
         TRADE_BUDGET_USD: '3',
       },
       env_live: {
@@ -42,6 +43,7 @@ module.exports = {
         ACTIVITY_PROBE_USDT_MIN: '30000000',
         ACTIVITY_MIN_HITS: '11',
         ACTIVITY_TIER_BETS: '3,3,3,3,3,3,3,3,6,9,15,24',
+        MIN_OPEN_TIERS: '8,9,10,11,12',
         TRADE_BUDGET_USD: '3',
       },
     },

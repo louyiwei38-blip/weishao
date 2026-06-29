@@ -6,7 +6,7 @@ import config from '../config.js';
 import { escapeHtml } from '../utils/telegram.js';
 import { computePeriodVolRatio, computeBarUsdtNotional, PERIOD_LONG_BARS } from '../utils/volumeFilter.js';
 import { evaluateCombinedEventWindow } from '../utils/usMarketOpen.js';
-import { hitsToActivityTier, getBetForActivityTier } from './activityTier.js';
+import { hitsToActivityTier, getBetForActivityTier, minOpenTierFloor } from './activityTier.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = join(__dirname, '..', '..', 'logs', 'session-state.json');
@@ -431,18 +431,25 @@ export function evaluateSession(candles5m, nowMs = Date.now(), prevState = {}) {
   const tierBaseBet = getBetForActivityTier(activityTier);
   const { activityMinHits } = sg();
   const hits = activityFreq?.hits ?? 0;
-  const activityPass = hits >= activityMinHits;
+  const minFloor = minOpenTierFloor();
+  const activityPass = config.dryRun
+    ? activityTier >= minFloor
+    : hits >= activityMinHits;
 
   const gateMode = activityPass ? 'activity' : 'idle';
   const tradeAllowed = activityPass;
 
-  const activityHint = dynamic && activityFreq
-    ? `活跃 ${hits}/${activityFreq.windowBars} 档${activityTier} ($${tierBaseBet}) (探测≥${formatUsdtM(activityFreq.probeLineUsdt)}) · 触发线 ${formatUsdtM(thresholdUsdt)}`
-    : `档${activityTier} ($${tierBaseBet}) · 触发线 ${formatUsdtM(thresholdUsdt)}`;
+  const activityHint = activityFreq
+    ? `活跃 ${hits}/${activityFreq.windowBars} 档${activityTier} ($${tierBaseBet}) 探测≥${formatUsdtM(activityFreq.probeLineUsdt)}`
+    : `档${activityTier} ($${tierBaseBet})`;
 
-  const passReason = activityPass
-    ? `活跃 ${hits}/${activityFreq.windowBars} ≥ ${activityMinHits} 根 — ${activityHint}`
-    : `休眠 — 活跃 ${hits}/${activityFreq.windowBars} < ${activityMinHits} 根 (${activityHint})`;
+  const passReason = config.dryRun
+    ? (activityPass
+      ? `模拟盘最低开单≥档${minFloor} — 当前档${activityTier} — ${activityHint}`
+      : `模拟盘休眠 — 当前档${activityTier} < 最低开单档${minFloor} (${activityHint})`)
+    : activityPass
+      ? `活跃 ${hits}/${activityFreq.windowBars} ≥ ${activityMinHits} 根 — ${activityHint}`
+      : `休眠 — 活跃 ${hits}/${activityFreq.windowBars} < ${activityMinHits} 根 (${activityHint})`;
 
   return {
     sessionGateEnabled: true,
@@ -601,14 +608,13 @@ export function formatSessionTelegramBlock(sessionCtx) {
   const barStr = ev.barUsdt != null ? `${formatUsdtM(ev.barUsdt)} USDT` : '—';
   const burst = ev.volumeBurst;
   const minHits = burst?.activityMinHits ?? sg().activityMinHits;
+  const minFloor = minOpenTierFloor();
   const activityLine = burst?.activityHits != null
     ? `\n活跃: <b>${burst.activityHits}/${burst.activityWindowBars}</b> (${Math.round((burst.activityFreq ?? 0) * 100)}%)` +
-      ` · 需 ≥ <b>${minHits}</b> 根` +
-      ` · 档<b>${burst.activityTier ?? '—'}</b> 首注 <b>$${burst.tierBaseBet ?? '—'}</b>` +
-      (burst.dynamicThreshold && burst.thresholdUsdt
-        ? `\n触发线: <b>${escapeHtml(formatUsdtM(burst.thresholdUsdt))}</b>` +
-          ` (${escapeHtml(formatUsdtM(burst.threshMin))}–${escapeHtml(formatUsdtM(burst.threshMax))})`
-        : '')
+      (config.dryRun
+        ? ` · 最低开单 <b>≥档${minFloor}</b> (档${config.minOpenTiers.join('/')} 并行统计)`
+        : ` · 需 ≥ <b>${minHits}</b> 根`) +
+      ` · 当前档<b>${burst.activityTier ?? '—'}</b> ($${burst.tierBaseBet ?? '—'})`
     : '';
 
   return (

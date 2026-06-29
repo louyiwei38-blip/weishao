@@ -26,3 +26,29 @@ export function getBetForActivityTier(tier) {
   const bets = config.activityTierBets;
   return bets[idx] ?? config.tradeBudgetUsd;
 }
+
+/** Lowest configured min-open tier (default 8). */
+export function minOpenTierFloor() {
+  const tiers = config.minOpenTiers;
+  return tiers.length ? Math.min(...tiers) : ACTIVITY_TIER_COUNT;
+}
+
+/** Min-open tiers eligible when current activity tier is T. */
+export function getEligibleMinOpenTiers(activityTier) {
+  const t = Math.round(Number(activityTier)) || 0;
+  return config.minOpenTiers.filter((m) => t >= m);
+}
+
+/** Virtual tracks for dry-run: one bet per eligible min-open tier. */
+export function buildMinOpenTracks(activityTier, balance) {
+  return getEligibleMinOpenTiers(activityTier)
+    .map((minOpenTier) => ({
+      minOpenTier,
+      actualBet: Math.min(
+        getBetForActivityTier(minOpenTier),
+        config.maxBetUsd,
+        balance,
+      ),
+    }))
+    .filter((tr) => tr.actualBet > 0);
+}

@@ -51,6 +51,16 @@ function parseActivityTierBets() {
   return [1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 5, 8].map((m) => Number((m * base).toFixed(2)));
 }
 
+function parseMinOpenTiers() {
+  const raw = process.env.MIN_OPEN_TIERS ?? '8,9,10,11,12';
+  const tiers = raw
+    .split(',')
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isFinite(n) && n >= 1 && n <= ACTIVITY_TIER_COUNT);
+  const unique = [...new Set(tiers)].sort((a, b) => a - b);
+  return unique.length > 0 ? unique : [8, 9, 10, 11, 12];
+}
+
 const config = {
   // Polymarket
   poly: {
@@ -89,6 +99,8 @@ const config = {
   tradeBudgetUsd: num('TRADE_BUDGET_USD', 3),
   /** Tier 1..12 first-bet USD; refreshed on win or martingale halt only */
   activityTierBets: parseActivityTierBets(),
+  /** 模拟盘：并行最低开单档位（活跃度档 ≥ 阈值才开该轨道） */
+  minOpenTiers: parseMinOpenTiers(),
   maxDailyLossUsd: num('MAX_DAILY_LOSS_USD', 10000),
   minBalanceUsd: num('MIN_BALANCE_USD', 0),
   maxBetUsd: num('MAX_BET_USD', 10000),
