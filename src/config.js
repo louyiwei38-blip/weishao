@@ -29,8 +29,26 @@ function num(name, defaultValue) {
 
 function bool(name, defaultValue) {
   const v = process.env[name];
-  if (v === undefined || v === '') return defaultValue;
+  if (v === undefined) return defaultValue;
   return v.toLowerCase() === 'true';
+}
+
+const ACTIVITY_TIER_COUNT = 12;
+
+function parseActivityTierBets() {
+  const raw = process.env.ACTIVITY_TIER_BETS;
+  if (raw) {
+    const bets = raw.split(',').map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0);
+    if (bets.length >= ACTIVITY_TIER_COUNT) return bets.slice(0, ACTIVITY_TIER_COUNT);
+    if (bets.length > 0) {
+      const padded = [...bets];
+      while (padded.length < ACTIVITY_TIER_COUNT) padded.push(padded[padded.length - 1]);
+      return padded;
+    }
+  }
+  const base = num('TRADE_BUDGET_USD', 3);
+  // Plan A highTierOnly: tiers 1–8 = base, 9–12 scale up (backtest net-ROI optimal)
+  return [1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 5, 8].map((m) => Number((m * base).toFixed(2)));
 }
 
 const config = {
@@ -69,10 +87,12 @@ const config = {
   // Bot
   cycleMinutes: num('MARKET_CYCLE_MINUTES', 5),
   tradeBudgetUsd: num('TRADE_BUDGET_USD', 3),
+  /** Tier 1..12 first-bet USD; refreshed on win or martingale halt only */
+  activityTierBets: parseActivityTierBets(),
   maxDailyLossUsd: num('MAX_DAILY_LOSS_USD', 10000),
   minBalanceUsd: num('MIN_BALANCE_USD', 0),
   maxBetUsd: num('MAX_BET_USD', 10000),
-  orderType: optional('ORDER_TYPE', 'FOK'),
+  orderType: optional('ORDER_TYPE', 'GTC'),
   orderFillAttempts: num('ORDER_FILL_ATTEMPTS', 8),
   orderRetryDelayMs: num('ORDER_RETRY_DELAY_MS', 10000),
   /** Limit order: tick offset from best ask (0 = at best ask) */
@@ -124,43 +144,29 @@ const config = {
   /** High-vol continuation: skip when rv_5m/rv_15m >= this (0 = disabled) */
   rvRatioMax: num('RV_RATIO_MAX', 0),
 
-  /**
-   * Dynamic first bet by session-gate activity tier (12 tiers).
-   * Disabled → TRADE_BUDGET_USD for every new streak.
-   */
-  dynamicBaseBet: {
-    enabled: bool('DYNAMIC_BASE_BET_ENABLED', true),
-    /** Tier 1 (0 probe hits) */
-    tier1Usd: num('BASE_BET_TIER1_USD', 2),
-    /** Tier 2–6 linear range (cold weak band) */
-    weakMinUsd: num('BASE_BET_WEAK_MIN_USD', 2),
-    weakMaxUsd: num('BASE_BET_WEAK_MAX_USD', 3),
-    /** Tier 7–8 flat at weakMax; tier 9–12 linear ampMin→ampMax */
-    ampMinUsd: num('BASE_BET_AMP_MIN_USD', 4),
-    ampMaxUsd: num('BASE_BET_AMP_MAX_USD', 12),
-  },
-
-  /** Session gate: shrink-only — 5m bar USDT notional ≤ threshold opens gate (refresh, no stack) */
+  /** Session gate: burst-only by default — 5m bar volume ≥ threshold opens gate (refresh, no stack) */
   sessionGate: {
     enabled: bool('SESSION_GATE_ENABLED', true),
     /** 5m bars fetched for bar-volume evaluation (≥ activityWindowBars when dynamic gate on) */
     candleLimit: num('SESSION_CANDLE_LIMIT', 12),
-    /** @deprecated scheduled windows removed from production gate */
     eventWindowEnabled: bool('EVENT_WINDOW_ENABLED', false),
     eventWindowHours: num('EVENT_WINDOW_HOURS', 1),
+    /** Fixed US session window in Beijing time (NY trading days only) */
     usMarketOpenEnabled: bool('US_MARKET_OPEN_ENABLED', false),
     usMarketWindowStartBj: optional('US_MARKET_WINDOW_START_BJ', '19:30'),
     usMarketWindowEndBj: optional('US_MARKET_WINDOW_END_BJ', '23:59'),
-    /** Fixed shrink trigger (default 3M); used when dynamicThresholdEnabled=false */
-    barVolumeUsdtMin: num('BAR_VOLUME_USDT_MIN', 3_000_000),
-    /** Shrink gate duration after trigger; re-trigger refreshes from now (no stack) */
+    /** Fixed burst trigger when dynamicThresholdEnabled=false; also fallback threshold */
+    barVolumeUsdtMin: num('BAR_VOLUME_USDT_MIN', 25_000_000),
+    /** Burst gate duration after trigger; re-trigger refreshes from now (no stack) */
     volumeBurstMinutes: num('VOLUME_BURST_MINUTES', 21),
-    /** false = fixed BAR_VOLUME_USDT_MIN; true = dynamic min..max by activity freq */
-    dynamicThresholdEnabled: bool('DYNAMIC_THRESHOLD_ENABLED', false),
+    /** Dynamic burst trigger: freq of probe hits over activityWindowBars → thresh min..max */
+    dynamicThresholdEnabled: bool('DYNAMIC_THRESHOLD_ENABLED', true),
     activityWindowBars: num('ACTIVITY_WINDOW_BARS', 12),
-    activityProbeUsdtMin: num('ACTIVITY_PROBE_USDT_MIN', 3_000_000),
-    barVolumeUsdtMinDynamic: num('BAR_VOLUME_USDT_MIN_DYNAMIC', 3_000_000),
-    barVolumeUsdtMaxDynamic: num('BAR_VOLUME_USDT_MAX_DYNAMIC', 7_000_000),
+    activityProbeUsdtMin: num('ACTIVITY_PROBE_USDT_MIN', 30_000_000),
+    /** Min probe-line hits in activity window to allow new orders (Plan A: 11 of 12) */
+    activityMinHits: num('ACTIVITY_MIN_HITS', 11),
+    barVolumeUsdtMinDynamic: num('BAR_VOLUME_USDT_MIN_DYNAMIC', 20_000_000),
+    barVolumeUsdtMaxDynamic: num('BAR_VOLUME_USDT_MAX_DYNAMIC', 37_000_000),
     /** @deprecated legacy compress/volume gate — unused in production gate v2 */
     volCompressLookback: num('VOL_COMPRESS_LOOKBACK', 96),
     volCompressPercentile: num('VOL_COMPRESS_PERCENTILE', 0.40),

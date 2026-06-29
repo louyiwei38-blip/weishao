@@ -3,11 +3,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import config from '../config.js';
 import logger from '../utils/logger.js';
-import {
-  dynamicBaseBetEnabled,
-  resolveBaseBetFromCandles,
-  formatDynamicBaseBetSummary,
-} from './dynamicBaseBet.js';
+import { getBetForActivityTier } from '../session/activityTier.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = join(__dirname, '..', '..', 'logs', 'martingale-state.json');
@@ -17,24 +13,22 @@ const MARTINGALE_KEY = `${config.symbol}:${config.timeframe}`;
 
 /** @type {Record<string, {
  *   consecutiveLosses: number,
+ *   baseBet: number,
  *   currentBet: number,
- *   streakBaseBet: number|null,
- *   isHalted: boolean,
- *   activityTier?: number|null,
- *   activityHits?: number|null,
+ *   lockedTier: number,
+ *   isHalted: boolean
  * }>} */
 let state = {};
 
-function defaultBaseBet() {
-  return config.tradeBudgetUsd;
-}
-
-function applyBaseBetResolved(resolved) {
-  const s = state[MARTINGALE_KEY];
-  s.currentBet = resolved.baseBet;
-  s.streakBaseBet = resolved.baseBet;
-  s.activityTier = resolved.tier ?? null;
-  s.activityHits = resolved.hits ?? null;
+function defaultEntry() {
+  const baseBet = getBetForActivityTier(1);
+  return {
+    consecutiveLosses: 0,
+    baseBet,
+    currentBet: baseBet,
+    lockedTier: 1,
+    isHalted: false,
+  };
 }
 
 // ─────────────────────────────────────────
@@ -53,25 +47,28 @@ function loadState() {
     }
   }
   if (!state[MARTINGALE_KEY]) {
-    state[MARTINGALE_KEY] = {
-      consecutiveLosses: 0,
-      currentBet: defaultBaseBet(),
-      streakBaseBet: defaultBaseBet(),
-      isHalted: false,
-      activityTier: null,
-      activityHits: null,
-    };
-  } else if (state[MARTINGALE_KEY].consecutiveLosses === 0 && !dynamicBaseBetEnabled()) {
-    state[MARTINGALE_KEY].currentBet = defaultBaseBet();
-    state[MARTINGALE_KEY].streakBaseBet = defaultBaseBet();
-  } else if (state[MARTINGALE_KEY].streakBaseBet == null) {
-    state[MARTINGALE_KEY].streakBaseBet = state[MARTINGALE_KEY].currentBet;
+    state[MARTINGALE_KEY] = defaultEntry();
+  } else {
+    const s = state[MARTINGALE_KEY];
+    if (s.baseBet == null) s.baseBet = s.currentBet ?? config.tradeBudgetUsd;
+    if (s.lockedTier == null) s.lockedTier = 1;
+    if (s.consecutiveLosses === 0) s.currentBet = s.baseBet;
   }
 }
 
 function persist() {
   if (!existsSync(LOGS_DIR)) mkdirSync(LOGS_DIR, { recursive: true });
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+}
+
+function refreshBaseFromTier(tier) {
+  const s = state[MARTINGALE_KEY];
+  const t = Math.min(12, Math.max(1, Math.round(tier ?? 1)));
+  s.baseBet = getBetForActivityTier(t);
+  s.currentBet = s.baseBet;
+  s.lockedTier = t;
+  s.consecutiveLosses = 0;
+  s.isHalted = false;
 }
 
 // ─────────────────────────────────────────
@@ -83,44 +80,6 @@ export function init() {
 }
 
 /**
- * Refresh base bet from activity when starting a new martingale streak.
- * Call before prepareOrder each cycle (no-op while consecutiveLosses > 0).
- */
-export function refreshBaseBetIfNewStreak(candles5m) {
-  const s = state[MARTINGALE_KEY];
-  if (s.consecutiveLosses !== 0) {
-    return null;
-  }
-
-  if (!dynamicBaseBetEnabled()) {
-    s.currentBet = defaultBaseBet();
-    s.streakBaseBet = defaultBaseBet();
-    s.activityTier = null;
-    s.activityHits = null;
-    persist();
-    logger.debug('[martingale] 动态首注已关闭，使用 TRADE_BUDGET_USD', {
-      baseBet: s.currentBet,
-    });
-    return { baseBet: s.currentBet, dynamic: false };
-  }
-
-  const resolved = resolveBaseBetFromCandles(candles5m);
-  applyBaseBetResolved(resolved);
-  persist();
-
-  logger.info('[martingale] 动态首注已更新', {
-    key: MARTINGALE_KEY,
-    baseBet: resolved.baseBet,
-    tier: resolved.tier,
-    hits: resolved.hits,
-    windowBars: resolved.windowBars,
-    summary: formatDynamicBaseBetSummary(resolved),
-  });
-
-  return resolved;
-}
-
-/**
  * @param {number} availableBalance
  * @returns {{ actualBet: number, skipReason: string | null }}
  */
@@ -128,17 +87,13 @@ export function prepareOrder(availableBalance) {
   const s = state[MARTINGALE_KEY];
 
   if (s.isHalted) {
-    logger.warn('[martingale] 已触发止损 — 跳过本信号并重置', {
+    logger.warn('[martingale] 已触发止损 — 跳过本信号', {
       key: MARTINGALE_KEY,
+      lockedTier: s.lockedTier,
+      baseBet: s.baseBet,
     });
     s.isHalted = false;
     s.consecutiveLosses = 0;
-    if (!dynamicBaseBetEnabled()) {
-      s.currentBet = defaultBaseBet();
-      s.streakBaseBet = defaultBaseBet();
-    }
-    s.activityTier = null;
-    s.activityHits = null;
     persist();
     return { actualBet: 0, skipReason: 'halted' };
   }
@@ -158,53 +113,44 @@ export function prepareOrder(availableBalance) {
 
 /**
  * @param {boolean} won
+ * @param {{ activityTier?: number }} [opts] — current activity tier; updates baseBet on win/halt only
  * @returns {{ halted: boolean }}
  */
-export function onSettled(won) {
+export function onSettled(won, { activityTier } = {}) {
   const s = state[MARTINGALE_KEY];
   let halted = false;
 
   if (won) {
-    logger.info('[martingale] 赢 — 重置下注', {
+    const prev = { baseBet: s.baseBet, lockedTier: s.lockedTier, consecutiveLosses: s.consecutiveLosses };
+    refreshBaseFromTier(activityTier);
+    logger.info('[martingale] 赢 — 按活跃度档位更新首注', {
       key: MARTINGALE_KEY,
-      prev: {
-        consecutiveLosses: s.consecutiveLosses,
-        currentBet: s.currentBet,
-        activityTier: s.activityTier,
-      },
+      prev,
+      next: { baseBet: s.baseBet, lockedTier: s.lockedTier },
+      activityTier: s.lockedTier,
     });
-    s.consecutiveLosses = 0;
-    s.isHalted = false;
-    s.activityTier = null;
-    s.activityHits = null;
-    s.streakBaseBet = null;
-    if (!dynamicBaseBetEnabled()) {
-      s.currentBet = defaultBaseBet();
-    }
   } else {
     s.consecutiveLosses += 1;
 
     if (s.consecutiveLosses >= config.martingaleMaxLosses) {
-      logger.warn('[martingale] 连亏止损触发', {
-        key: MARTINGALE_KEY,
-        consecutiveLosses: s.consecutiveLosses,
-      });
+      const prev = { baseBet: s.baseBet, lockedTier: s.lockedTier, consecutiveLosses: s.consecutiveLosses };
+      refreshBaseFromTier(activityTier);
       s.isHalted = true;
-      s.consecutiveLosses = 0;
-      s.activityTier = null;
-      s.activityHits = null;
-      s.streakBaseBet = null;
-      if (!dynamicBaseBetEnabled()) {
-        s.currentBet = defaultBaseBet();
-      }
       halted = true;
+      logger.warn('[martingale] 连亏止损 — 按活跃度档位更新首注', {
+        key: MARTINGALE_KEY,
+        prev,
+        next: { baseBet: s.baseBet, lockedTier: s.lockedTier },
+        activityTier: s.lockedTier,
+      });
     } else {
       s.currentBet = s.currentBet * config.martingaleMultiplier;
-      logger.info('[martingale] 输 — 加倍下注', {
+      logger.info('[martingale] 输 — 加倍下注（首注锁定）', {
         key: MARTINGALE_KEY,
         consecutiveLosses: s.consecutiveLosses,
+        lockedTier: s.lockedTier,
+        baseBet: s.baseBet,
         nextBet: s.currentBet,
-        activityTier: s.activityTier,
       });
     }
   }

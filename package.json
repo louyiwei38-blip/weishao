@@ -10,8 +10,8 @@
     "encrypt-key": "node scripts/encrypt-key.js",
     "create-api-key": "node scripts/create-api-key.js",
     "test-cycle": "node scripts/test-cycle.js",
-    "pm2:start": "pm2 start ecosystem.config.cjs",
-    "pm2:live": "pm2 start ecosystem.config.cjs --env live"
+    "pm2:start": "pm2 start ecosystem.config.cjs --env live",
+    "pm2:dry": "pm2 start ecosystem.config.cjs --env dry"
   },
   "engines": {
     "node": ">=18.0.0"

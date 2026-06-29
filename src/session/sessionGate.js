@@ -6,6 +6,7 @@ import config from '../config.js';
 import { escapeHtml } from '../utils/telegram.js';
 import { computePeriodVolRatio, computeBarUsdtNotional, PERIOD_LONG_BARS } from '../utils/volumeFilter.js';
 import { evaluateCombinedEventWindow } from '../utils/usMarketOpen.js';
+import { hitsToActivityTier, getBetForActivityTier } from './activityTier.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = join(__dirname, '..', '..', 'logs', 'session-state.json');
@@ -52,13 +53,13 @@ export function computeActivityFreq(candles5m, idx) {
   };
 }
 
-/** Map activity freq → shrink trigger threshold (high freq → higher threshold). */
+/** Map activity freq → burst trigger threshold (high freq → lower threshold). */
 export function computeDynamicThreshold(freq) {
   const { barVolumeUsdtMinDynamic, barVolumeUsdtMaxDynamic } = sg();
   const lo = Math.min(barVolumeUsdtMinDynamic, barVolumeUsdtMaxDynamic);
   const hi = Math.max(barVolumeUsdtMinDynamic, barVolumeUsdtMaxDynamic);
   const clamped = Math.min(1, Math.max(0, freq));
-  return Math.round(lo + clamped * (hi - lo));
+  return Math.round(hi - clamped * (hi - lo));
 }
 
 /**
@@ -395,83 +396,81 @@ function detectBigMoveEnded(candles5m, idx, volCompression, volumeAnomaly) {
 }
 
 /**
- * Session gate: volume shrink — bar USDT notional ≤ threshold opens gate; refresh, no stack.
+ * Session gate: volume burst (default) or optional scheduled windows; burst refresh, no stack.
  * @param {Array} candles5m closed 5m OHLCV, oldest first
  * @param {number} [nowMs]
  * @param {{ volumeBurstUntilMs?: number|null }} [prevState]
  */
 export function evaluateSession(candles5m, nowMs = Date.now(), prevState = {}) {
   if (!config.sessionGate.enabled) {
+    const idx = Array.isArray(candles5m) && candles5m.length > 0 ? candles5m.length - 1 : -1;
+    const activityFreq = idx >= 0 ? computeActivityFreq(candles5m, idx) : null;
+    const activityTier = hitsToActivityTier(activityFreq?.hits ?? 0);
+    const tierBaseBet = getBetForActivityTier(activityTier);
     return {
       sessionGateEnabled: false,
       evaluationPassed: true,
       tradeAllowed: true,
       gateMode: 'disabled',
-      scheduledWindow: null,
+      scheduledWindow: { pass: true, detail: '门控已关闭' },
       volumeBurst: null,
-      barUsdt: null,
+      barUsdt: idx >= 0 ? computeBarUsdtNotional(candles5m[idx]) : null,
       volumeBurstUntilMs: null,
-      passReason: 'SESSION_GATE_ENABLED=false',
+      activityTier,
+      tierBaseBet,
+      passReason: `SESSION_GATE_ENABLED=false · 档${activityTier} 首注 $${tierBaseBet}`,
     };
   }
 
   const idx = candles5m.length - 1;
   const bar = candles5m[idx];
   const barUsdt = computeBarUsdtNotional(bar);
-  const { volumeBurstMinutes } = sg();
   const { thresholdUsdt, dynamic, activity } = resolveBurstThresholdUsdt(candles5m, idx);
+  const activityFreq = activity ?? computeActivityFreq(candles5m, idx);
+  const activityTier = hitsToActivityTier(activityFreq.hits);
+  const tierBaseBet = getBetForActivityTier(activityTier);
+  const { activityMinHits } = sg();
+  const hits = activityFreq?.hits ?? 0;
+  const activityPass = hits >= activityMinHits;
 
-  let volumeBurstUntilMs = prevState.volumeBurstUntilMs ?? null;
-  const barTriggered = barUsdt != null && barUsdt <= thresholdUsdt;
-  if (barTriggered) {
-    volumeBurstUntilMs = nowMs + volumeBurstMinutes * 60_000;
-  }
+  const gateMode = activityPass ? 'activity' : 'idle';
+  const tradeAllowed = activityPass;
 
-  const burstActive = volumeBurstUntilMs != null && nowMs < volumeBurstUntilMs;
+  const activityHint = dynamic && activityFreq
+    ? `活跃 ${hits}/${activityFreq.windowBars} 档${activityTier} ($${tierBaseBet}) (探测≥${formatUsdtM(activityFreq.probeLineUsdt)}) · 触发线 ${formatUsdtM(thresholdUsdt)}`
+    : `档${activityTier} ($${tierBaseBet}) · 触发线 ${formatUsdtM(thresholdUsdt)}`;
 
-  let gateMode = 'idle';
-  let tradeAllowed = false;
-  if (burstActive) {
-    gateMode = 'volume_burst';
-    tradeAllowed = true;
-  }
-
-  const activityHint = dynamic && activity
-    ? `活跃 ${activity.hits}/${activity.windowBars} (探测≥${formatUsdtM(activity.probeLineUsdt)}) → 触发线 ${formatUsdtM(thresholdUsdt)}`
-    : `触发线 ${formatUsdtM(thresholdUsdt)}`;
-
-  const passReason = burstActive
-    ? `缩量窗口至 ${new Date(volumeBurstUntilMs).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })} (本根 ${formatUsdtM(barUsdt)}${barTriggered ? ' 触发刷新' : ''}; ${activityHint})`
-    : barUsdt != null
-      ? `休眠 — 本根 ${formatUsdtM(barUsdt)} > ${formatUsdtM(thresholdUsdt)} (${activityHint})`
-      : '休眠 — 成交额不可用';
+  const passReason = activityPass
+    ? `活跃 ${hits}/${activityFreq.windowBars} ≥ ${activityMinHits} 根 — ${activityHint}`
+    : `休眠 — 活跃 ${hits}/${activityFreq.windowBars} < ${activityMinHits} 根 (${activityHint})`;
 
   return {
     sessionGateEnabled: true,
     barTime: bar?.t ?? null,
-    scheduledWindow: null,
+    scheduledWindow: { pass: false, enabled: false, detail: '未启用' },
     volumeBurst: {
-      active: burstActive,
-      untilMs: volumeBurstUntilMs,
-      untilBj: volumeBurstUntilMs
-        ? new Date(volumeBurstUntilMs).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
-        : null,
-      barTriggered,
+      active: activityPass,
       thresholdUsdt,
       dynamicThreshold: dynamic,
-      durationMinutes: volumeBurstMinutes,
-      activityFreq: activity?.freq ?? null,
-      activityHits: activity?.hits ?? null,
-      activityWindowBars: activity?.windowBars ?? null,
-      probeLineUsdt: activity?.probeLineUsdt ?? null,
+      activityFreq: activityFreq?.freq ?? null,
+      activityHits: hits,
+      activityWindowBars: activityFreq?.windowBars ?? null,
+      activityMinHits,
+      probeLineUsdt: activityFreq?.probeLineUsdt ?? null,
       threshMin: activity?.threshMin ?? null,
       threshMax: activity?.threshMax ?? null,
+      activityTier,
+      tierBaseBet,
     },
     barUsdt,
+    activityTier,
+    tierBaseBet,
+    activityMinHits,
+    activityPass,
     gateMode,
     evaluationPassed: tradeAllowed,
     tradeAllowed,
-    volumeBurstUntilMs,
+    volumeBurstUntilMs: null,
     passReason,
   };
 }
@@ -536,7 +535,7 @@ export function advanceSessionState(prev, evaluation, candles5m) {
   let action = 'none';
   if (tradeAllowed && !prevAllowed) action = 'start';
   else if (!tradeAllowed && prevAllowed) action = 'stop';
-  else if (tradeAllowed && evaluation.volumeBurst?.barTriggered) action = 'burst_refresh';
+  else if (tradeAllowed && prevAllowed) action = 'continue';
 
   const sessionState = tradeAllowed ? 'ACTIVE' : 'IDLE';
 
@@ -582,6 +581,8 @@ export function formatSessionLogFields(sessionCtx) {
     barUsdt: ev.barUsdt ?? null,
     volumeBurstUntilMs: sessionCtx.volumeBurstUntilMs ?? null,
     tradeAllowed: sessionCtx.tradeAllowed ?? null,
+    activityTier: ev.activityTier ?? ev.volumeBurst?.activityTier ?? null,
+    tierBaseBet: ev.tierBaseBet ?? ev.volumeBurst?.tierBaseBet ?? null,
   };
 }
 
@@ -592,32 +593,28 @@ export function formatSessionTelegramBlock(sessionCtx) {
   const state = sessionCtx.sessionState ?? 'IDLE';
   const stateZh = { IDLE: '休眠', ACTIVE: '运行中', RUNNING_BIG_MOVE: '运行中' }[state] ?? state;
   const modeZh = {
-    volume_burst: '缩量窗口',
+    activity: '活跃度达标',
     idle: '休眠',
-    disabled: '门控关闭',
+    disabled: '探测关闭',
   }[ev.gateMode] ?? ev.gateMode ?? '—';
 
   const barStr = ev.barUsdt != null ? `${formatUsdtM(ev.barUsdt)} USDT` : '—';
   const burst = ev.volumeBurst;
-  const activityLine = burst?.dynamicThreshold && burst.activityHits != null
+  const minHits = burst?.activityMinHits ?? sg().activityMinHits;
+  const activityLine = burst?.activityHits != null
     ? `\n活跃: <b>${burst.activityHits}/${burst.activityWindowBars}</b> (${Math.round((burst.activityFreq ?? 0) * 100)}%)` +
-      ` 探测≥${escapeHtml(formatUsdtM(burst.probeLineUsdt))}` +
-      ` → 触发线 <b>${escapeHtml(formatUsdtM(burst.thresholdUsdt))}</b>` +
-      ` (${escapeHtml(formatUsdtM(burst.threshMin))}–${escapeHtml(formatUsdtM(burst.threshMax))})`
-    : burst?.thresholdUsdt
-      ? `\n触发线: <b>${escapeHtml(formatUsdtM(burst.thresholdUsdt))}</b> (固定)`
-      : '';
-  const burstLine = burst?.active
-    ? `\n缩量窗: 至 ${escapeHtml(burst.untilBj)}${burst.barTriggered ? ' (本根刷新)' : ''}`
-    : burst?.thresholdUsdt
-      ? `\n缩量触发: 本根 ≤ ${escapeHtml(formatUsdtM(burst.thresholdUsdt))} → 开 ${burst.durationMinutes} 分钟`
-      : '';
+      ` · 需 ≥ <b>${minHits}</b> 根` +
+      ` · 档<b>${burst.activityTier ?? '—'}</b> 首注 <b>$${burst.tierBaseBet ?? '—'}</b>` +
+      (burst.dynamicThreshold && burst.thresholdUsdt
+        ? `\n触发线: <b>${escapeHtml(formatUsdtM(burst.thresholdUsdt))}</b>` +
+          ` (${escapeHtml(formatUsdtM(burst.threshMin))}–${escapeHtml(formatUsdtM(burst.threshMax))})`
+        : '')
+    : '';
 
   return (
     `\n🎯 <b>会话</b>: <b>${escapeHtml(stateZh)}</b> · ${escapeHtml(modeZh)} (${escapeHtml(sessionCtx.action ?? '—')})\n` +
-    `门控: ${ev.evaluationPassed ? '✓ 开启' : '✗ 关闭'} — ${escapeHtml(ev.passReason ?? '—')}\n` +
+    `探测: ${ev.evaluationPassed ? '✓ 开单' : '✗ 跳过'} — ${escapeHtml(ev.passReason ?? '—')}\n` +
     `本根成交额: ${escapeHtml(barStr)}` +
-    activityLine +
-    burstLine
+    activityLine
   );
 }

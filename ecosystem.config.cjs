@@ -1,13 +1,13 @@
 /**
  * PM2 进程管理配置
- * 启动: pm2 start ecosystem.config.cjs
- * 查看: pm2 logs polymarket-bot
- * 停止: pm2 stop polymarket-bot
+ * 模拟盘: pm2 start ecosystem.config.cjs --env dry
+ * 实盘:   pm2 start ecosystem.config.cjs --env live
+ * 查看:   pm2 logs V3
  */
 module.exports = {
   apps: [
     {
-      name: 'polymarket-bot-v2',
+      name: 'V3',
       script: 'src/index.js',
       cwd: __dirname,
       instances: 1,
@@ -18,15 +18,31 @@ module.exports = {
       out_file: 'logs/pm2-out.log',
       merge_logs: true,
       time: true,
-      // 解密密码建议用 pm2 ecosystem 或服务器环境变量注入，勿提交 git
-      // env: { POLY_KEY_PASSWORD: 'your-password' },
-      env: {
-        NODE_ENV: 'production',
-        DRY_RUN: 'false',
-      },
       env_dry: {
         NODE_ENV: 'production',
         DRY_RUN: 'true',
+        OHLCV_EXCHANGE: 'okx',
+        OHLCV_MARKET_TYPE: 'swap',
+        ORDER_TYPE: 'GTC',
+        SETTLE_SOURCE: 'okx',
+        SESSION_GATE_ENABLED: 'true',
+        ACTIVITY_PROBE_USDT_MIN: '30000000',
+        ACTIVITY_MIN_HITS: '11',
+        ACTIVITY_TIER_BETS: '3,3,3,3,3,3,3,3,6,9,15,24',
+        TRADE_BUDGET_USD: '3',
+      },
+      env_live: {
+        NODE_ENV: 'production',
+        DRY_RUN: 'false',
+        OHLCV_EXCHANGE: 'okx',
+        OHLCV_MARKET_TYPE: 'swap',
+        ORDER_TYPE: 'GTC',
+        SETTLE_SOURCE: 'okx',
+        SESSION_GATE_ENABLED: 'true',
+        ACTIVITY_PROBE_USDT_MIN: '30000000',
+        ACTIVITY_MIN_HITS: '11',
+        ACTIVITY_TIER_BETS: '3,3,3,3,3,3,3,3,6,9,15,24',
+        TRADE_BUDGET_USD: '3',
       },
     },
   ],

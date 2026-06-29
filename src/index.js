@@ -1,5 +1,5 @@
 /**
- * Polymarket Reversal Continuation Bot — entry point
+ * Polymarket Single-Candle Follow Bot — entry point
  * PRD v2.2 | BTC/USDT 5m | Martingale 4-loss stop
  */
 
@@ -56,7 +56,6 @@ import {
   stopAllRestingFillWatchers,
 } from './trader/restingFillWatcher.js';
 import * as martingale from './martingale/manager.js';
-import { dynamicBaseBetEnabled, formatTierBetTable } from './martingale/dynamicBaseBet.js';
 import * as stats from './stats/manager.js';
 import { notifyTelegram, escapeHtml } from './utils/telegram.js';
 import { formatBeijingTime } from './utils/datetime.js';
@@ -75,6 +74,7 @@ import {
   formatSessionTelegramBlock,
   minSessionCandles,
 } from './session/sessionGate.js';
+import { resolveActivityTier } from './session/activityTier.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOGS_DIR    = join(__dirname, '..', 'logs');
@@ -162,8 +162,8 @@ async function fetchVolatilityContext() {
     logger.error('[main] 波动率 K 线拉取失败', { error: err?.message });
     return {
       rv: null,
-      regime: 'low',
-      regimeReason: '固定低波动反转（K 线拉取失败，仍按反转模式）',
+      regime: 'high',
+      regimeReason: '固定高波动延续（K 线拉取失败，仍按延续模式）',
       partial: true,
     };
   }
@@ -175,13 +175,13 @@ async function fetchVolatilityContext() {
     rv_1m: rv.rv_1m,
     rv_5m: rv.rv_5m,
     rv_15m: rv.rv_15m,
-    mode: 'low_reversal_only',
+    mode: 'high_continuation_only',
   });
 
   return {
     rv,
-    regime: 'low',
-    regimeReason: '固定低波动反转模式',
+    regime: 'high',
+    regimeReason: '固定高波动延续模式',
     partial: false,
   };
 }
@@ -235,7 +235,6 @@ async function runCycle(cycleStartTs) {
       await trySettlePending(pendingBet, { candles });
     }
 
-    const kMinus2 = candles.at(-2);
     const kMinus1 = candles.at(-1);
 
     if (!isCandleFresh(kMinus1, CYCLE_MS)) {
@@ -244,7 +243,7 @@ async function runCycle(cycleStartTs) {
       return;
     }
 
-    // ── Session gate: 5m bar volume shrink (≤ threshold opens gate; refresh, no stack) ──
+    // ── Session gate: 5m bar volume burst (default burst-only; optional scheduled windows) ──
     const evaluation = evaluateSession(candles, Date.now(), sessionCtx);
     sessionCtx = advanceSessionState(sessionCtx, evaluation, candles);
     sessionCtx.evaluation = evaluation;
@@ -296,15 +295,14 @@ async function runCycle(cycleStartTs) {
       return;
     }
 
-    // ── FR-2: Signal evaluation (S1/S2 low-vol reversal) ──
+    // ── FR-2: Signal evaluation (K[-1] single-candle follow) ──
     const volCtx = await fetchVolatilityContext();
     lastVolCtx = volCtx;
     const signalObj = buildSignal(
-      kMinus2,
       kMinus1,
       config.symbol,
       config.timeframe,
-      'low',
+      'high',
     );
     lastSignal = signalObj.signal;
     writeSignalLog({
@@ -394,23 +392,8 @@ async function runCycle(cycleStartTs) {
       return;
     }
 
-    const mgBefore = martingale.getState();
-    const dynamicCtx = martingale.refreshBaseBetIfNewStreak(candles);
-    const mg = martingale.getState();
+    const mgState  = martingale.getState();
     const { actualBet, skipReason } = martingale.prepareOrder(balance);
-
-    if (!skipReason && mgBefore.consecutiveLosses === 0) {
-      logger.info('[main] 本单下注额度', {
-        dynamicBaseBet: dynamicBaseBetEnabled(),
-        streakBaseBet: mg.streakBaseBet,
-        martingaleBet: mg.currentBet,
-        actualBet,
-        activityTier: mg.activityTier,
-        activityHits: mg.activityHits,
-        consecutiveLosses: mg.consecutiveLosses,
-        dynamicRefresh: dynamicCtx?.dynamic ?? false,
-      });
-    }
 
     if (skipReason) {
       cycleStatus = `martingale_${skipReason}`;
@@ -433,12 +416,8 @@ async function runCycle(cycleStartTs) {
       conditionId: market.conditionId,
       cycleStartTs,
       actualBet,
-      baseBet: mg.streakBaseBet ?? mg.currentBet,
-      martingaleBet: mg.currentBet,
-      activityTier: mg.activityTier,
-      activityHits: mg.activityHits,
-      dynamicBaseBet: dynamicBaseBetEnabled(),
-      consecutiveLosses: mg.consecutiveLosses,
+      baseBet: mgState.baseBet,
+      consecutiveLosses: mgState.consecutiveLosses,
       yesPrice: pricePolicy.yesPrice ?? market.yesPrice,
       noPrice: pricePolicy.noPrice ?? market.noPrice,
       maxLimitPrice: pricePolicy.maxLimitPrice,
@@ -467,9 +446,6 @@ async function runCycle(cycleStartTs) {
         cycleStartTs,
         signal: signalObj.signal,
         actualBet: spent,
-        baseBet: mg.streakBaseBet ?? mg.currentBet,
-        activityTier: mg.activityTier,
-        activityHits: mg.activityHits,
         orderId: orderResult.orderId,
         limitPrice: orderResult.limitPrice,
         fill: orderResult.fill,
@@ -495,9 +471,7 @@ async function runCycle(cycleStartTs) {
         `原因: ${escapeHtml(signalObj.reason)}\n` +
         capNote +
         priceOdds +
-        `金额: <b>${escapeHtml(fillNote || `$${spent.toFixed(2)}`)}</b>  (连败 ${mg.consecutiveLosses}` +
-        (mg.activityTier != null ? ` · ${mg.activityTier}档首注$${(mg.streakBaseBet ?? mg.currentBet).toFixed(2)}` : '') +
-        `)\n` +
+        `金额: <b>${escapeHtml(fillNote || `$${spent.toFixed(2)}`)}</b>  (首注 $${mgState.baseBet} 档${mgState.lockedTier} · 连败 ${mgState.consecutiveLosses})\n` +
         `类型: ${orderResult.orderType ?? config.orderType}\n` +
         await formatBalanceTelegramLine(balance) +
         `盘口: ${market.slug}\n` +
@@ -521,10 +495,6 @@ async function runCycle(cycleStartTs) {
         signalReason: signalObj.reason,
         cycleEndMs,
         limitPrice: orderResult.limitPrice,
-        actualBet,
-        baseBet: mg.streakBaseBet ?? mg.currentBet,
-        activityTier: mg.activityTier,
-        activityHits: mg.activityHits,
         ...snapshotForPending(volCtx, signalObj),
       });
 
@@ -545,9 +515,7 @@ async function runCycle(cycleStartTs) {
         `原因: ${escapeHtml(signalObj.reason)}\n` +
         capNote +
         priceOdds +
-        `预算: $${actualBet}  (连败 ${mg.consecutiveLosses}` +
-        (mg.activityTier != null ? ` · ${mg.activityTier}档首注$${(mg.streakBaseBet ?? mg.currentBet).toFixed(2)}` : '') +
-        `)\n` +
+        `预算: $${actualBet}  (连败 ${mgState.consecutiveLosses})\n` +
         await formatBalanceTelegramLine(balance) +
         `盘口: ${market.slug}\n` +
         `周期内自动监视成交\n` +
@@ -602,9 +570,6 @@ function registerPendingBet({
   cycleStartTs,
   signal,
   actualBet,
-  baseBet,
-  activityTier,
-  activityHits,
   orderId,
   limitPrice,
   entryPrice,
@@ -620,9 +585,6 @@ function registerPendingBet({
     cycleStartTs,
     signal,
     actualBet,
-    baseBet: baseBet ?? null,
-    activityTier: activityTier ?? null,
-    activityHits: activityHits ?? null,
     targetPrice: openSnap?.price,
     orderId,
     limitPrice,
@@ -637,9 +599,6 @@ function registerPendingBet({
     cycleStartTs: formatBeijingTime(cycleStartTs),
     signal,
     actualBet,
-    baseBet: pendingBet.baseBet,
-    activityTier: pendingBet.activityTier,
-    activityHits: pendingBet.activityHits,
     orderId,
     targetPrice: pendingBet.targetPrice,
     volRegime,
@@ -724,7 +683,8 @@ async function applySettlement(pending, { candles } = {}) {
   const pnlUsd = stats.computeSettlementPnl(won, actualBet, entryPrice ?? limitPrice);
   const sourceLabel = settleSourceLabel();
 
-  const { halted } = martingale.onSettled(won);
+  const activityTier = resolveActivityTier(candles);
+  const { halted } = martingale.onSettled(won, { activityTier });
   if (!won) recordLoss(actualBet);
   stats.recordSettlement({ won, pnlUsd });
   if (halted) stats.recordStopLoss();
@@ -739,6 +699,7 @@ async function applySettlement(pending, { candles } = {}) {
     settleDelta,
     pnlUsd,
     martingaleHalted: halted,
+    activityTier,
     crossCheck: cross,
     volRegime: pending.volRegime ?? null,
     volRegimeReason: pending.volRegimeReason ?? null,
@@ -756,9 +717,6 @@ async function applySettlement(pending, { candles } = {}) {
     cycleStartTs,
     signal,
     actualBet,
-    baseBet: pending.baseBet ?? null,
-    activityTier: pending.activityTier ?? null,
-    activityHits: pending.activityHits ?? null,
     entryPrice: entryPrice ?? limitPrice ?? null,
     pnlUsd,
     won,
@@ -770,6 +728,7 @@ async function applySettlement(pending, { candles } = {}) {
     exchangeDirection: cross?.exchangeDirection ?? candleDirection(candle),
     crossMismatch: cross?.mismatch ?? false,
     martingaleHalted: halted,
+    activityTier,
     dryRun: config.dryRun,
     volRegime: pending.volRegime ?? null,
     volRegimeReason: pending.volRegimeReason ?? null,
@@ -789,7 +748,7 @@ async function applySettlement(pending, { candles } = {}) {
     : '';
 
   const haltNote = halted
-    ? `\n⚠️ <b>马丁连亏止损触发</b> — 下周期重置为基础注`
+    ? `\n⚠️ <b>马丁连亏止损</b> — 下周期跳过；首注已按档${mg.lockedTier} 更新为 $${mg.baseBet}`
     : '';
 
   const priceLine = usesChainlinkSettlement()
@@ -804,7 +763,7 @@ async function applySettlement(pending, { candles } = {}) {
     `结果: <b>${winningOutcome}</b> (Δ ${settleDelta >= 0 ? '+' : ''}${settleDelta.toFixed(2)})\n` +
     `本单盈亏: <b>${stats.formatPnlUsd(pnlUsd)}</b>` +
     mismatchNote + haltNote + '\n' +
-    `下一注: <b>$${mg.currentBet}</b>  (连败 ${mg.consecutiveLosses})\n` +
+    `下一注: <b>$${mg.currentBet}</b>  (首注 $${mg.baseBet} 档${mg.lockedTier} · 连败 ${mg.consecutiveLosses})\n` +
     `今日亏损: $${getDailyLossUsd().toFixed(2)} / $${config.maxDailyLossUsd}\n` +
     balanceLine +
     (pending.volRegimeReason ? `波动率: ${escapeHtml(pending.volRegimeReason)}` : '') +
@@ -860,37 +819,16 @@ async function scheduler() {
     settlement: config.settleSource,
     volatilityStrategy: {
       barTimeframe: config.volatilityBarTimeframe,
-      mode: 'low_reversal_only',
+      mode: 'k_minus1_follow',
     },
     sessionGate: {
       enabled: config.sessionGate.enabled,
       state: sessionCtx.sessionState,
     },
-    dynamicBaseBet: config.dynamicBaseBet.enabled
-      ? {
-          enabled: true,
-          tier1Usd: config.dynamicBaseBet.tier1Usd,
-          weakMinUsd: config.dynamicBaseBet.weakMinUsd,
-          weakMaxUsd: config.dynamicBaseBet.weakMaxUsd,
-          ampMinUsd: config.dynamicBaseBet.ampMinUsd,
-          ampMaxUsd: config.dynamicBaseBet.ampMaxUsd,
-        }
-      : { enabled: false, fallbackUsd: config.tradeBudgetUsd },
     ...stats.formatLogFields(),
   });
 
   martingale.init();
-  if (dynamicBaseBetEnabled()) {
-    logger.info('[martingale] 动态首注已启用（12档混合）', {
-      tiers: formatTierBetTable(),
-      ...config.dynamicBaseBet,
-    });
-  } else {
-    logger.warn('[martingale] 动态首注已关闭 — 每轮固定 TRADE_BUDGET_USD', {
-      tradeBudgetUsd: config.tradeBudgetUsd,
-      hint: '设置 DYNAMIC_BASE_BET_ENABLED=true 启用',
-    });
-  }
   stats.init();
   initDailyLoss();
   loadPending();
@@ -917,9 +855,6 @@ async function scheduler() {
       cycleStartTs: ctx.cycleStartTs,
       signal: ctx.signal,
       actualBet: ctx.actualBet,
-      baseBet: ctx.baseBet,
-      activityTier: ctx.activityTier,
-      activityHits: ctx.activityHits,
       orderId: ctx.orderId,
       limitPrice: ctx.limitPrice,
       fill: ctx.fill,
