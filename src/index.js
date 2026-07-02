@@ -240,6 +240,7 @@ async function runCycle(cycleStartTs) {
       await trySettlePending(pendingBet, { candles });
     }
 
+    const kMinus2 = candles.at(-2);
     const kMinus1 = candles.at(-1);
 
     if (!isCandleFresh(kMinus1, CYCLE_MS)) {
@@ -303,10 +304,11 @@ async function runCycle(cycleStartTs) {
     const entryTier = evaluation.activityTier ?? 1;
     const activityHits = evaluation.volumeBurst?.activityHits ?? null;
 
-    // ── FR-2: Signal evaluation (K[-1] single-candle follow) ──
+    // ── FR-2: Signal evaluation (reversal/continuation on K[-2], K[-1]) ──
     const volCtx = await fetchVolatilityContext();
     lastVolCtx = volCtx;
     const signalObj = buildSignal(
+      kMinus2,
       kMinus1,
       config.symbol,
       config.timeframe,
