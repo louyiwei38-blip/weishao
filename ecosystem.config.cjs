@@ -1,10 +1,9 @@
 /**
- * PM2 — BTC + ETH × (5m + 15m + 1h) 六实例并行（同一钱包 / .env 凭证）
+ * PM2 — BNB + SOL + XRP × (5m + 15m + 1h) 九实例并行（同一钱包 / .env 凭证）
  *
  * 模拟盘: npm run pm2:dry
  * 实盘:   npm run pm2:start
- * 仅 ETH: npm run pm2:eth:dry / pm2:eth:start
- * 仅 BTC: npm run pm2:btc:dry / pm2:btc:start
+ * 单标的: npm run pm2:bnb:start / pm2:sol:start / pm2:xrp:start
  * 日志:   pm2 logs
  * 停止:   npm run pm2:stop
  *
@@ -23,7 +22,7 @@ const shared = {
   time: true,
 };
 
-/** @param {'BTC'|'ETH'} base @param {'5m'|'15m'|'1h'} tf @param {number} minutes */
+/** @param {'BNB'|'SOL'|'XRP'} base @param {'5m'|'15m'|'1h'} tf @param {number} minutes */
 function app(base, tf, minutes) {
   const id = `${base.toLowerCase()}-${tf}`;
   const env = {
@@ -56,7 +55,7 @@ const TIMEFRAMES = [
   ['1h', 60],
 ];
 
-const SYMBOLS = ['BTC', 'ETH'];
+const SYMBOLS = ['BNB', 'SOL', 'XRP'];
 
 module.exports = {
   apps: SYMBOLS.flatMap((base) =>

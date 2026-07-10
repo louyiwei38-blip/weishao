@@ -83,9 +83,9 @@ const config = {
 
   // OHLCV — strategy signals only (Polymarket slug still uses TRADING_SYMBOL)
   ohlcvExchange: optional('OHLCV_EXCHANGE', 'okx'),
-  /** spot | swap — default swap → OKX ETH/USDT:USDT 永续 */
+  /** spot | swap — default swap → OKX BNB/USDT:USDT 永续 */
   ohlcvMarketType: optional('OHLCV_MARKET_TYPE', 'swap'),
-  /** Override CCXT symbol; empty → swap: ETH/USDT:USDT from TRADING_SYMBOL */
+  /** Override CCXT symbol; empty → swap from TRADING_SYMBOL */
   ohlcvSymbol: optional('OHLCV_SYMBOL', ''),
 
   binance: {
@@ -94,7 +94,7 @@ const config = {
   },
 
   // Polymarket / Chainlink slug (not the OHLCV fetch symbol when OHLCV_MARKET_TYPE=swap)
-  symbol: optional('TRADING_SYMBOL', 'ETH/USDT'),
+  symbol: optional('TRADING_SYMBOL', 'BNB/USDT'),
   timeframe,
   candleLimit: num('CANDLE_FETCH_LIMIT', 200),
   signalDelayMs: num('SIGNAL_DELAY_MS', 10000),

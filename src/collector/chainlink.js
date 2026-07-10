@@ -15,6 +15,7 @@ export const SYMBOL_CHAINLINK = {
   'ETH/USDT': 'eth/usd',
   'SOL/USDT': 'sol/usd',
   'BNB/USDT': 'bnb/usd',
+  'XRP/USDT': 'xrp/usd',
 };
 
 /** @type {Map<string, Array<{ timestamp: number, value: number }>>} */

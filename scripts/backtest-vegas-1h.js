@@ -1,10 +1,10 @@
 /**
- * Vegas channel strategy backtest (OKX USDT swap).
+ * Vegas channel strategy backtest (OKX / Binance USDT swap).
  *
  * Usage:
  *   node scripts/backtest-vegas-1h.js --timeframe=15m --from=2020-01-01
- *   node scripts/backtest-vegas-1h.js --timeframe=5m --from=2020-01-01 --symbol=ETH/USDT
- *   node scripts/backtest-vegas-1h.js --timeframe=1h --from=2020-01-01 --symbol=ETH/USDT
+ *   node scripts/backtest-vegas-1h.js --timeframe=5m --from=2020-01-01 --symbol=XRP/USDT
+ *   node scripts/backtest-vegas-1h.js --timeframe=1h --from=2020-01-01 --symbol=XRP/USDT --exchange=binance
  */
 import ccxt from 'ccxt';
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs';
@@ -46,9 +46,9 @@ function argBool(name, fallback) {
   return hit.split('=')[1].toLowerCase() !== 'false';
 }
 
-/** spot-style ETH/USDT → swap ETH/USDT:USDT */
+/** spot-style XRP/USDT → swap XRP/USDT:USDT */
 function resolveSwapSymbol(raw) {
-  if (!raw) return 'ETH/USDT:USDT';
+  if (!raw) return 'XRP/USDT:USDT';
   if (raw.includes(':')) return raw;
   const [base, quote = 'USDT'] = raw.split('/');
   return `${base}/${quote}:USDT`;
@@ -61,8 +61,16 @@ if (!BAR_MS) {
   process.exit(1);
 }
 
-const SYMBOL = resolveSwapSymbol(argStr('symbol', 'ETH/USDT'));
+const SYMBOL = resolveSwapSymbol(argStr('symbol', 'XRP/USDT'));
 const SYMBOL_BASE = SYMBOL.split('/')[0].toLowerCase();
+/** OKX late listings may lack 2020 history; prefer Binance for altcoins */
+const EXCHANGE_ID = (
+  argStr('exchange') || (['bnb', 'sol', 'xrp'].includes(SYMBOL_BASE) ? 'binance' : 'okx')
+).toLowerCase();
+if (!['okx', 'binance'].includes(EXCHANGE_ID)) {
+  console.error(`Unsupported --exchange=${EXCHANGE_ID}. Use: okx, binance`);
+  process.exit(1);
+}
 const FROM_ARG = argStr('from');
 const DAYS = argNum('days', 365);
 const BASE_BET = argNum('base', 3);
@@ -71,7 +79,10 @@ const MAX_LOSSES = argNum('maxLosses', 5);
 const ENTRY_PRICE = argNum('entry', 0.5);
 const USE_FEE = argBool('fee', true);
 const FORCE_FETCH = process.argv.includes('--force');
-const CACHE_FILE = join(OUT_DIR, `ohlcv-${TIMEFRAME}-okx-swap-${SYMBOL_BASE}-cache.json`);
+const CACHE_FILE = join(
+  OUT_DIR,
+  `ohlcv-${TIMEFRAME}-${EXCHANGE_ID}-swap-${SYMBOL_BASE}-cache.json`,
+);
 
 function resolveRange() {
   const toMs = Date.now();
@@ -87,13 +98,47 @@ function resolveRange() {
   };
 }
 
+function createExchange() {
+  if (EXCHANGE_ID === 'binance') {
+    return new ccxt.binance({
+      enableRateLimit: true,
+      timeout: 60_000,
+      options: { defaultType: 'future' },
+    });
+  }
+  return new ccxt.okx({
+    enableRateLimit: true,
+    timeout: 60_000,
+    options: { defaultType: 'swap' },
+  });
+}
+
+/** Binance USDT-M often uses BNB/USDT; OKX uses BNB/USDT:USDT */
+function fetchSymbolForExchange() {
+  if (EXCHANGE_ID === 'binance') {
+    const [base, rest] = SYMBOL.split('/');
+    const quote = (rest || 'USDT').split(':')[0];
+    return `${base}/${quote}`;
+  }
+  return SYMBOL;
+}
+
 async function fetchAllCandles(exchange, symbol, timeframe, since, until) {
   const all = [];
   let cursor = since;
   let batches = 0;
+  let emptySkips = 0;
   while (cursor < until) {
     const batch = await exchange.fetchOHLCV(symbol, timeframe, cursor, 300);
-    if (!batch.length) break;
+    if (!batch.length) {
+      // Listing may start later than --from (e.g. OKX BNB); skip forward
+      emptySkips += 1;
+      if (emptySkips > 64) break;
+      cursor += BAR_MS * 300;
+      await new Promise((r) => setTimeout(r, 40));
+      continue;
+    }
+    emptySkips = 0;
     for (const row of batch) {
       const [t, o, h, l, c, v] = row;
       if (t >= until) break;
@@ -126,15 +171,12 @@ async function ensureCandles(fromMs, toMs) {
     return candles;
   }
 
+  const fetchSymbol = fetchSymbolForExchange();
   console.log(
-    `Fetching OKX ${SYMBOL} ${TIMEFRAME} ${new Date(needSince).toISOString()} → ${new Date(toMs).toISOString()} ...`,
+    `Fetching ${EXCHANGE_ID} ${fetchSymbol} ${TIMEFRAME} ${new Date(needSince).toISOString()} → ${new Date(toMs).toISOString()} ...`,
   );
-  const ex = new ccxt.okx({
-    enableRateLimit: true,
-    timeout: 60_000,
-    options: { defaultType: 'swap' },
-  });
-  candles = await fetchAllCandles(ex, SYMBOL, TIMEFRAME, needSince, toMs);
+  const ex = createExchange();
+  candles = await fetchAllCandles(ex, fetchSymbol, TIMEFRAME, needSince, toMs);
   if (!existsSync(OUT_DIR)) mkdirSync(OUT_DIR, { recursive: true });
   writeFileSync(CACHE_FILE, JSON.stringify(candles));
   console.log(`Fetched ${candles.length} bars → ${CACHE_FILE}`);
@@ -313,6 +355,7 @@ function summarize(trades, chains, chainWins, chainHalts, fromMs, toMs) {
       entryPrice: ENTRY_PRICE,
       fee: USE_FEE,
       symbol: SYMBOL,
+      exchange: EXCHANGE_ID,
       timeframe: TIMEFRAME,
     },
     totals: {
@@ -374,7 +417,7 @@ async function main() {
   const { fromMs, toMs, label } = resolveRange();
 
   console.log('=== Vegas channel backtest ===');
-  console.log(`Symbol: ${SYMBOL}`);
+  console.log(`Symbol: ${SYMBOL}  exchange: ${EXCHANGE_ID}`);
   console.log(`Timeframe: ${TIMEFRAME}`);
   console.log(`Period: ${label}`);
   console.log(`Base $${BASE_BET} ×${MULT} maxLosses=${MAX_LOSSES} entry=${ENTRY_PRICE} fee=${USE_FEE}`);
