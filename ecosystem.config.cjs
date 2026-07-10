@@ -5,6 +5,10 @@
  * 实盘:   npm run pm2:start
  * 日志:   pm2 logs
  * 停止:   npm run pm2:stop
+ *
+ * 这里只注入「多实例身份」相关变量。
+ * TRADE_BUDGET / MARTINGALE / ORDER_TYPE / SETTLE_SOURCE / OHLCV 等一律读 .env
+ *（见 src/config.js：.env override，再恢复下方 PM2 键）。
  */
 const shared = {
   script: 'src/index.js',
@@ -17,24 +21,11 @@ const shared = {
   time: true,
 };
 
-const martingale = {
-  TRADE_BUDGET_USD: '3',
-  MARTINGALE_MULTIPLIER: '3',
-  MARTINGALE_MAX_LOSSES: '5',
-  OHLCV_EXCHANGE: 'okx',
-  OHLCV_MARKET_TYPE: 'swap',
-  ORDER_TYPE: 'GTC',
-  // 不要在此写 SETTLE_SOURCE：PM2 env 会盖住 .env（dotenv 不覆盖已有变量）
-  // 结算请在 .env 设 SETTLE_SOURCE=chainlink|okx；未设时代码默认 chainlink
-  CANDLE_FETCH_LIMIT: '200',
-};
-
 function app(name, tf, minutes) {
   const env = {
     BOT_INSTANCE: tf,
     CANDLE_TIMEFRAME: tf,
     MARKET_CYCLE_MINUTES: String(minutes),
-    ...martingale,
   };
   return {
     ...shared,

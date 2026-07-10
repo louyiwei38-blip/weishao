@@ -133,7 +133,11 @@ pm2 logs                 # V3-5m / V3-15m / V3-1h
 pm2 save && pm2 startup
 ```
 
-切换实盘：`.env` 配好私钥后 `npm run pm2:start`（或 `pm2 restart V3-5m V3-15m V3-1h --update-env`）。
+切换实盘：`.env` 配好私钥后 `npm run pm2:start`。
+
+> **`.env` 优先级：** 预算 / 马丁 / 结算 / OHLCV / Telegram 等以 `.env` 为准。  
+> PM2 仅覆盖：`BOT_INSTANCE`、`CANDLE_TIMEFRAME`、`MARKET_CYCLE_MINUTES`、`DRY_RUN`。  
+> 改完 `.env` 后需 `pm2 delete V3-5m V3-15m V3-1h` 再 `npm run pm2:start`（或 `pm2 restart … --update-env`），旧进程 env 不会自动刷新。
 
 ---
 

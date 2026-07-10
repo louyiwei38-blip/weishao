@@ -4,7 +4,6 @@
  * Multi-instance: BOT_INSTANCE + CANDLE_TIMEFRAME (PM2: 15m + 5m)
  */
 
-import 'dotenv/config';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -702,6 +701,12 @@ async function scheduler() {
     signalDelayMs: config.signalDelayMs,
     cycleTimeoutMs: config.cycleTimeoutMs,
     settlement: config.settleSource,
+    tradeBudgetUsd: config.tradeBudgetUsd,
+    martingaleMultiplier: config.martingaleMultiplier,
+    martingaleMaxLosses: config.martingaleMaxLosses,
+    orderType: config.orderType,
+    orderPriceCap: config.orderPriceCap,
+    envFile: existsSync(join(__dirname, '..', '.env')) ? '.env loaded (override)' : '.env missing',
     vegas: vegasState.getState(),
     ...stats.formatLogFields(),
   });

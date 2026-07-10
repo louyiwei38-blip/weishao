@@ -6,11 +6,31 @@ import { resolvePrivateKey } from './utils/secrets.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const envPath = join(__dirname, '..', '.env');
-if (existsSync(envPath)) {
-  dotenv.config({ path: envPath });
-} else {
-  dotenv.config();
+
+/**
+ * PM2 会先注入 process.env；dotenv 默认不覆盖已有键，导致 .env 形同虚设。
+ * 策略：用 .env 覆盖全部键，再恢复「多实例身份」相关键（由 ecosystem 控制）。
+ */
+const PM2_OWNED_KEYS = [
+  'BOT_INSTANCE',
+  'CANDLE_TIMEFRAME',
+  'MARKET_CYCLE_MINUTES',
+  'DRY_RUN',
+  'NODE_ENV',
+];
+
+const pm2Owned = {};
+for (const key of PM2_OWNED_KEYS) {
+  if (process.env[key] !== undefined) pm2Owned[key] = process.env[key];
 }
+
+if (existsSync(envPath)) {
+  dotenv.config({ path: envPath, override: true });
+} else {
+  dotenv.config({ override: true });
+}
+
+Object.assign(process.env, pm2Owned);
 
 function required(name) {
   const v = process.env[name];
