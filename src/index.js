@@ -726,6 +726,7 @@ async function scheduler() {
     `周期: ${config.timeframe} (${config.cycleMinutes}m)\n` +
     `实例: ${config.instanceId}\n` +
     `模式: ${config.dryRun ? 'DRY_RUN' : 'LIVE'}\n` +
+    `结算: <b>${escapeHtml(settleSourceLabel())}</b> (${escapeHtml(config.settleSource)})\n` +
     `马丁: $${config.tradeBudgetUsd} ×${config.martingaleMultiplier} / 连亏${config.martingaleMaxLosses}`
   );
 

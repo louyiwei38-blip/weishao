@@ -24,8 +24,8 @@ const martingale = {
   OHLCV_EXCHANGE: 'okx',
   OHLCV_MARKET_TYPE: 'swap',
   ORDER_TYPE: 'GTC',
-  // 结算：chainlink = Polymarket 官方 oracle；改 okx 则用永续 K 线
-  SETTLE_SOURCE: 'chainlink',
+  // 不要在此写 SETTLE_SOURCE：PM2 env 会盖住 .env（dotenv 不覆盖已有变量）
+  // 结算请在 .env 设 SETTLE_SOURCE=chainlink|okx；未设时代码默认 chainlink
   CANDLE_FETCH_LIMIT: '200',
 };
 
