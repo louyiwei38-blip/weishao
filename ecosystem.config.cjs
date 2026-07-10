@@ -24,7 +24,8 @@ const martingale = {
   OHLCV_EXCHANGE: 'okx',
   OHLCV_MARKET_TYPE: 'swap',
   ORDER_TYPE: 'GTC',
-  SETTLE_SOURCE: 'okx',
+  // 结算：chainlink = Polymarket 官方 oracle；改 okx 则用永续 K 线
+  SETTLE_SOURCE: 'chainlink',
   CANDLE_FETCH_LIMIT: '200',
 };
 

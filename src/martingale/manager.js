@@ -15,6 +15,7 @@ const MARTINGALE_KEY = `${config.symbol}:${config.timeframe}`;
  *   consecutiveLosses: number,
  *   baseBet: number,
  *   currentBet: number,
+ *   chainPnlUsd: number,
  * }>} */
 let state = {};
 
@@ -24,6 +25,7 @@ function defaultEntry() {
     consecutiveLosses: 0,
     baseBet,
     currentBet: baseBet,
+    chainPnlUsd: 0,
   };
 }
 
@@ -44,6 +46,7 @@ function loadState() {
     const s = state[MARTINGALE_KEY];
     s.baseBet = config.tradeBudgetUsd;
     if (s.consecutiveLosses === 0) s.currentBet = s.baseBet;
+    if (!Number.isFinite(s.chainPnlUsd)) s.chainPnlUsd = 0;
     delete s.isHalted;
   }
 }
@@ -58,6 +61,7 @@ function resetToBaseBet() {
   s.baseBet = config.tradeBudgetUsd;
   s.currentBet = s.baseBet;
   s.consecutiveLosses = 0;
+  s.chainPnlUsd = 0;
 }
 
 export function init() {
@@ -86,17 +90,22 @@ export function prepareOrder(availableBalance) {
 
 /**
  * @param {boolean} won
- * @returns {{ halted: boolean }}
+ * @param {number} [pnlUsd=0] 本单盈亏，计入本链路累计
+ * @returns {{ halted: boolean, chainPnlUsd: number }}
  */
-export function onSettled(won) {
+export function onSettled(won, pnlUsd = 0) {
   const s = state[MARTINGALE_KEY];
   let halted = false;
+
+  s.chainPnlUsd = (Number(s.chainPnlUsd) || 0) + (Number(pnlUsd) || 0);
+  const chainPnlUsd = s.chainPnlUsd;
 
   if (won) {
     resetToBaseBet();
     logger.info('[martingale] 赢 — 重置首注', {
       key: MARTINGALE_KEY,
       baseBet: s.baseBet,
+      chainPnlUsd,
     });
   } else {
     s.consecutiveLosses += 1;
@@ -107,6 +116,7 @@ export function onSettled(won) {
       logger.warn('[martingale] 连亏止损 — 重置首注', {
         key: MARTINGALE_KEY,
         baseBet: s.baseBet,
+        chainPnlUsd,
       });
     } else {
       s.currentBet = s.currentBet * config.martingaleMultiplier;
@@ -115,12 +125,13 @@ export function onSettled(won) {
         consecutiveLosses: s.consecutiveLosses,
         baseBet: s.baseBet,
         nextBet: s.currentBet,
+        chainPnlUsd,
       });
     }
   }
 
   persist();
-  return { halted };
+  return { halted, chainPnlUsd };
 }
 
 export function getState() {
@@ -129,6 +140,7 @@ export function getState() {
     consecutiveLosses: s.consecutiveLosses,
     baseBet: s.baseBet,
     currentBet: s.currentBet,
+    chainPnlUsd: Number(s.chainPnlUsd) || 0,
     isHalted: false,
   };
 }

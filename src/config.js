@@ -166,7 +166,7 @@ const config = {
   },
 
   /** Settlement source: okx (OKX 永续 K 线) | chainlink (Polymarket RTDS oracle) */
-  settleSource: optional('SETTLE_SOURCE', 'okx').toLowerCase(),
+  settleSource: optional('SETTLE_SOURCE', 'chainlink').toLowerCase(),
 
   // Chainlink RTDS settlement (Polymarket official oracle)
   chainlink: {

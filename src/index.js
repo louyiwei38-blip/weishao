@@ -48,7 +48,7 @@ import {
   getDailyLossUsd,
   clearOrderDedup,
 } from './trader/executor.js';
-import { fetchFillFromOrder, formatFillNote, formatPriceOddsLines } from './trader/fillSync.js';
+import { fetchFillFromOrder, formatFillNote, formatPriceOddsLines, formatSettlementTradeLines } from './trader/fillSync.js';
 import {
   initRestingFillWatcher,
   scheduleRestingFillWatch,
@@ -87,6 +87,15 @@ let cycleInProgress = null;
 
 function formatStatsTelegramBlock() {
   return stats.formatTelegramBlock();
+}
+
+/** 开单/结算共用：本链路累计盈亏 + 马丁进度 */
+function formatChainTelegramLines(mgState = martingale.getState()) {
+  const chainPnl = Number(mgState.chainPnlUsd) || 0;
+  return (
+    `本链路盈亏: <b>${stats.formatPnlUsd(chainPnl)}</b>\n` +
+    `马丁: 首注 $${mgState.baseBet} · 连败 ${mgState.consecutiveLosses} · 当前注 $${mgState.currentBet}\n`
+  );
 }
 
 function ensureLogs() {
@@ -369,8 +378,8 @@ async function runCycle(cycleStartTs) {
         `原因: ${escapeHtml(signalObj.reason)}\n` +
         capNote +
         priceOdds +
-        `金额: <b>${escapeHtml(fillNote || `$${spent.toFixed(2)}`)}</b>\n` +
-        `(首注 $${mgState.baseBet} · 连败 ${mgState.consecutiveLosses})\n` +
+        (fillNote ? `成交明细: ${escapeHtml(fillNote)}\n` : '') +
+        formatChainTelegramLines(mgState) +
         `类型: ${orderResult.orderType ?? config.orderType}\n` +
         await formatBalanceTelegramLine(balance) +
         `盘口: ${market.slug}\n` +
@@ -410,8 +419,7 @@ async function runCycle(cycleStartTs) {
         `原因: ${escapeHtml(signalObj.reason)}\n` +
         capNote +
         priceOdds +
-        `预算: $${actualBet}\n` +
-        `(首注 $${mgState.baseBet} · 连败 ${mgState.consecutiveLosses})\n` +
+        formatChainTelegramLines(mgState) +
         await formatBalanceTelegramLine(balance) +
         `盘口: ${market.slug}\n` +
         `周期内自动监视成交\n` +
@@ -559,10 +567,9 @@ async function applySettlement(pending, { candles } = {}) {
   const sourceLabel = settleSourceLabel();
   const price = entryPrice ?? limitPrice ?? null;
 
-  const { halted } = martingale.onSettled(won);
-  vegasState.onSettled(won, halted);
-
   const pnlUsd = stats.computeSettlementPnl(won, actualBet, price);
+  const { halted, chainPnlUsd } = martingale.onSettled(won, pnlUsd);
+  vegasState.onSettled(won, halted);
 
   if (!won) recordLoss(actualBet);
   stats.recordSettlement({ won, pnlUsd });
@@ -579,6 +586,7 @@ async function applySettlement(pending, { candles } = {}) {
     pnlUsd,
     actualBet,
     martingaleHalted: halted,
+    chainPnlUsd,
     crossCheck: cross,
     ...stats.formatLogFields(),
   });
@@ -630,10 +638,16 @@ async function applySettlement(pending, { candles } = {}) {
     `${tgHead(`${resultEmoji} <b>结算${resultText}</b> (${sourceLabel})`)}\n` +
     `窗口: ${windowLabel}\n` +
     `周期: ${config.timeframe}\n` +
-    `下注: ${side} $${actualBet}\n` +
+    `方向: ${side}\n` +
+    formatSettlementTradeLines({
+      entryPrice: price,
+      actualBet,
+      pnlUsd,
+      formatPnl: stats.formatPnlUsd,
+    }) +
+    `本链路盈亏: <b>${stats.formatPnlUsd(chainPnlUsd)}</b>\n` +
     priceLine +
     `结果: <b>${winningOutcome}</b> (Δ ${settleDelta >= 0 ? '+' : ''}${settleDelta.toFixed(2)})\n` +
-    `本单盈亏: <b>${stats.formatPnlUsd(pnlUsd)}</b>\n` +
     mismatchNote + haltNote +
     `下一注: <b>$${mg.currentBet}</b>  (首注 $${mg.baseBet} · 连败 ${mg.consecutiveLosses})\n` +
     `今日亏损: $${getDailyLossUsd().toFixed(2)} / $${config.maxDailyLossUsd}\n` +
@@ -736,6 +750,7 @@ async function scheduler() {
 
     const side = ctx.signal === 'UP' ? '📈 买涨 UP' : '📉 买跌 DOWN';
     const fillNote = formatFillNote(ctx.fill);
+    const mgState = martingale.getState();
     const priceOdds = formatPriceOddsLines({
       fill: ctx.fill,
       limitPrice: ctx.limitPrice,
@@ -748,7 +763,8 @@ async function scheduler() {
       `周期: ${config.timeframe}\n` +
       (ctx.signalReason ? `原因: ${escapeHtml(ctx.signalReason)}\n` : '') +
       priceOdds +
-      `金额: <b>${escapeHtml(fillNote || `$${ctx.actualBet.toFixed(2)}`)}</b>\n` +
+      (fillNote ? `成交明细: ${escapeHtml(fillNote)}\n` : '') +
+      formatChainTelegramLines(mgState) +
       `窗口: ${formatBeijingTime(ctx.cycleStartTs)}\n` +
       await formatBalanceTelegramLine() +
       formatStatsTelegramBlock()

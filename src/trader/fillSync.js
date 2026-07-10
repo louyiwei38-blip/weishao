@@ -181,23 +181,59 @@ export function calcWinNetProfit(amountUsdc, entryPrice) {
   return amount / price - amount;
 }
 
-/** Telegram 通知用的价格 + 胜则净赚行 */
+/** 输则亏损 = −投入（不含手续费近似） */
+export function calcLossPnl(amountUsdc) {
+  const amount = Number(amountUsdc);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  return -amount;
+}
+
+/**
+ * Telegram：开单价格 + 投入 + 胜/负盈亏预览
+ * @returns {string} HTML lines (may be empty)
+ */
 export function formatPriceOddsLines({
   fill, limitPrice, signal, yesPrice, noPrice, amountUsdc,
 }) {
   const price = resolveEntryPrice({ fill, limitPrice, signal, yesPrice, noPrice });
-  if (price == null) return '';
-
   const amount = Number(amountUsdc) > 0
     ? Number(amountUsdc)
     : (fill?.usdcSpent > 0 ? fill.usdcSpent : null);
 
-  let lines = `价格: <b>$${price.toFixed(3)}</b>\n`;
+  const lines = [];
+  if (price != null) {
+    lines.push(`开单价格: <b>$${Number(price).toFixed(3)}</b>`);
+  }
   if (amount != null) {
-    const netProfit = calcWinNetProfit(amount, price);
-    if (netProfit != null) {
-      lines += `胜则净赚: <b>$${netProfit.toFixed(2)}</b> (投入 $${amount.toFixed(2)})\n`;
+    lines.push(`投入: <b>$${amount.toFixed(2)}</b>`);
+    const winNet = calcWinNetProfit(amount, price);
+    if (winNet != null) {
+      lines.push(`胜则盈亏: <b>+$${winNet.toFixed(2)}</b>`);
+    }
+    const loss = calcLossPnl(amount);
+    if (loss != null) {
+      lines.push(`输则盈亏: <b>-$${Math.abs(loss).toFixed(2)}</b>`);
+    }
+    if (fill?.shares != null && Number(fill.shares) > 0) {
+      lines.push(`份数: ${Number(fill.shares).toFixed(2)}`);
     }
   }
-  return lines;
+  return lines.length ? `${lines.join('\n')}\n` : '';
+}
+
+/**
+ * Telegram：结算时回显开单价 + 本单盈亏
+ */
+export function formatSettlementTradeLines({ entryPrice, actualBet, pnlUsd, formatPnl }) {
+  const lines = [];
+  if (entryPrice != null && Number(entryPrice) > 0) {
+    lines.push(`开单价格: <b>$${Number(entryPrice).toFixed(3)}</b>`);
+  }
+  if (actualBet != null && Number(actualBet) > 0) {
+    lines.push(`投入: <b>$${Number(actualBet).toFixed(2)}</b>`);
+  }
+  if (pnlUsd != null && typeof formatPnl === 'function') {
+    lines.push(`本单盈亏: <b>${formatPnl(pnlUsd)}</b>`);
+  }
+  return lines.length ? `${lines.join('\n')}\n` : '';
 }
