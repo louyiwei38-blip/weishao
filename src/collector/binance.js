@@ -32,7 +32,7 @@ export function resolveOhlcvMarket(marketType = config.ohlcvMarketType, symbolOv
   };
 }
 
-/** Resolved OHLCV source for strategy signals, session gate, and rv candles. */
+/** Resolved OHLCV source for strategy signals. */
 export function describeOhlcvSource(timeframe = config.timeframe) {
   const market = resolveOhlcvMarket();
   return {
@@ -136,33 +136,12 @@ async function fetchOhlcvCandles(timeframe, limit) {
 }
 
 /**
- * Fetch the most recent closed OHLCV candles for strategy signals (5m).
+ * Fetch the most recent closed OHLCV candles for strategy signals.
  */
 export async function fetchClosedCandles(limit = config.candleLimit) {
   const candles = await fetchOhlcvCandles(config.timeframe, limit);
   if (candles.length < 2) {
     throw new Error(`too few strategy candles: ${candles.length}`);
-  }
-  return candles;
-}
-
-/**
- * Fetch finer-grained candles for realized-volatility metrics (default 1m, same market).
- */
-export async function fetchVolatilityCandles(
-  limit = config.volatilityCandleLimit,
-  timeframe = config.volatilityBarTimeframe,
-) {
-  return fetchOhlcvCandles(timeframe, limit);
-}
-
-/**
- * Fetch closed 5m candles for session gate volume evaluation (same source as signals).
- */
-export async function fetchSessionCandles(limit = config.sessionGate.candleLimit) {
-  const candles = await fetchOhlcvCandles(config.timeframe, limit);
-  if (candles.length < 2) {
-    throw new Error(`too few session candles: ${candles.length}`);
   }
   return candles;
 }
@@ -214,7 +193,7 @@ export async function fetchClosedCandleAt(openTimeMs) {
 }
 
 /**
- * Validate candle timestamp aligns with expected 5m boundary.
+ * Validate candle timestamp aligns with expected cycle boundary.
  */
 export function isCandleFresh(candle, cycleMs) {
   const nowMs = Date.now();

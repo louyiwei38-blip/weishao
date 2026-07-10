@@ -1,16 +1,11 @@
 /**
- * Volatility-regime reversal / continuation strategy
+ * High-vol continuation strategy (production).
  *
- * Production: always low-vol reversal (S1→UP, S2→DOWN).
- *
- * High vol — continuation:
  *   S1: K[-2]=BULL, K[-1]=BEAR  → signal DOWN  (buy NO)
  *   S2: K[-2]=BEAR, K[-1]=BULL  → signal UP    (buy YES)
+ *   Same direction / DOJI → signal NONE (skip)
  *
- * Low vol — reversal (backtest-only; not used in production):
- *   S1 → UP, S2 → DOWN
- *
- * Same direction / DOJI → signal NONE (skip)
+ * Optional volRegime='low' flips direction for offline backtests only.
  */
 
 /**
@@ -25,10 +20,10 @@ export function classifyCandle(candle) {
 }
 
 /**
- * Evaluate signal from candle pattern and volatility regime.
+ * Evaluate signal from candle pattern.
  * @param {{ t: number, open: number, close: number }} kMinus2
  * @param {{ t: number, open: number, close: number }} kMinus1
- * @param {'high' | 'low'} [volRegime='high']
+ * @param {'high' | 'low'} [volRegime='high'] — production always 'high'; backtests may pass 'low'
  * @returns {{
  *   signal: 'UP' | 'DOWN' | 'NONE',
  *   signalId: 'S1' | 'S2' | null,

@@ -1,6 +1,7 @@
 /**
  * Settlement for Polymarket Up/Down markets.
- * Default: OKX 永续 5m K 线 (open vs close). Fallback: Chainlink RTDS oracle.
+ * Default: OKX 永续 K 线 (open vs close, cycle = MARKET_CYCLE_MINUTES).
+ * Fallback: Chainlink RTDS oracle.
  */
 
 import config from '../config.js';
@@ -112,7 +113,7 @@ async function resolveCandleForCycle(cycleStartTs, candles) {
 }
 
 /**
- * Compute OKX perpetual 5m candle settlement (open vs close).
+ * Compute OKX perpetual candle settlement (open vs close).
  * @returns {Promise<{ ready: boolean, reason?: string, won?: boolean, winningOutcome?: string, targetPrice?: number, closePrice?: number, closeTickTs?: number, settleDelta?: number, candle?: object }>}
  */
 export async function computeOkxSettlement(pendingBet, { candles } = {}) {

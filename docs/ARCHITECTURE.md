@@ -1,6 +1,6 @@
 # 架构与运行逻辑
 
-> 本文档描述 PMfanz 当前实现（2026-06），涵盖信号、下单、成交监视、Chainlink 结算全链路。  
+> 本文档描述维加斯通道 1h Polymarket 机器人实现，涵盖信号、下单、成交监视、结算全链路。  
 > 配置项详见 [.env.example](../.env.example)，部署见 [DEPLOY.md](../DEPLOY.md)。
 
 ---
@@ -9,12 +9,13 @@
 
 | 模块 | 数据源 | 用途 |
 |------|--------|------|
-| **信号** | CCXT 交易所 5m OHLCV + 1m rv | K 线形态 + 波动率择向 → S1/S2 |
+| **信号** | CCXT 交易所 1h OHLCV | EMA144/169 维加斯通道穿越 → VG_UP / VG_DOWN |
+| **状态** | `logs/vegas-state.json` | `need_outside` / `armed` / `in_chain` + 锁定方向 |
 | **下单** | Polymarket CLOB V2 | GTC 限价 / FOK 市价；超阈值按 `ORDER_PRICE_CAP` 限价 |
-| **结算** | Polymarket RTDS Chainlink | 官方 oracle：`close >= target → UP` |
+| **结算** | OKX 永续 1h（默认）或 Chainlink RTDS | `close >= open/target → UP` |
 | **交叉校验** | 交易所 K 线 vs Chainlink | 仅 WARN / Telegram，不影响结算 |
 
-信号与结算** intentionally 分离**：策略基于交易所 K 线形态；Polymarket 5m 盘口按 Chainlink 价格 payout，结算必须对齐 oracle。
+信号与结算** intentionally 分离**：策略基于交易所 K 线通道；Polymarket 1h 盘口按 Chainlink 价格 payout 时，结算必须对齐 oracle。
 
 ---
 
@@ -23,21 +24,22 @@
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ 启动                                                            │
-│  startRtdsBuffer(symbol)  →  Chainlink tick 缓冲                   │
+│  startRtdsBuffer(symbol)  →  Chainlink tick 缓冲（可选）         │
 │  startChainlinkSettler()  →  结算安全网（60s 轮询）              │
+│  vegasState.init()        →  need_outside / armed / in_chain    │
 └─────────────────────────────────────────────────────────────────┘
                               │
-        UTC 5m 边界 + SIGNAL_DELAY_MS
+        UTC 1h 边界 + SIGNAL_DELAY_MS
                               ▼
 ┌──────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│ CCXT fetchOHLCV  │    │ 1m rv 波动率择向  │    │ S1/S2 信号       │
-│ (已收盘 K 线)     │───▶│ classifyRegime   │───▶│ reversalCont.    │
+│ CCXT fetchOHLCV  │    │ vegas 状态机      │    │ VG_UP / VG_DOWN │
+│ (已收盘 1h K)    │───▶│ 或 MG_CONT 续单   │───▶│ / NONE          │
 └──────────────────┘    └──────────────────┘    └────────┬────────┘
                                                          │ 有信号
                                                          ▼
                                                 ┌─────────────────┐
                                                 │ Gamma 市场发现   │
-                                                │ {base}-updown-* │
+                                                │ {base}-updown-1h│
                                                 └────────┬────────┘
                                                          ▼
                                                 ┌─────────────────┐
@@ -61,26 +63,44 @@
                     │
      周期结束 + CHAINLINK_SETTLE_BUFFER_MS
                     ▼
-           Chainlink 结算
+           OKX / Chainlink 结算
            (confirmOrderFilled 前置校验)
                     ▼
-           martingale.onSettled + stats.recordSettlement
+           martingale.onSettled + vegasState.onSettled
            + settlements.jsonl → stats 启动回填
 ```
 
 ---
 
-## 3. 调度时序（每 5 分钟）
+## 3. 调度时序（每 1 小时）
 
 | 时刻 | 动作 |
 |------|------|
-| T = 边界 + `SIGNAL_DELAY_MS` | 拉 CCXT K 线；若有 pending bet 尝试补结算 |
-| 同上 | 拉 1m K 线 → 计算 rv → **波动率择向**（高波动延续 / 低波动反转） |
-| 同上 | `buildSignal(K[-2], K[-1], volRegime)` |
-| 有信号 | Gamma 找当前 5m 盘口 → **价格封顶** → 马丁取注 → CLOB 下单 |
+| T = 边界 + `SIGNAL_DELAY_MS` | 拉 CCXT 1h K 线；若有 pending bet 尝试补结算 |
+| 同上 | `vegasState.resolveSignal(candles)` |
+| 有信号 | Gamma 找当前 1h 盘口 → **价格封顶** → 马丁取注 → CLOB 下单 |
 | 成交 / 挂单 | 见 §4 |
-| T = 周期结束 + buffer | Chainlink 定时结算 |
+| T = 周期结束 + buffer | 定时结算 |
 | 下一周期开始 | 结算安全网 + OHLCV 交叉校验 |
+
+### 3.1 维加斯信号规则
+
+| 条件 | 信号 |
+|------|------|
+| K[-2] 实体完全在通道上方 + K[-1] `low ≤ upper` | UP（VG_UP） |
+| K[-2] 实体完全在通道下方 + K[-1] `high ≥ lower` | DOWN（VG_DOWN） |
+
+通道：`upper = max(EMA144, EMA169)`，`lower = min(EMA144, EMA169)`。
+
+### 3.2 状态机
+
+| phase | 行为 |
+|-------|------|
+| `need_outside` | 仅等待实体在通道外的已收盘 K → `armed` |
+| `armed` | 评估穿越；命中则锁定方向 → `in_chain` 并下首注 |
+| `in_chain` | 忽略新穿越；每小时同向 `MG_CONT` 续单 |
+
+赢或连亏 5 次止损 → `need_outside`（须再等通道外实体后才能新开链路）。
 
 ---
 
@@ -115,15 +135,15 @@
 
 - 短时轮询仍无成交 → `restingFillWatcher` 后台继续 poll
 - 直到 **周期结束** 或成交
-- 成交后 → `registerPendingBet` + Telegram + 调度 Chainlink 结算
+- 成交后 → `registerPendingBet` + Telegram + 调度结算
 
 ### 4.3 下单结果 → 主流程
 
 | 结果 | pending bet | 马丁 | Telegram |
 |------|-------------|------|----------|
-| `usdcSpent > 0` | 立即写入 | 等结算 | 开单成交 + 波动率 + 统计 |
-| `resting`（GTC 挂单） | 等补偿轮询 | 等成交后 | 限价挂单 + 波动率 + 统计 |
-| `skipped` | 无 | **不变** | 无 |
+| `usdcSpent > 0` | 立即写入 | 等结算 | 开单成交 + 统计 |
+| `resting`（GTC 挂单） | 等补偿轮询 | 等成交后 | 限价挂单 + 统计 |
+| `skipped` | 无 | **不变**（`in_chain` 方向保持） | 无 |
 | 周期内未成交 | 无 | **不变** | 无 |
 
 ### 4.4 FOK 重试
@@ -133,22 +153,25 @@
 
 ---
 
-## 5. Chainlink 结算
+## 5. 结算
 
-### 5.1 规则（Polymarket 官方）
+### 5.1 规则（Polymarket / OKX）
+
+**OKX（默认）：**
 
 ```
-目标价 target = 周期开始 Chainlink 价
-  （周期开始后 OPEN_WINDOW_MS 内首 tick，否则 <= 周期开始的最近 tick）
-
-收盘价 close   = 周期结束时刻 <= endMs 的最近 Chainlink tick
-
-winningOutcome = close >= target ? UP : DOWN
-
+winningOutcome = close >= open ? UP : DOWN
 won = (bet signal == winningOutcome)
 ```
 
-注意：与交易所 K 线 `close vs open` **不同**；`close === target` 时 Chainlink 判 **UP 赢**（不是 DOJI）。
+**Chainlink：**
+
+```
+目标价 target = 周期开始 Chainlink 价
+收盘价 close   = 周期结束时刻 <= endMs 的最近 Chainlink tick
+winningOutcome = close >= target ? UP : DOWN
+won = (bet signal == winningOutcome)
+```
 
 ### 5.2 结算触发
 
@@ -158,39 +181,11 @@ won = (bet signal == winningOutcome)
 
 ### 5.3 结算前验成交
 
-`confirmOrderFilled`：对 live 订单再查 `getOrder`，`usdcSpent <= 0` 则 void pending，**不更新马丁**。
+`confirmOrderFilled`：对 live 订单再查 `getOrder`，`usdcSpent <= 0` 则 void pending，**不更新马丁 / vegas**。
 
 ### 5.4 交叉校验
 
-结算时若已有同窗口 CCXT K 线，对比：
-
-- 交易所方向：`close > open → UP`，`close < open → DOWN`，相等 → DOJI
-- 与 Chainlink `winningOutcome` 不一致 → WARN + Telegram ⚠️
-
----
-
-## 5.5 波动率择向
-
-对**独立 1m K 线**（`VOLATILITY_BAR_TIMEFRAME`）计算 log return 样本标准差 rv：
-
-```
-rv = sampleStd( ln(close_i / close_{i-1}) )   # 窗口内逐 bar
-```
-
-| 窗口 | 1m K 线下 bar 数 | 时间跨度 |
-|------|-----------------|----------|
-| rv_1m | 2 | ~1 分钟 |
-| rv_5m | 5 | ~5 分钟 |
-| rv_15m | 15 | ~15 分钟 |
-
-**择向规则**（`RV_5M_THRESHOLD` / `RV_15M_THRESHOLD`，默认均为 `0.0005`）：
-
-| 条件 | 模式 | S1（阳→阴） | S2（阴→阳） |
-|------|------|------------|------------|
-| `rv_5m >= RV_5M_THRESHOLD` 或 `rv_15m >= RV_15M_THRESHOLD` | 高波动·延续 | DOWN | UP |
-| `rv_5m < RV_5M_THRESHOLD` 且 `rv_15m < RV_15M_THRESHOLD` | 低波动·反转 | UP | DOWN |
-
-**不拦截下单**；rv 写入信号日志、heartbeat、Telegram。实现：`src/utils/volatility.js` + `src/strategy/reversalContinuation.js`。
+结算时若已有同窗口 CCXT K 线，对比交易所方向与 Chainlink `winningOutcome`；不一致 → WARN + Telegram ⚠️。
 
 ---
 
@@ -216,8 +211,8 @@ rv = sampleStd( ln(close_i / close_{i-1}) )   # 窗口内逐 bar
 | 止损次数 | 马丁连亏触发时 +1；**今日按北京时间 0 点切日** |
 
 - 持久化：`logs/stats-state.json`
-- **启动回填**：从 `logs/settlements.jsonl`（含 `.1`~`.5` 轮转）按 `cycleStartTs` 去重重建，避免重启归零
-- 展示：结算 / 开单 / 无信号 Telegram 均附带波动率与统计块；`settlements.jsonl` / `heartbeat.json` / 主日志含 `stats` 与 rv 字段
+- **启动回填**：从 `logs/settlements.jsonl`（含 `.1`~`.5` 轮转）按 `cycleStartTs` 去重重建
+- 展示：结算 / 开单 / 无信号 Telegram 均附带统计块
 
 实现：`src/stats/manager.js`
 
@@ -227,31 +222,15 @@ rv = sampleStd( ln(close_i / close_{i-1}) )   # 窗口内逐 bar
 
 | 文件 | 内容 |
 |------|------|
-| `logs/signals.jsonl` | 每轮信号（含 NONE、rv、volRegime） |
-| `logs/trades.jsonl` | 下单记录（filled / resting / unfilled；含 volatility、priceCapped） |
-| `logs/settlements.jsonl` | Chainlink 结算（含 pnlUsd、martingaleHalted、stats、rv） |
-| `logs/stats-state.json` | 盈亏 / 胜率 / 止损快照（启动时由 settlements 回填） |
-| `logs/pending-bet.json` | 待结算注单（含 targetPrice、orderId、entryPrice、volatility） |
+| `logs/signals.jsonl` | 每轮信号（含 NONE、phase、bands） |
+| `logs/trades.jsonl` | 下单记录（filled / resting / unfilled） |
+| `logs/settlements.jsonl` | 结算（含 pnlUsd、martingaleHalted、stats） |
+| `logs/stats-state.json` | 盈亏 / 胜率 / 止损快照 |
+| `logs/pending-bet.json` | 待结算注单 |
 | `logs/martingale-state.json` | 马丁状态 |
+| `logs/vegas-state.json` | 维加斯相位 + 锁定方向 |
 | `logs/daily-loss.json` | 当日 UTC 累计亏损 |
-| `logs/heartbeat.json` | 最近一轮状态快照（含 rv） |
-
-**pending-bet.json 结构：**
-
-```json
-{
-  "cycleStartTs": 1717413300000,
-  "signal": "UP",
-  "actualBet": 4.0,
-  "targetPrice": 67523.45,
-  "orderId": "0x...",
-  "limitPrice": 0.52,
-  "entryPrice": 0.47,
-  "volatility": { "barTimeframe": "1m", "rv_5m": 0.0006, "rv_15m": 0.0004 },
-  "volRegime": "high",
-  "volRegimeReason": "..."
-}
-```
+| `logs/heartbeat.json` | 最近一轮状态快照 |
 
 **Polymarket slug**（`src/market/polymarket.js`）：
 
@@ -259,7 +238,7 @@ rv = sampleStd( ln(close_i / close_{i-1}) )   # 窗口内逐 bar
 {base}-updown-{timeframe}-{windowStartUnixSec}
 ```
 
-`base` 取自 `TRADING_SYMBOL` 前半段小写（如 `ETH/USDT` → `eth-updown-5m-1780758600`）。
+例：`BTC/USDT` + `1h` → `btc-updown-1h-1780758600`。
 
 ---
 
@@ -267,18 +246,20 @@ rv = sampleStd( ln(close_i / close_{i-1}) )   # 窗口内逐 bar
 
 | 路径 | 职责 |
 |------|------|
-| `src/index.js` | UTC 调度、pending bet、结算/TG 编排 |
-| `src/collector/binance.js` | CCXT OHLCV（信号 5m + 波动率 1m） |
+| `src/index.js` | UTC 周期调度、pending bet、结算/TG 编排（`BOT_INSTANCE` 隔离状态） |
+| `src/utils/instancePaths.js` | 多周期并行时的日志/状态文件后缀 |
+| `src/collector/binance.js` | CCXT OHLCV（信号 1h） |
 | `src/collector/chainlink.js` | RTDS WebSocket；支持 BTC/ETH/SOL/BNB |
-| `src/strategy/reversalContinuation.js` | S1/S2 + 波动率择向 |
-| `src/market/polymarket.js` | Gamma 5m 盘口；`resolveOrderPricePolicy()` |
+| `src/strategy/vegasChannel.js` | EMA144/169、实体外、影线入、穿越判定 |
+| `src/strategy/vegasState.js` | need_outside / armed / in_chain 状态机 |
+| `src/strategy/reversalContinuation.js` | 旧 5m 策略（回测脚本用） |
+| `src/market/polymarket.js` | Gamma 盘口；`resolveOrderPricePolicy()` |
 | `src/stats/manager.js` | 盈亏统计、settlements 回填、Telegram 块 |
-| `src/utils/volatility.js` | rv 计算、择向、日志/Telegram 格式化 |
 | `src/trader/executor.js` | CLOB 下单、GTC/FOK 分支、价格封顶限价 |
 | `src/trader/fillSync.js` | 成交解析与短时轮询 |
 | `src/trader/restingFillWatcher.js` | GTC 周期内补偿轮询 |
 | `src/trader/chainlinkSettle.js` | 结算调度、交叉校验 helper |
-| `src/martingale/manager.js` | 马丁状态机 |
+| `src/martingale/manager.js` | 马丁状态机（同向 ×3；5 连亏立即重置） |
 | `src/utils/websocket.js` | RTDS WebSocket（native / ws 包） |
 
 ---
@@ -302,7 +283,8 @@ rv = sampleStd( ln(close_i / close_{i-1}) )   # 窗口内逐 bar
 | v2.3 | Chainlink RTDS 结算；CCXT 仅信号/校验 |
 | v2.4 | GTC 限价 + fillSync + restingFillWatcher；结算前验成交 |
 | v2.5 | 可配置 `TRADING_SYMBOL`；盈亏统计 + settlements 回填 |
-| v2.6 | 波动率择向策略；买 YES/NO 对称价格封顶 `ORDER_PRICE_CAP`；移除 rv/价格区间跳过 |
+| v2.6 | 波动率择向策略；买 YES/NO 对称价格封顶 `ORDER_PRICE_CAP` |
+| v3.0 | **1h 维加斯通道穿越入场** + 同向马丁；替换 5m 反转延续实盘信号 |
 
 **实盘最小 `.env`：**
 
@@ -314,7 +296,7 @@ OHLCV_EXCHANGE=okx
 ORDER_TYPE=GTC
 ```
 
-`POLY_API_KEY` / `SECRET` / `PASSPHRASE` 可选；留空时首次连接 CLOB 自动 `createOrDeriveApiKey()`。预写入可加快启动。
+`POLY_API_KEY` / `SECRET` / `PASSPHRASE` 可选；留空时首次连接 CLOB 自动 `createOrDeriveApiKey()`。
 
 ---
 
@@ -323,15 +305,16 @@ ORDER_TYPE=GTC
 ```env
 ORDER_TYPE=GTC
 OHLCV_EXCHANGE=okx
-TRADING_SYMBOL=ETH/USDT
+OHLCV_MARKET_TYPE=swap
+TRADING_SYMBOL=BTC/USDT
+CANDLE_TIMEFRAME=1h
+MARKET_CYCLE_MINUTES=60
+CANDLE_FETCH_LIMIT=200
+SETTLE_SOURCE=okx
 FILL_SYNC_POLL_MS=500
 FILL_SYNC_MAX_WAIT_MS=8000
-CHAINLINK_SETTLE_BUFFER_MS=3000
 ORDER_PRICE_CAP=0.95
-RV_5M_THRESHOLD=0.0005
-RV_15M_THRESHOLD=0.0005
-VOLATILITY_BAR_TIMEFRAME=1m
 DRY_RUN=false
 ```
 
-首次部署：`DRY_RUN=true` 空跑 ≥1 小时，确认日志出现 `[chainlink] RTDS buffer ready` 且无 `OHLCV fetch failed`。
+首次部署：`DRY_RUN=true` 空跑确认能拉满 1h K、算出 EMA 带，且 slug 形如 `btc-updown-1h-*`。

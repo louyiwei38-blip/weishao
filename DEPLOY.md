@@ -18,7 +18,7 @@
 
 | 端点 | 用途 |
 |------|------|
-| `https://gamma-api.polymarket.com` | 5m 盘口发现 |
+| `https://gamma-api.polymarket.com` | 1h 盘口发现 |
 | `https://clob.polymarket.com` | 下单、余额、成交查询 |
 | `wss://ws-live-data.polymarket.com` | **Chainlink RTDS 结算**（必需） |
 | OKX REST API | CCXT K 线（国内推荐，勿依赖币安） |
@@ -77,11 +77,9 @@ FILL_SYNC_POLL_MS=500
 FILL_SYNC_MAX_WAIT_MS=8000
 LIMIT_PRICE_OFFSET_TICKS=0
 
-# 波动率择向 + 价格封顶（可选）
-# RV_5M_THRESHOLD=0.0005
-# RV_15M_THRESHOLD=0.0005
+# 价格封顶（可选）
 # ORDER_PRICE_CAP=0.95
-# VOLATILITY_BAR_TIMEFRAME=1m
+TRADE_BUDGET_USD=3
 
 # Telegram（可选）
 TELEGRAM_BOT_TOKEN=...
@@ -122,7 +120,7 @@ DRY_RUN=true node scripts/test-cycle.js
 
 ---
 
-## 五、PM2 常驻
+## 五、PM2 常驻（5m + 15m + 1h 三开）
 
 ```bash
 sudo npm install -g pm2
@@ -130,25 +128,30 @@ cd ~/polymarket-bot
 mkdir -p logs
 
 export POLY_KEY_PASSWORD="你的解密密码"
-pm2 start ecosystem.config.cjs
-pm2 logs polymarket-bot
+npm run pm2:dry          # 或 npm run pm2:start 实盘
+pm2 logs                 # V3-5m / V3-15m / V3-1h
 pm2 save && pm2 startup
 ```
 
-切换实盘：`.env` 设 `DRY_RUN=false` 后 `pm2 restart polymarket-bot --update-env`。
+切换实盘：`.env` 配好私钥后 `npm run pm2:start`（或 `pm2 restart V3-5m V3-15m V3-1h --update-env`）。
 
 ---
 
 ## 六、日志与状态文件
 
+多实例按周期隔离（`BOT_INSTANCE` / timeframe 后缀）：
+
 | 路径 | 内容 |
 |------|------|
-| `logs/bot.log` | Winston 主日志 |
-| `logs/signals.jsonl` | 每轮信号 |
-| `logs/trades.jsonl` | 下单（filled / resting / unfilled） |
-| `logs/settlements.jsonl` | Chainlink 结算 + 交叉校验 |
-| `logs/stats-state.json` | 盈亏 / 胜率 / 止损（启动从 settlements 回填） |
-| `logs/pending-bet.json` | 待结算注单（重启恢复） |
+| `logs/bot-15m.log` / `bot-5m.log` | Winston 主日志 |
+| `logs/signals-15m.jsonl` 等 | 每轮信号 |
+| `logs/trades-15m.jsonl` 等 | 下单 |
+| `logs/settlements-15m.jsonl` 等 | 结算 |
+| `logs/stats-state-15m.json` 等 | 盈亏统计 |
+| `logs/pending-bet-15m.json` 等 | 待结算注单 |
+| `logs/heartbeat-15m.json` 等 | 心跳 |
+| `logs/martingale-state.json` | 马丁（内部按 `symbol:timeframe` 分轨） |
+| `logs/vegas-state.json` | 维加斯相位（同上分轨） |
 | `logs/martingale-state.json` | 马丁状态 |
 | `logs/daily-loss.json` | 当日 UTC 累计亏损 |
 | `logs/heartbeat.json` | 最近一轮快照 |
@@ -192,8 +195,8 @@ grep chainlink logs/bot.log | tail -20
 | `WebSocket unavailable` | `npm install` 确保 `ws` 已装；Node ≥ 18 |
 | `[chainlink] RTDS disconnected` | 检查到 `ws-live-data.polymarket.com` 的网络；会自动重连 |
 | `pUSD balance below minimum` | 充值或降低 `MIN_BALANCE_USD` |
-| `no BTC 5M market found` / `market_not_found` | 检查 `TRADING_SYMBOL` 与 Polymarket 是否有对应 5m 盘口；等下一周期 |
-| 信号方向与预期不符 | 检查 `RV_5M_THRESHOLD` / `RV_15M_THRESHOLD`；高波动延续 / 低波动反转见 README 策略表 |
+| `no BTC 1h market found` / `market_not_found` | 检查 `TRADING_SYMBOL` 与 Polymarket 是否有对应 1h 盘口；等下一周期 |
+| 信号方向与预期不符 | 维加斯穿越：上穿入→买涨、下穿入→买跌；见 README 策略表 |
 | 盘口超阈值未成交 | 按 `ORDER_PRICE_CAP` 限价挂单，等价格回落；周期内未成交马丁不变 |
 | 限价挂单未成交 | 正常；周期结束未成交不计马丁；可调 `LIMIT_PRICE_OFFSET_TICKS` |
 | `Chainlink vs exchange OHLCV mismatch` | 告警 only；结算以 Chainlink 为准 |

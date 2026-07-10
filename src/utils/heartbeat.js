@@ -1,10 +1,10 @@
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { scopedLogPath } from './instancePaths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOGS_DIR = join(__dirname, '..', '..', 'logs');
-const HEARTBEAT_FILE = join(LOGS_DIR, 'heartbeat.json');
 
 /**
  * Write bot liveness snapshot for external monitoring (Uptime Kuma, cron curl, etc.).
@@ -13,8 +13,9 @@ const HEARTBEAT_FILE = join(LOGS_DIR, 'heartbeat.json');
 export function writeHeartbeat(status) {
   try {
     if (!existsSync(LOGS_DIR)) mkdirSync(LOGS_DIR, { recursive: true });
+    const file = scopedLogPath(LOGS_DIR, 'heartbeat.json');
     writeFileSync(
-      HEARTBEAT_FILE,
+      file,
       JSON.stringify({ updatedAt: new Date().toISOString(), ...status }, null, 2),
       'utf8'
     );

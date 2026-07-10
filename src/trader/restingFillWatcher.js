@@ -107,3 +107,8 @@ export function stopAllRestingFillWatchers() {
   for (const entry of active.values()) entry.abort = true;
   active.clear();
 }
+
+/** True while any GTC resting order is still being polled. */
+export function hasActiveRestingFillWatch() {
+  return active.size > 0;
+}

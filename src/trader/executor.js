@@ -18,11 +18,12 @@ import logger from '../utils/logger.js';
 import { appendJsonl } from '../utils/jsonl.js';
 import { withRetry, sleep } from '../utils/retry.js';
 import { resolveActualFill, formatFillNote } from './fillSync.js';
+import { scopedLogPath } from '../utils/instancePaths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOGS_DIR = join(__dirname, '..', '..', 'logs');
-const TRADE_LOG = join(LOGS_DIR, 'trades.jsonl');
-const DAILY_LOSS_FILE = join(LOGS_DIR, 'daily-loss.json');
+const TRADE_LOG = scopedLogPath(LOGS_DIR, 'trades.jsonl');
+const DAILY_LOSS_FILE = scopedLogPath(LOGS_DIR, 'daily-loss.json');
 const RELAYER_URL = 'https://relayer-v2.polymarket.com';
 
 let clobClient = null;

@@ -33,33 +33,17 @@ function bool(name, defaultValue) {
   return v.toLowerCase() === 'true';
 }
 
-const ACTIVITY_TIER_COUNT = 12;
-
-function parseActivityTierBets() {
-  const raw = process.env.ACTIVITY_TIER_BETS;
-  if (raw) {
-    const bets = raw.split(',').map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0);
-    if (bets.length >= ACTIVITY_TIER_COUNT) return bets.slice(0, ACTIVITY_TIER_COUNT);
-    if (bets.length > 0) {
-      const padded = [...bets];
-      while (padded.length < ACTIVITY_TIER_COUNT) padded.push(padded[padded.length - 1]);
-      return padded;
-    }
-  }
-  const base = num('TRADE_BUDGET_USD', 3);
-  // Plan A highTierOnly: tiers 1–8 = base, 9–12 scale up (backtest net-ROI optimal)
-  return [1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 5, 8].map((m) => Number((m * base).toFixed(2)));
+/** Parse timeframe like 5m / 15m / 1h → minutes. */
+function timeframeToMinutes(tf) {
+  const m = String(tf || '').trim().match(/^(\d+)(m|h)$/i);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return m[2].toLowerCase() === 'h' ? n * 60 : n;
 }
 
-function parseMinOpenTiers() {
-  const raw = process.env.MIN_OPEN_TIERS ?? '8,9,10,11,12';
-  const tiers = raw
-    .split(',')
-    .map((s) => Number(s.trim()))
-    .filter((n) => Number.isFinite(n) && n >= 1 && n <= ACTIVITY_TIER_COUNT);
-  const unique = [...new Set(tiers)].sort((a, b) => a - b);
-  return unique.length > 0 ? unique : [8, 9, 10, 11, 12];
-}
+const timeframe = optional('CANDLE_TIMEFRAME', '1h');
+const derivedCycleMinutes = timeframeToMinutes(timeframe) ?? 60;
 
 const config = {
   // Polymarket
@@ -76,9 +60,9 @@ const config = {
     chainId: 137,
   },
 
-  // OHLCV — strategy signals, session gate, rv metrics (Polymarket slug still uses TRADING_SYMBOL)
+  // OHLCV — strategy signals only (Polymarket slug still uses TRADING_SYMBOL)
   ohlcvExchange: optional('OHLCV_EXCHANGE', 'okx'),
-  /** spot | swap — default swap → OKX BTC/USDT:USDT 5m 永续 */
+  /** spot | swap — default swap → OKX BTC/USDT:USDT 永续 */
   ohlcvMarketType: optional('OHLCV_MARKET_TYPE', 'swap'),
   /** Override CCXT symbol; empty → swap: BTC/USDT:USDT from TRADING_SYMBOL */
   ohlcvSymbol: optional('OHLCV_SYMBOL', ''),
@@ -90,17 +74,22 @@ const config = {
 
   // Polymarket / Chainlink slug (not the OHLCV fetch symbol when OHLCV_MARKET_TYPE=swap)
   symbol: optional('TRADING_SYMBOL', 'BTC/USDT'),
-  timeframe: optional('CANDLE_TIMEFRAME', '5m'),
-  candleLimit: num('CANDLE_FETCH_LIMIT', 5),
+  timeframe,
+  candleLimit: num('CANDLE_FETCH_LIMIT', 200),
   signalDelayMs: num('SIGNAL_DELAY_MS', 10000),
 
-  // Bot
-  cycleMinutes: num('MARKET_CYCLE_MINUTES', 5),
+  /**
+   * Isolates pending-bet / heartbeat / stats / daily-loss when multiple
+   * timeframe bots share one wallet & logs dir. Defaults to CANDLE_TIMEFRAME.
+   */
+  instanceId: (() => {
+    const raw = optional('BOT_INSTANCE', timeframe);
+    return String(raw).replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
+  })(),
+
+  // Bot — MARKET_CYCLE_MINUTES defaults from CANDLE_TIMEFRAME (5m→5, 1h→60)
+  cycleMinutes: num('MARKET_CYCLE_MINUTES', derivedCycleMinutes),
   tradeBudgetUsd: num('TRADE_BUDGET_USD', 3),
-  /** Tier 1..12 first-bet USD; refreshed on win or martingale halt only */
-  activityTierBets: parseActivityTierBets(),
-  /** 模拟盘：并行最低开单档位（活跃度档 ≥ 阈值才开该轨道） */
-  minOpenTiers: parseMinOpenTiers(),
   maxDailyLossUsd: num('MAX_DAILY_LOSS_USD', 10000),
   minBalanceUsd: num('MIN_BALANCE_USD', 0),
   maxBetUsd: num('MAX_BET_USD', 10000),
@@ -124,8 +113,8 @@ const config = {
   logLevel: optional('LOG_LEVEL', 'INFO'),
 
   // Martingale
-  martingaleMultiplier: num('MARTINGALE_MULTIPLIER', 2),
-  martingaleMaxLosses: num('MARTINGALE_MAX_LOSSES', 4),
+  martingaleMultiplier: num('MARTINGALE_MULTIPLIER', 3),
+  martingaleMaxLosses: num('MARTINGALE_MAX_LOSSES', 5),
 
   // Telegram notifications
   telegram: {
@@ -139,27 +128,10 @@ const config = {
     if (process.env.YES_PRICE_MAX !== undefined) return Number(process.env.YES_PRICE_MAX);
     return 0.95;
   })(),
-  /** Finer OHLCV for realized-volatility regime (independent of signal timeframe) */
-  volatilityBarTimeframe: optional('VOLATILITY_BAR_TIMEFRAME', '1m'),
-  volatilityCandleLimit: num('VOLATILITY_CANDLE_LIMIT', 20),
-  /** rv_5m/15m thresholds: high if either >= its threshold; low if both below */
-  rv5mThreshold: (() => {
-    if (process.env.RV_5M_THRESHOLD !== undefined) return Number(process.env.RV_5M_THRESHOLD);
-    if (process.env.RV_STRATEGY_THRESHOLD !== undefined) return Number(process.env.RV_STRATEGY_THRESHOLD);
-    return 0.00045;
-  })(),
-  rv15mThreshold: (() => {
-    if (process.env.RV_15M_THRESHOLD !== undefined) return Number(process.env.RV_15M_THRESHOLD);
-    if (process.env.RV_STRATEGY_THRESHOLD !== undefined) return Number(process.env.RV_STRATEGY_THRESHOLD);
-    return 0.00025;
-  })(),
-  /** High-vol continuation: skip when rv_5m/rv_15m >= this (0 = disabled) */
-  rvRatioMax: num('RV_RATIO_MAX', 0),
-
-  /** Session gate: burst-only by default — 5m bar volume ≥ threshold opens gate (refresh, no stack) */
+  /** Session gate config kept for offline backtest scripts; live bot does not use it. */
   sessionGate: {
     enabled: bool('SESSION_GATE_ENABLED', true),
-    /** 5m bars fetched for bar-volume evaluation (≥ activityWindowBars when dynamic gate on) */
+    /** bars fetched for bar-volume evaluation (≥ activityWindowBars when dynamic gate on) */
     candleLimit: num('SESSION_CANDLE_LIMIT', 12),
     eventWindowEnabled: bool('EVENT_WINDOW_ENABLED', false),
     eventWindowHours: num('EVENT_WINDOW_HOURS', 1),
@@ -193,7 +165,7 @@ const config = {
     bigMoveEndBars: num('BIG_MOVE_END_BARS', 3),
   },
 
-  /** Settlement source: okx (OKX 永续 5m K 线) | chainlink (Polymarket RTDS oracle) */
+  /** Settlement source: okx (OKX 永续 K 线) | chainlink (Polymarket RTDS oracle) */
   settleSource: optional('SETTLE_SOURCE', 'okx').toLowerCase(),
 
   // Chainlink RTDS settlement (Polymarket official oracle)

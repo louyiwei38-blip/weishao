@@ -8,7 +8,7 @@ const GAMMA_API = config.poly.gammaApi;
 /** Simple in-memory cache per cycle boundary */
 let cache = { cycleTs: 0, market: null };
 
-/** e.g. ETH/USDT + 5m → eth-updown-5m-1780758600 */
+/** e.g. BTC/USDT + 1h → btc-updown-1h-1780758600 */
 export function buildMarketSlug(windowStartSec, symbol = config.symbol, timeframe = config.timeframe) {
   const [base] = symbol.split('/');
   if (!base) throw new Error(`Invalid TRADING_SYMBOL: ${symbol}`);
@@ -16,14 +16,14 @@ export function buildMarketSlug(windowStartSec, symbol = config.symbol, timefram
 }
 
 /**
- * Fetch the configured symbol's 5-minute Up/Down market for the CURRENT window.
+ * Fetch the configured symbol's Up/Down market for the CURRENT window.
  * Polymarket slug format: {base}-updown-{timeframe}-{windowStartUnixSec}
  *
- * The signal is derived from the two just-closed candles and predicts the
- * direction of the window that just opened, so we trade THAT window — the one
- * starting exactly at cycleStartTs (resolves cycleStartTs + 5m).
+ * The signal is derived from closed candles and predicts the direction of the
+ * window that just opened, so we trade THAT window — the one starting exactly
+ * at cycleStartTs.
  *
- * @param {number} cycleStartTs – UTC ms of the 5m boundary that just opened
+ * @param {number} cycleStartTs – UTC ms of the cycle boundary that just opened
  * @param {number} [deadlineMs] – abort retries after this timestamp
  */
 export async function findCurrentCycleMarket(cycleStartTs, deadlineMs) {
@@ -45,7 +45,7 @@ export async function findCurrentCycleMarket(cycleStartTs, deadlineMs) {
 
   let parsed;
   try {
-    // Retry when Gamma is slow, times out, or the new 5m event is not indexed yet
+    // Retry when Gamma is slow, times out, or the new cycle event is not indexed yet
     // (empty slug response is common in the first seconds after a window opens).
     parsed = await withRetry(
       async () => fetchAndValidateEvent(slug),

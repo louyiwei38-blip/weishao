@@ -4,11 +4,12 @@ import { fileURLToPath } from 'url';
 import { beijingDateKey } from '../utils/datetime.js';
 import { calcWinNetProfit } from '../trader/fillSync.js';
 import logger from '../utils/logger.js';
+import { scopedLogPath } from '../utils/instancePaths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOGS_DIR = join(__dirname, '..', '..', 'logs');
-const STATE_FILE = join(LOGS_DIR, 'stats-state.json');
-const SETTLE_LOG = join(LOGS_DIR, 'settlements.jsonl');
+const STATE_FILE = scopedLogPath(LOGS_DIR, 'stats-state.json');
+const SETTLE_LOG = scopedLogPath(LOGS_DIR, 'settlements.jsonl');
 const SETTLE_LOG_ARCHIVES = 5;
 
 const EMPTY_BUCKET = () => ({

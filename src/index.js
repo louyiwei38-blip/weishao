@@ -1,6 +1,7 @@
 /**
- * Polymarket Single-Candle Follow Bot — entry point
- * PRD v2.2 | BTC/USDT 5m | Martingale 4-loss stop
+ * Polymarket Vegas Channel Bot — entry point
+ * OKX OHLCV | EMA144/169 Vegas cross-entry | Same-dir Martingale ×3 / 5-loss stop
+ * Multi-instance: BOT_INSTANCE + CANDLE_TIMEFRAME (PM2: 15m + 5m)
  */
 
 import 'dotenv/config';
@@ -15,15 +16,12 @@ import { appendJsonl } from './utils/jsonl.js';
 import { writeHeartbeat } from './utils/heartbeat.js';
 import {
   fetchClosedCandles,
-  fetchVolatilityCandles,
-  fetchSessionCandles,
   isCandleFresh,
   describeOhlcvSource,
 } from './collector/binance.js';
 import {
   startRtdsBuffer,
   stopRtdsBuffer,
-  getChainlinkOpenPrice,
 } from './collector/chainlink.js';
 import {
   initChainlinkSettler,
@@ -37,7 +35,8 @@ import {
   usesChainlinkSettlement,
   settleSourceLabel,
 } from './trader/chainlinkSettle.js';
-import { buildSignal } from './strategy/reversalContinuation.js';
+import * as vegasState from './strategy/vegasState.js';
+import { EMA_SLOW } from './strategy/vegasChannel.js';
 import { findCurrentCycleMarket, resolveOrderPricePolicy } from './market/polymarket.js';
 import {
   getBalance,
@@ -54,52 +53,40 @@ import {
   initRestingFillWatcher,
   scheduleRestingFillWatch,
   stopAllRestingFillWatchers,
+  hasActiveRestingFillWatch,
 } from './trader/restingFillWatcher.js';
 import * as martingale from './martingale/manager.js';
 import * as stats from './stats/manager.js';
-import * as tierStats from './stats/tierStats.js';
 import { notifyTelegram, escapeHtml } from './utils/telegram.js';
 import { formatBeijingTime } from './utils/datetime.js';
-import {
-  computeSignalVolatility,
-  formatLogFields as formatVolatilityLogFields,
-  snapshotForPending,
-  formatTelegramBlock as formatVolatilityTelegramBlock,
-} from './utils/volatility.js';
-import {
-  evaluateSession,
-  advanceSessionState,
-  loadSessionState,
-  saveSessionState,
-  formatSessionLogFields,
-  formatSessionTelegramBlock,
-  minSessionCandles,
-} from './session/sessionGate.js';
-import { resolveActivityTier, buildMinOpenTracks } from './session/activityTier.js';
+import { scopedLogPath } from './utils/instancePaths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOGS_DIR    = join(__dirname, '..', 'logs');
-const SIGNAL_LOG  = join(LOGS_DIR, 'signals.jsonl');
-const SESSION_LOG = join(LOGS_DIR, 'session.jsonl');
-const SETTLE_LOG  = join(LOGS_DIR, 'settlements.jsonl');
-const PENDING_FILE = join(LOGS_DIR, 'pending-bet.json');
+const SIGNAL_LOG  = scopedLogPath(LOGS_DIR, 'signals.jsonl');
+const SETTLE_LOG  = scopedLogPath(LOGS_DIR, 'settlements.jsonl');
+const PENDING_FILE = scopedLogPath(LOGS_DIR, 'pending-bet.json');
 
 const CYCLE_MS = config.cycleMinutes * 60 * 1000;
+const TF_TAG = `[${config.timeframe}]`;
+
+function tgHead(titleHtml) {
+  return `${TF_TAG} ${titleHtml}`;
+}
 
 // Pending bet awaiting settlement. Shape:
-//   { cycleStartTs, signal, actualBet, targetPrice?, orderId? }
+//   { cycleStartTs, signal, actualBet, orderId?, limitPrice?, entryPrice?, fill? }
 let pendingBet = null;
 
 let shutdownRequested = false;
 let cycleInProgress = null;
-let sessionCtx = loadSessionState();
 
 // ─────────────────────────────────────────
 // Startup
 // ─────────────────────────────────────────
 
 function formatStatsTelegramBlock() {
-  return stats.formatTelegramBlock() + tierStats.formatTelegramBlock();
+  return stats.formatTelegramBlock();
 }
 
 function ensureLogs() {
@@ -156,42 +143,6 @@ async function formatBalanceTelegramLine(balance) {
 }
 
 // ─────────────────────────────────────────
-// Volatility context (rv metrics for logging; direction is always continuation)
-// ─────────────────────────────────────────
-
-async function fetchVolatilityContext() {
-  let volCandles;
-  try {
-    volCandles = await fetchVolatilityCandles();
-  } catch (err) {
-    logger.error('[main] 波动率 K 线拉取失败', { error: err?.message });
-    return {
-      rv: null,
-      regime: 'high',
-      regimeReason: '固定高波动延续（K 线拉取失败，仍按延续模式）',
-      partial: true,
-    };
-  }
-
-  const rv = computeSignalVolatility(volCandles);
-
-  logger.info('[main] 波动率', {
-    barTimeframe: rv.barTimeframe,
-    rv_1m: rv.rv_1m,
-    rv_5m: rv.rv_5m,
-    rv_15m: rv.rv_15m,
-    mode: 'high_continuation_only',
-  });
-
-  return {
-    rv,
-    regime: 'high',
-    regimeReason: '固定高波动延续模式',
-    partial: false,
-  };
-}
-
-// ─────────────────────────────────────────
 // Core per-cycle logic
 // ─────────────────────────────────────────
 
@@ -200,24 +151,19 @@ async function runCycle(cycleStartTs) {
   let cycleStatus = 'ok';
   let cycleError = null;
   let lastSignal = null;
-  let lastVolCtx = null;
-  let lastSessionCtx = null;
 
   logger.info('━━━ 周期开始', {
     cycle: formatBeijingTime(cycleStartTs),
     dryRun: config.dryRun,
-    sessionState: sessionCtx.sessionState,
   });
 
   clearOrderDedup();
 
   try {
-    // ── FR-1: Fetch OHLCV (extended when session gate enabled) ──
+    // ── FR-1: Fetch OHLCV for signals ──
     let candles;
     try {
-      candles = config.sessionGate.enabled
-        ? await fetchSessionCandles()
-        : await fetchClosedCandles(config.candleLimit);
+      candles = await fetchClosedCandles(config.candleLimit);
     } catch (err) {
       cycleStatus = 'ohlcv_failed';
       cycleError = err?.message;
@@ -225,14 +171,13 @@ async function runCycle(cycleStartTs) {
       return;
     }
 
-    if (candles.length < 2) {
+    if (candles.length < EMA_SLOW + 1) {
       cycleStatus = 'insufficient_candles';
-      logger.warn('[main] K 线数量不足', { got: candles.length });
+      logger.warn('[main] K 线数量不足（EMA169）', {
+        got: candles.length,
+        need: EMA_SLOW + 1,
+      });
       return;
-    }
-
-    if (config.sessionGate.enabled && candles.length < minSessionCandles()) {
-      logger.warn('[main] 会话评估 K 线不足', { got: candles.length, need: minSessionCandles() });
     }
 
     // ── Settle the PREVIOUS cycle's bet (OKX K 线 or Chainlink) ──
@@ -240,7 +185,23 @@ async function runCycle(cycleStartTs) {
       await trySettlePending(pendingBet, { candles });
     }
 
-    const kMinus2 = candles.at(-2);
+    // Never open a new position while a prior bet is still unsettled
+    if (pendingBet) {
+      cycleStatus = 'pending_unsettled';
+      logger.warn('[main] 上笔注单尚未结算 — 跳过本周期下单', {
+        pendingCycle: formatBeijingTime(pendingBet.cycleStartTs),
+        pendingSignal: pendingBet.signal,
+      });
+      return;
+    }
+
+    // GTC resting fill still being watched — avoid stacking orders
+    if (hasActiveRestingFillWatch()) {
+      cycleStatus = 'resting_fill_pending';
+      logger.warn('[main] 仍有 GTC 挂单监视中 — 跳过本周期下单');
+      return;
+    }
+
     const kMinus1 = candles.at(-1);
 
     if (!isCandleFresh(kMinus1, CYCLE_MS)) {
@@ -249,98 +210,30 @@ async function runCycle(cycleStartTs) {
       return;
     }
 
-    // ── Session gate: 5m bar volume burst (default burst-only; optional scheduled windows) ──
-    const evaluation = evaluateSession(candles, Date.now(), sessionCtx);
-    sessionCtx = advanceSessionState(sessionCtx, evaluation, candles);
-    sessionCtx.evaluation = evaluation;
-    lastSessionCtx = sessionCtx;
-    saveSessionState(sessionCtx);
-
-    try {
-      appendJsonl(SESSION_LOG, {
-        t: new Date().toISOString(),
-        cycleStartTs,
-        ...formatSessionLogFields(sessionCtx),
-      }, config.jsonlMaxBytes);
-    } catch (err) {
-      logger.warn('[session] 写入 session 日志失败', { error: err?.message });
-    }
-
-    logger.info('[main] 会话评估', {
-      ...formatSessionLogFields(sessionCtx),
-    });
-
-    if (sessionCtx.action === 'start' || sessionCtx.action === 'stop') {
-      const emoji = sessionCtx.action === 'start' ? '▶️' : '⏸';
-      const label = sessionCtx.action === 'start' ? '门控开启' : '门控关闭';
-      await notifyTelegram(
-        `${emoji} <b>${label}</b>\n` +
-        `窗口: ${formatBeijingTime(cycleStartTs)}\n` +
-        `状态: <b>${sessionCtx.sessionState}</b>\n` +
-        formatSessionTelegramBlock(sessionCtx) +
-        formatStatsTelegramBlock()
-      );
-    }
-
-    if (!sessionCtx.tradeAllowed) {
-      cycleStatus = 'session_idle';
-      logger.info('[main] 会话休眠 — 跳过本周期下单', {
-        ...formatSessionLogFields(sessionCtx),
-      });
-      // 每周期推送；action=stop 时上面已发过「会话停止」，避免重复
-      if (sessionCtx.action !== 'stop') {
-        await notifyTelegram(
-          `💤 <b>会话休眠 — 本周期跳过</b>\n` +
-          `窗口: ${formatBeijingTime(cycleStartTs)}\n` +
-          `标的: ${config.symbol}\n` +
-          formatSessionTelegramBlock(sessionCtx) +
-          await formatBalanceTelegramLine() +
-          formatStatsTelegramBlock()
-        );
-      }
-      return;
-    }
-
-    const entryTier = evaluation.activityTier ?? 1;
-    const activityHits = evaluation.volumeBurst?.activityHits ?? null;
-
-    // ── FR-2: Signal evaluation (reversal/continuation on K[-2], K[-1]) ──
-    const volCtx = await fetchVolatilityContext();
-    lastVolCtx = volCtx;
-    const signalObj = buildSignal(
-      kMinus2,
-      kMinus1,
-      config.symbol,
-      config.timeframe,
-      'high',
-    );
+    // ── FR-2: Vegas channel signal / martingale continuation ──
+    const signalObj = vegasState.resolveSignal(candles);
     lastSignal = signalObj.signal;
-    writeSignalLog({
-      ...signalObj,
-      ...formatVolatilityLogFields(volCtx, signalObj),
-      ...formatSessionLogFields(sessionCtx),
-    });
+    writeSignalLog(signalObj);
 
+    const vg = vegasState.getState();
     logger.info('[main] 信号', {
       signal: signalObj.signal,
       signalId: signalObj.signalId,
       reason: signalObj.reason,
-      filterSkipReason: signalObj.filterSkipReason ?? null,
-      ...formatVolatilityLogFields(volCtx, signalObj),
+      phase: signalObj.phase ?? vg.phase,
+      lockedSignal: signalObj.lockedSignal ?? vg.lockedSignal,
     });
 
     if (signalObj.signal === 'NONE') {
       cycleStatus = 'no_signal';
       logger.info('[main] 无信号 — 跳过下单');
       await notifyTelegram(
-        `⏭ <b>无信号 — 跳过本周期</b>\n` +
+        `${tgHead('⏭ <b>无信号 — 跳过本周期</b>')}\n` +
         `窗口: ${formatBeijingTime(cycleStartTs)}\n` +
-        `标的: ${config.symbol}\n` +
+        `标的: ${config.symbol} · ${config.timeframe}\n` +
+        `阶段: ${escapeHtml(signalObj.phase ?? vg.phase)}\n` +
         `原因: ${escapeHtml(signalObj.reason)}\n` +
         await formatBalanceTelegramLine() +
-        `波动率: ${escapeHtml(volCtx.regimeReason)}` +
-        formatVolatilityTelegramBlock(volCtx.rv, volCtx.regime) +
-        formatSessionTelegramBlock(sessionCtx) +
         formatStatsTelegramBlock()
       );
       return;
@@ -351,7 +244,6 @@ async function runCycle(cycleStartTs) {
       logger.warn('[main] 已达当日亏损上限 — 今日停止交易', {
         signal: signalObj.signal,
         signalId: signalObj.signalId,
-        ...formatVolatilityLogFields(volCtx),
       });
       return;
     }
@@ -362,11 +254,11 @@ async function runCycle(cycleStartTs) {
     const market = await findCurrentCycleMarket(cycleStartTs, tradeDeadline);
     if (!market) {
       cycleStatus = 'market_not_found';
-      logger.warn('[main] 未找到 Polymarket 5 分钟市场 — 跳过下单', {
+      logger.warn('[main] 未找到 Polymarket 市场 — 跳过下单', {
         symbol: config.symbol,
+        timeframe: config.timeframe,
         signal: signalObj.signal,
         signalId: signalObj.signalId,
-        ...formatVolatilityLogFields(volCtx),
       });
       return;
     }
@@ -397,34 +289,12 @@ async function runCycle(cycleStartTs) {
         min: config.minBalanceUsd,
         signal: signalObj.signal,
         signalId: signalObj.signalId,
-        ...formatVolatilityLogFields(volCtx),
       });
       return;
     }
 
     const mgState = martingale.getState();
-    let actualBet;
-    let skipReason;
-    let minOpenTracks = null;
-
-    if (config.dryRun) {
-      minOpenTracks = buildMinOpenTracks(entryTier, balance);
-      if (minOpenTracks.length === 0) {
-        cycleStatus = 'below_min_open_tier';
-        logger.info('[main] 活跃度低于最低开单档 — 跳过', {
-          activityTier: entryTier,
-          minOpenTiers: config.minOpenTiers,
-          activityHits,
-          signal: signalObj.signal,
-          signalId: signalObj.signalId,
-        });
-        return;
-      }
-      actualBet = minOpenTracks.reduce((sum, tr) => sum + tr.actualBet, 0);
-      skipReason = actualBet <= 0 ? 'insufficient_balance' : null;
-    } else {
-      ({ actualBet, skipReason } = martingale.prepareOrder(balance));
-    }
+    const { actualBet, skipReason } = martingale.prepareOrder(balance);
 
     if (skipReason) {
       cycleStatus = `martingale_${skipReason}`;
@@ -432,7 +302,6 @@ async function runCycle(cycleStartTs) {
         skipReason,
         signal: signalObj.signal,
         signalId: signalObj.signalId,
-        ...formatVolatilityLogFields(volCtx),
         ...stats.formatLogFields(),
       });
       return;
@@ -455,7 +324,6 @@ async function runCycle(cycleStartTs) {
       priceCapped: pricePolicy.priceCapped,
       originalYesPrice: pricePolicy.originalYesPrice,
       deadlineMs: tradeDeadline,
-      volatility: formatVolatilityLogFields(volCtx),
     });
 
     if (orderResult.skipped) {
@@ -464,7 +332,6 @@ async function runCycle(cycleStartTs) {
         reason: orderResult.skipReason,
         signal: signalObj.signal,
         signalId: signalObj.signalId,
-        ...formatVolatilityLogFields(volCtx),
       });
       return;
     }
@@ -477,13 +344,9 @@ async function runCycle(cycleStartTs) {
         cycleStartTs,
         signal: signalObj.signal,
         actualBet: spent,
-        tracks: config.dryRun ? minOpenTracks : null,
         orderId: orderResult.orderId,
         limitPrice: orderResult.limitPrice,
         fill: orderResult.fill,
-        activityTier: entryTier,
-        activityHits,
-        ...snapshotForPending(volCtx, signalObj),
       });
 
       const side = signalObj.signal === 'UP' ? '📈 买涨 UP' : '📉 买跌 DOWN';
@@ -500,29 +363,24 @@ async function runCycle(cycleStartTs) {
         ? `\n💰 ${signalObj.signal === 'UP' ? 'YES' : 'NO'} 盘口 $${signalObj.signal === 'UP' ? pricePolicy.originalYesPrice : pricePolicy.originalNoPrice} 超阈值 — 按 $${pricePolicy.maxLimitPrice} 挂单\n`
         : '';
       await notifyTelegram(
-        `🤖 <b>开单成交</b>\n` +
+        `${tgHead('🤖 <b>开单成交</b>')}\n` +
         `方向: <b>${side}</b> (${signalObj.signalId})\n` +
+        `周期: ${config.timeframe}\n` +
         `原因: ${escapeHtml(signalObj.reason)}\n` +
         capNote +
         priceOdds +
         `金额: <b>${escapeHtml(fillNote || `$${spent.toFixed(2)}`)}</b>\n` +
-        (config.dryRun
-          ? `${tierStats.formatTracksLine(minOpenTracks, { activityTier: entryTier, activityHits })}\n`
-          : `(首注 $${mgState.baseBet} 档${mgState.lockedTier} · 连败 ${mgState.consecutiveLosses})\n`) +
+        `(首注 $${mgState.baseBet} · 连败 ${mgState.consecutiveLosses})\n` +
         `类型: ${orderResult.orderType ?? config.orderType}\n` +
         await formatBalanceTelegramLine(balance) +
         `盘口: ${market.slug}\n` +
         `时间: ${formatBeijingTime(cycleStartTs)}\n` +
-        `波动率: ${escapeHtml(volCtx.regimeReason)}` +
-        formatVolatilityTelegramBlock(volCtx.rv, volCtx.regime) +
-        formatSessionTelegramBlock(sessionCtx) +
         formatStatsTelegramBlock()
       );
     } else if (orderResult.resting) {
       logger.info('[main] 限价单挂单中 — 监视成交', {
         orderId: orderResult.orderId,
         limitPrice: orderResult.limitPrice,
-        ...formatVolatilityLogFields(volCtx),
       });
       scheduleRestingFillWatch({
         orderId: orderResult.orderId,
@@ -532,10 +390,6 @@ async function runCycle(cycleStartTs) {
         signalReason: signalObj.reason,
         cycleEndMs,
         limitPrice: orderResult.limitPrice,
-        entryTier: config.dryRun ? entryTier : undefined,
-        activityHits,
-        minOpenTracks,
-        ...snapshotForPending(volCtx, signalObj),
       });
 
       const side = signalObj.signal === 'UP' ? '📈 买涨 UP' : '📉 买跌 DOWN';
@@ -550,21 +404,17 @@ async function runCycle(cycleStartTs) {
         ? `\n💰 ${signalObj.signal === 'UP' ? 'YES' : 'NO'} 盘口 $${signalObj.signal === 'UP' ? pricePolicy.originalYesPrice : pricePolicy.originalNoPrice} 超阈值 — 按 $${pricePolicy.maxLimitPrice} 挂单\n`
         : '';
       await notifyTelegram(
-        `⏳ <b>限价挂单</b>\n` +
+        `${tgHead('⏳ <b>限价挂单</b>')}\n` +
         `方向: <b>${side}</b> (${signalObj.signalId})\n` +
+        `周期: ${config.timeframe}\n` +
         `原因: ${escapeHtml(signalObj.reason)}\n` +
         capNote +
         priceOdds +
         `预算: $${actualBet}\n` +
-        (config.dryRun && minOpenTracks?.length
-          ? `${tierStats.formatTracksLine(minOpenTracks, { activityTier: entryTier, activityHits })}\n`
-          : `(连败 ${mgState.consecutiveLosses})\n`) +
+        `(首注 $${mgState.baseBet} · 连败 ${mgState.consecutiveLosses})\n` +
         await formatBalanceTelegramLine(balance) +
         `盘口: ${market.slug}\n` +
         `周期内自动监视成交\n` +
-        `波动率: ${escapeHtml(volCtx.regimeReason)}` +
-        formatVolatilityTelegramBlock(volCtx.rv, volCtx.regime) +
-        formatSessionTelegramBlock(sessionCtx) +
         formatStatsTelegramBlock()
       );
     } else {
@@ -572,7 +422,6 @@ async function runCycle(cycleStartTs) {
       logger.warn('[main] 订单已接受但未成交且非挂单状态', {
         signal: signalObj.signal,
         signalId: signalObj.signalId,
-        ...formatVolatilityLogFields(volCtx),
       });
     }
   } catch (err) {
@@ -595,9 +444,8 @@ async function runCycle(cycleStartTs) {
         currentBet: mg.currentBet,
         isHalted: mg.isHalted,
       },
+      vegas: vegasState.getState(),
       dailyLossUsd: getDailyLossUsd(),
-      ...formatVolatilityLogFields(lastVolCtx),
-      ...formatSessionLogFields(lastSessionCtx),
       ...stats.formatLogFields(),
       error: cycleError,
       shutdownRequested,
@@ -613,38 +461,19 @@ function registerPendingBet({
   cycleStartTs,
   signal,
   actualBet,
-  tracks,
   orderId,
   limitPrice,
   entryPrice,
   fill,
-  activityTier,
-  activityHits,
-  volatility,
-  volRegime,
-  volRegimeReason,
 }) {
-  const openSnap = usesChainlinkSettlement()
-    ? getChainlinkOpenPrice(config.symbol, cycleStartTs)
-    : null;
-  const normalizedTracks = tracks?.length
-    ? tracks
-    : (actualBet > 0 ? [{ minOpenTier: activityTier, actualBet }] : []);
-
   pendingBet = {
     cycleStartTs,
     signal,
     actualBet,
-    tracks: normalizedTracks.length ? normalizedTracks : undefined,
-    targetPrice: openSnap?.price,
     orderId,
     limitPrice,
     entryPrice: entryPrice ?? fill?.entryPrice ?? limitPrice ?? null,
-    activityTier: activityTier ?? null,
-    activityHits: activityHits ?? null,
-    volatility: volatility ?? null,
-    volRegime: volRegime ?? null,
-    volRegimeReason: volRegimeReason ?? null,
+    fill: fill ?? null,
   };
   savePending();
   scheduleChainlinkSettlement(pendingBet);
@@ -653,12 +482,6 @@ function registerPendingBet({
     signal,
     actualBet,
     orderId,
-    targetPrice: pendingBet.targetPrice,
-    volRegime,
-    volRegimeReason,
-    rv_1m: volatility?.rv_1m ?? null,
-    rv_5m: volatility?.rv_5m ?? null,
-    rv_15m: volatility?.rv_15m ?? null,
   });
 }
 
@@ -729,37 +552,20 @@ async function applySettlement(pending, { candles } = {}) {
     });
   }
 
-  const {
-    signal, cycleStartTs, entryPrice, limitPrice,
-    activityTier: pendingActivityTier, activityHits,
-  } = pending;
+  const { signal, cycleStartTs, actualBet, entryPrice, limitPrice } = pending;
   const { won, winningOutcome, targetPrice, closePrice, settleDelta } = result;
   const side = signal === 'UP' ? '📈 UP' : '📉 DOWN';
   const windowLabel = formatBeijingTime(cycleStartTs);
   const sourceLabel = settleSourceLabel();
   const price = entryPrice ?? limitPrice ?? null;
 
-  const settleTier = resolveActivityTier(candles);
-  const tracks = pending.tracks?.length
-    ? pending.tracks
-    : [{ minOpenTier: pendingActivityTier ?? settleTier, actualBet: pending.actualBet }];
+  const { halted } = martingale.onSettled(won);
+  vegasState.onSettled(won, halted);
 
-  let halted = false;
-  if (!config.dryRun && tracks.length === 1) {
-    ({ halted } = martingale.onSettled(won, { activityTier: settleTier }));
-  }
+  const pnlUsd = stats.computeSettlementPnl(won, actualBet, price);
 
-  const trackResults = tracks.map((track) => ({
-    ...track,
-    pnlUsd: stats.computeSettlementPnl(won, track.actualBet, price),
-  }));
-  const totalPnl = trackResults.reduce((sum, tr) => sum + tr.pnlUsd, 0);
-
-  if (!won) recordLoss(trackResults.reduce((sum, tr) => sum + tr.actualBet, 0));
-  for (const tr of trackResults) {
-    stats.recordSettlement({ won, pnlUsd: tr.pnlUsd });
-    tierStats.recordMinOpenSettlement(tr.minOpenTier, { won, pnlUsd: tr.pnlUsd });
-  }
+  if (!won) recordLoss(actualBet);
+  stats.recordSettlement({ won, pnlUsd });
   if (halted) stats.recordStopLoss();
 
   logger.info(`[settle] ${sourceLabel} 结算结果`, {
@@ -770,53 +576,36 @@ async function applySettlement(pending, { candles } = {}) {
     signal,
     won,
     settleDelta,
-    totalPnl,
-    tracks: trackResults,
+    pnlUsd,
+    actualBet,
     martingaleHalted: halted,
-    activityTier: pendingActivityTier ?? settleTier,
-    settleTier,
     crossCheck: cross,
-    volRegime: pending.volRegime ?? null,
-    volRegimeReason: pending.volRegimeReason ?? null,
-    rv_1m: pending.volatility?.rv_1m ?? null,
-    rv_5m: pending.volatility?.rv_5m ?? null,
-    rv_15m: pending.volatility?.rv_15m ?? null,
     ...stats.formatLogFields(),
-    ...tierStats.formatLogFields(),
   });
 
   pendingBet = null;
   savePending();
 
-  for (const tr of trackResults) {
-    writeSettlementLog({
-      ts: new Date().toISOString(),
-      cycleStartTs,
-      signal,
-      actualBet: tr.actualBet,
-      minOpenTier: tr.minOpenTier,
-      entryPrice: price,
-      pnlUsd: tr.pnlUsd,
-      won,
-      winningOutcome,
-      targetPrice,
-      closePrice,
-      settleDelta,
-      settleSource: config.settleSource,
-      exchangeDirection: cross?.exchangeDirection ?? candleDirection(candle),
-      crossMismatch: cross?.mismatch ?? false,
-      martingaleHalted: halted,
-      activityTier: pendingActivityTier ?? settleTier,
-      settleTier,
-      activityHits: activityHits ?? null,
-      dryRun: config.dryRun,
-      volRegime: pending.volRegime ?? null,
-      volRegimeReason: pending.volRegimeReason ?? null,
-      rv_1m: pending.volatility?.rv_1m ?? null,
-      rv_5m: pending.volatility?.rv_5m ?? null,
-      rv_15m: pending.volatility?.rv_15m ?? null,
-    });
-  }
+  writeSettlementLog({
+    ts: new Date().toISOString(),
+    cycleStartTs,
+    timeframe: config.timeframe,
+    instanceId: config.instanceId,
+    signal,
+    actualBet,
+    entryPrice: price,
+    pnlUsd,
+    won,
+    winningOutcome,
+    targetPrice,
+    closePrice,
+    settleDelta,
+    settleSource: config.settleSource,
+    exchangeDirection: cross?.exchangeDirection ?? candleDirection(candle),
+    crossMismatch: cross?.mismatch ?? false,
+    martingaleHalted: halted,
+    dryRun: config.dryRun,
+  });
 
   const mg = martingale.getState();
   const balanceLine = await formatBalanceTelegramLine();
@@ -828,40 +617,27 @@ async function applySettlement(pending, { candles } = {}) {
     : '';
 
   const haltNote = halted
-    ? `\n⚠️ <b>马丁连亏止损</b> — 下周期跳过；首注已按档${mg.lockedTier} 更新为 $${mg.baseBet}`
-    : '';
+    ? `\n⚠️ <b>马丁连亏止损</b> — 等待通道外实体后再检测；首注已重置为 $${mg.baseBet}`
+    : won
+      ? `\n⏹ <b>链路结束</b> — 等待通道外实体后再检测`
+      : '';
 
   const priceLine = usesChainlinkSettlement()
     ? `目标价: $${targetPrice.toFixed(2)} → 收盘价: $${closePrice.toFixed(2)}\n`
     : `开盘: $${targetPrice.toFixed(2)} → 收盘: $${closePrice.toFixed(2)}\n`;
 
-  const trackLines = config.dryRun && trackResults.length > 1
-    ? `\n${trackResults.map((tr) =>
-      `≥档${tr.minOpenTier}: <b>${stats.formatPnlUsd(tr.pnlUsd)}</b> ($${tr.actualBet})`,
-    ).join('\n')}\n`
-    : '';
-
   await notifyTelegram(
-    `${resultEmoji} <b>结算${resultText}</b> (${sourceLabel})\n` +
+    `${tgHead(`${resultEmoji} <b>结算${resultText}</b> (${sourceLabel})`)}\n` +
     `窗口: ${windowLabel}\n` +
-    `下注: ${side}` +
-    (config.dryRun
-      ? ` · 活跃档<b>${pendingActivityTier ?? settleTier}</b> · 合计 <b>${stats.formatPnlUsd(totalPnl)}</b>\n`
-      : ` $${trackResults[0]?.actualBet ?? pending.actualBet}\n`) +
+    `周期: ${config.timeframe}\n` +
+    `下注: ${side} $${actualBet}\n` +
     priceLine +
     `结果: <b>${winningOutcome}</b> (Δ ${settleDelta >= 0 ? '+' : ''}${settleDelta.toFixed(2)})\n` +
-    trackLines +
-    (!config.dryRun
-      ? `本单盈亏: <b>${stats.formatPnlUsd(trackResults[0]?.pnlUsd ?? 0)}</b>\n`
-      : '') +
+    `本单盈亏: <b>${stats.formatPnlUsd(pnlUsd)}</b>\n` +
     mismatchNote + haltNote +
-    (config.dryRun
-      ? ''
-      : `下一注: <b>$${mg.currentBet}</b>  (首注 $${mg.baseBet} 档${mg.lockedTier} · 连败 ${mg.consecutiveLosses})\n`) +
+    `下一注: <b>$${mg.currentBet}</b>  (首注 $${mg.baseBet} · 连败 ${mg.consecutiveLosses})\n` +
     `今日亏损: $${getDailyLossUsd().toFixed(2)} / $${config.maxDailyLossUsd}\n` +
     balanceLine +
-    (pending.volRegimeReason ? `波动率: ${escapeHtml(pending.volRegimeReason)}` : '') +
-    formatVolatilityTelegramBlock(pending.volatility, pending.volRegime) +
     formatStatsTelegramBlock()
   );
 
@@ -869,7 +645,7 @@ async function applySettlement(pending, { candles } = {}) {
 }
 
 // ─────────────────────────────────────────
-// Scheduler: align to UTC 5m boundaries
+// Scheduler: align to UTC cycle boundaries (default 1h)
 // ─────────────────────────────────────────
 
 function nextCycleBoundary() {
@@ -889,52 +665,55 @@ async function sleepUntilShutdown(ms) {
 
 async function scheduler() {
   const signalOhlcv = describeOhlcvSource();
-  const volOhlcv = describeOhlcvSource(config.volatilityBarTimeframe);
+
+  martingale.init();
+  vegasState.init();
+  stats.init();
+  initDailyLoss();
+  loadPending();
 
   logger.info('▶ 机器人启动', {
     symbol: config.symbol,
     timeframe: config.timeframe,
+    instanceId: config.instanceId,
+    strategy: 'vegas_channel_ema144_169',
     signalOhlcv: {
       exchange: signalOhlcv.exchange,
       market: signalOhlcv.label,
       symbol: signalOhlcv.symbol,
       timeframe: signalOhlcv.timeframe,
     },
-    volatilityOhlcv: {
-      exchange: volOhlcv.exchange,
-      market: volOhlcv.label,
-      symbol: volOhlcv.symbol,
-      timeframe: volOhlcv.timeframe,
-    },
     dryRun: config.dryRun,
     cycleMinutes: config.cycleMinutes,
     signalDelayMs: config.signalDelayMs,
     cycleTimeoutMs: config.cycleTimeoutMs,
     settlement: config.settleSource,
-    volatilityStrategy: {
-      barTimeframe: config.volatilityBarTimeframe,
-      mode: 'k_minus1_follow',
-    },
-    sessionGate: {
-      enabled: config.sessionGate.enabled,
-      state: sessionCtx.sessionState,
-    },
+    vegas: vegasState.getState(),
     ...stats.formatLogFields(),
   });
 
-  martingale.init();
-  stats.init();
-  tierStats.init();
-  initDailyLoss();
-  loadPending();
-  sessionCtx = loadSessionState();
-  if (!config.sessionGate.enabled) {
-    sessionCtx = {
-      ...sessionCtx,
-      sessionState: 'ACTIVE',
-      tradeAllowed: true,
-    };
+  const tfMin = (() => {
+    const m = String(config.timeframe).match(/^(\d+)(m|h)$/i);
+    if (!m) return null;
+    const n = Number(m[1]);
+    return m[2].toLowerCase() === 'h' ? n * 60 : n;
+  })();
+  if (tfMin != null && tfMin !== config.cycleMinutes) {
+    logger.warn('[main] CANDLE_TIMEFRAME 与 MARKET_CYCLE_MINUTES 不一致 — 请检查配置', {
+      timeframe: config.timeframe,
+      cycleMinutes: config.cycleMinutes,
+      expectedMinutes: tfMin,
+    });
   }
+
+  await notifyTelegram(
+    `${tgHead('▶ <b>机器人启动</b>')}\n` +
+    `标的: ${config.symbol}\n` +
+    `周期: ${config.timeframe} (${config.cycleMinutes}m)\n` +
+    `实例: ${config.instanceId}\n` +
+    `模式: ${config.dryRun ? 'DRY_RUN' : 'LIVE'}\n` +
+    `马丁: $${config.tradeBudgetUsd} ×${config.martingaleMultiplier} / 连亏${config.martingaleMaxLosses}`
+  );
 
   initChainlinkSettler({
     getPendingBet: () => pendingBet,
@@ -950,15 +729,9 @@ async function scheduler() {
       cycleStartTs: ctx.cycleStartTs,
       signal: ctx.signal,
       actualBet: ctx.actualBet,
-      tracks: ctx.minOpenTracks ?? null,
       orderId: ctx.orderId,
       limitPrice: ctx.limitPrice,
       fill: ctx.fill,
-      activityTier: ctx.entryTier ?? ctx.activityTier,
-      activityHits: ctx.activityHits,
-      volatility: ctx.volatility,
-      volRegime: ctx.volRegime,
-      volRegimeReason: ctx.volRegimeReason,
     });
 
     const side = ctx.signal === 'UP' ? '📈 买涨 UP' : '📉 买跌 DOWN';
@@ -970,15 +743,14 @@ async function scheduler() {
       amountUsdc: ctx.actualBet,
     });
     await notifyTelegram(
-      `🤖 <b>限价单成交</b>\n` +
+      `${tgHead('🤖 <b>限价单成交</b>')}\n` +
       `方向: <b>${side}</b> (${ctx.signalId ?? '—'})\n` +
+      `周期: ${config.timeframe}\n` +
       (ctx.signalReason ? `原因: ${escapeHtml(ctx.signalReason)}\n` : '') +
       priceOdds +
       `金额: <b>${escapeHtml(fillNote || `$${ctx.actualBet.toFixed(2)}`)}</b>\n` +
       `窗口: ${formatBeijingTime(ctx.cycleStartTs)}\n` +
       await formatBalanceTelegramLine() +
-      (ctx.volRegimeReason ? `波动率: ${escapeHtml(ctx.volRegimeReason)}` : '') +
-      formatVolatilityTelegramBlock(ctx.volatility, ctx.volRegime) +
       formatStatsTelegramBlock()
     );
   });
@@ -986,7 +758,7 @@ async function scheduler() {
   if (usesChainlinkSettlement()) {
     await startRtdsBuffer([config.symbol]);
   } else {
-    logger.info('[settle] 使用 OKX 永续 5m K 线结算，Chainlink RTDS 已跳过');
+    logger.info(`[settle] 使用 OKX 永续 ${config.timeframe} K 线结算，Chainlink RTDS 已跳过`);
   }
   startChainlinkSettler();
 
@@ -1006,7 +778,6 @@ async function scheduler() {
       pendingBet: {
         cycleStartTs: pendingBet.cycleStartTs,
         signal: pendingBet.signal,
-        targetPrice: pendingBet.targetPrice,
       },
     });
   }

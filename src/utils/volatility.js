@@ -58,7 +58,7 @@ function computeRvForWindow(closePrices, barsNeeded) {
   return round(sampleStd(returns), 8);
 }
 
-/** rv_5m / rv_15m — short-term vol spike vs 15m baseline */
+/** rv_5m / rv_15m — short-term vol vs 15m baseline (logging / backtests only) */
 export function computeRvRatio(signalVol) {
   const rv5 = signalVol?.rv_5m;
   const rv15 = signalVol?.rv_15m;
@@ -71,7 +71,7 @@ export function computeRvRatio(signalVol) {
  * @param {Array<{ close: number }>} candles
  * @param {string} [barTimeframe] defaults to config.volatilityBarTimeframe
  */
-export function computeSignalVolatility(candles, barTimeframe = config.volatilityBarTimeframe) {
+export function computeSignalVolatility(candles, barTimeframe = config.volatilityBarTimeframe ?? '1m') {
   const barMinutes = parseTimeframeMinutes(barTimeframe);
   const windows = buildWindowBars(barMinutes);
   const closePrices = Array.isArray(candles)
@@ -93,110 +93,21 @@ function formatRvValue(value) {
   return Number(value).toFixed(6);
 }
 
-/**
- * Classify volatility regime for strategy direction.
- * High: rv_5m >= RV_5M_THRESHOLD OR rv_15m >= RV_15M_THRESHOLD → continuation
- * Low:  rv_5m < RV_5M_THRESHOLD AND rv_15m < RV_15M_THRESHOLD → reversal
- * Partial sample: default to high (continuation)
- * @returns {{ regime: 'high' | 'low', reason: string, partial?: boolean }}
- */
-export function classifyVolatilityRegime(signalVol) {
-  const thresh5 = config.rv5mThreshold;
-  const thresh15 = config.rv15mThreshold;
-  const rv5 = signalVol?.rv_5m;
-  const rv15 = signalVol?.rv_15m;
-
-  const highBy5 = rv5 != null && rv5 >= thresh5;
-  const highBy15 = rv15 != null && rv15 >= thresh15;
-
-  if (highBy5 || highBy15) {
-    const trigger = [
-      highBy5 ? `rv_5m=${formatRvValue(rv5)} 不低于 ${thresh5}` : null,
-      highBy15 ? `rv_15m=${formatRvValue(rv15)} 不低于 ${thresh15}` : null,
-    ].filter(Boolean).join(' 或 ');
-    return {
-      regime: 'high',
-      reason: `${trigger} → 高波动延续`,
-    };
-  }
-
-  const lowBy5 = rv5 != null && rv5 < thresh5;
-  const lowBy15 = rv15 != null && rv15 < thresh15;
-
-  if (lowBy5 && lowBy15) {
-    return {
-      regime: 'low',
-      reason: `rv_5m=${formatRvValue(rv5)} 低于 ${thresh5} 且 rv_15m=${formatRvValue(rv15)} 低于 ${thresh15} → 低波动反转`,
-    };
-  }
-
-  return {
-    regime: 'high',
-    reason: `rv 样本不完整 (rv_5m=${formatRvValue(rv5)}, rv_15m=${formatRvValue(rv15)})，默认高波动延续`,
-    partial: true,
-  };
-}
-
-/**
- * @deprecated Per-trade rv_ratio skip removed from production.
- * Scheme A: on high-vol continuation only, skip when rv_ratio spikes (chop fake continuation).
- * @param {ReturnType<typeof import('../strategy/reversalContinuation.js').buildSignal>} signalObj
- * @param {{ regime?: string, rv?: object }} volCtx
- */
-export function filterHighVolContinuationSignal(signalObj, volCtx) {
-  if (!signalObj || signalObj.signal === 'NONE' || volCtx?.regime !== 'high') {
-    return signalObj;
-  }
-
-  const maxRatio = config.rvRatioMax;
-  if (!Number.isFinite(maxRatio) || maxRatio <= 0) {
-    return signalObj;
-  }
-
-  const rvRatio = computeRvRatio(volCtx.rv);
-  if (rvRatio == null) {
-    return signalObj;
-  }
-
-  if (rvRatio >= maxRatio) {
-    return {
-      ...signalObj,
-      signal: 'NONE',
-      signalId: null,
-      reason: `${signalObj.reason} → rv_ratio=${rvRatio.toFixed(4)} ≥ ${maxRatio}，跳过震荡假延续`,
-      filterSkipReason: 'rv_ratio_spike',
-      rv_ratio: rvRatio,
-    };
-  }
-
-  return { ...signalObj, rv_ratio: rvRatio };
-}
-
-const REGIME_ZH = { high: '高波动·延续', low: '低波动·反转' };
-
-/** Structured fields for logger / heartbeat / jsonl */
-export function formatLogFields(volCtx, signalObj = null) {
+/** Structured fields for logger / heartbeat / jsonl (metrics only — no regime switch) */
+export function formatLogFields(volCtx) {
   if (!volCtx) return {};
-  const rvRatio = signalObj?.rv_ratio ?? computeRvRatio(volCtx.rv);
   return {
-    volRegime: volCtx.regime ?? null,
-    volRegimeReason: volCtx.regimeReason ?? null,
     rv_1m: volCtx.rv?.rv_1m ?? null,
     rv_5m: volCtx.rv?.rv_5m ?? null,
     rv_15m: volCtx.rv?.rv_15m ?? null,
-    rv_ratio: rvRatio,
-    rvRatioMax: config.rvRatioMax,
-    rv5mThreshold: config.rv5mThreshold,
-    rv15mThreshold: config.rv15mThreshold,
-    filterSkipReason: signalObj?.filterSkipReason ?? null,
-    volBarTimeframe: volCtx.rv?.barTimeframe ?? config.volatilityBarTimeframe,
+    rv_ratio: computeRvRatio(volCtx.rv),
+    volBarTimeframe: volCtx.rv?.barTimeframe ?? config.volatilityBarTimeframe ?? '1m',
   };
 }
 
 /** Compact snapshot persisted on pending bet for settlement notifications */
-export function snapshotForPending(volCtx, signalObj = null) {
+export function snapshotForPending(volCtx) {
   if (!volCtx) return {};
-  const rvRatio = signalObj?.rv_ratio ?? computeRvRatio(volCtx.rv);
   return {
     volatility: volCtx.rv
       ? {
@@ -204,38 +115,20 @@ export function snapshotForPending(volCtx, signalObj = null) {
           rv_1m: volCtx.rv.rv_1m,
           rv_5m: volCtx.rv.rv_5m,
           rv_15m: volCtx.rv.rv_15m,
-          rv_ratio: rvRatio,
+          rv_ratio: computeRvRatio(volCtx.rv),
         }
       : null,
-    volRegime: volCtx.regime ?? null,
-    volRegimeReason: volCtx.regimeReason ?? null,
-    filterSkipReason: signalObj?.filterSkipReason ?? null,
   };
 }
 
-function formatRvLine(field, value, threshold) {
-  const v = formatRvValue(value);
-  if (threshold == null) return `${field}: <b>${v}</b>`;
-  return `${field}: <b>${v}</b> (阈值 ${threshold})`;
-}
-
 /** Telegram HTML block for order / settlement context */
-export function formatTelegramBlock(rv, volRegime) {
+export function formatTelegramBlock(rv) {
   if (!rv) return '\n📉 <b>波动率</b>: 暂无数据';
 
-  const regimeLine = volRegime
-    ? `\n模式: <b>${REGIME_ZH[volRegime] ?? volRegime}</b>`
-    : '';
-
   return (
-    `\n📉 <b>波动率</b> (${rv.barTimeframe})${regimeLine}\n` +
-    `${formatRvLine('rv_1m', rv.rv_1m, null)}\n` +
-    `${formatRvLine('rv_5m', rv.rv_5m, config.rv5mThreshold)}\n` +
-    `${formatRvLine('rv_15m', rv.rv_15m, config.rv15mThreshold)}` +
-    (() => {
-      const ratio = computeRvRatio(rv);
-      if (ratio == null || config.rvRatioMax <= 0) return '';
-      return `\nrv_ratio: <b>${ratio.toFixed(4)}</b> (上限 ${config.rvRatioMax})`;
-    })()
+    `\n📉 <b>波动率</b> (${rv.barTimeframe})\n` +
+    `rv_1m: <b>${formatRvValue(rv.rv_1m)}</b>\n` +
+    `rv_5m: <b>${formatRvValue(rv.rv_5m)}</b>\n` +
+    `rv_15m: <b>${formatRvValue(rv.rv_15m)}</b>`
   );
 }

@@ -3,6 +3,9 @@ import { computeActivityFreq } from './sessionGate.js';
 
 export const ACTIVITY_TIER_COUNT = 12;
 
+const DEFAULT_TIER_BETS = [3, 3, 3, 3, 3, 3, 3, 3, 6, 9, 15, 24];
+const DEFAULT_MIN_OPEN_TIERS = [8, 9, 10, 11, 12];
+
 /**
  * Map probe-line hit count (0..windowBars) → tier 1..12.
  * 0 hits → tier 1 (最低活跃), 11+ hits → tier 12.
@@ -20,26 +23,37 @@ export function resolveActivityTier(candles5m) {
   return hitsToActivityTier(activity.hits);
 }
 
-/** First-bet USD for tier 1..12 (from ACTIVITY_TIER_BETS). */
+function tierBets() {
+  const bets = config.activityTierBets;
+  if (Array.isArray(bets) && bets.length >= ACTIVITY_TIER_COUNT) return bets;
+  return DEFAULT_TIER_BETS;
+}
+
+function minOpenTiers() {
+  const tiers = config.minOpenTiers;
+  if (Array.isArray(tiers) && tiers.length > 0) return tiers;
+  return DEFAULT_MIN_OPEN_TIERS;
+}
+
+/** First-bet USD for tier 1..12 (offline backtests). */
 export function getBetForActivityTier(tier) {
   const idx = Math.min(ACTIVITY_TIER_COUNT, Math.max(1, Math.round(tier))) - 1;
-  const bets = config.activityTierBets;
-  return bets[idx] ?? config.tradeBudgetUsd;
+  return tierBets()[idx] ?? config.tradeBudgetUsd;
 }
 
 /** Lowest configured min-open tier (default 8). */
 export function minOpenTierFloor() {
-  const tiers = config.minOpenTiers;
+  const tiers = minOpenTiers();
   return tiers.length ? Math.min(...tiers) : ACTIVITY_TIER_COUNT;
 }
 
 /** Min-open tiers eligible when current activity tier is T. */
 export function getEligibleMinOpenTiers(activityTier) {
   const t = Math.round(Number(activityTier)) || 0;
-  return config.minOpenTiers.filter((m) => t >= m);
+  return minOpenTiers().filter((m) => t >= m);
 }
 
-/** Virtual tracks for dry-run: one bet per eligible min-open tier. */
+/** Virtual tracks for dry-run backtests: one bet per eligible min-open tier. */
 export function buildMinOpenTracks(activityTier, balance) {
   return getEligibleMinOpenTiers(activityTier)
     .map((minOpenTier) => ({

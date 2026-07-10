@@ -1,51 +1,62 @@
 /**
- * PM2 进程管理配置
- * 模拟盘: pm2 start ecosystem.config.cjs --env dry
- * 实盘:   pm2 start ecosystem.config.cjs --env live
- * 查看:   pm2 logs V3
+ * PM2 — 5m + 15m + 1h Vegas bots in parallel (same wallet / .env credentials)
+ *
+ * 模拟盘: npm run pm2:dry
+ * 实盘:   npm run pm2:start
+ * 日志:   pm2 logs
+ * 停止:   npm run pm2:stop
  */
+const shared = {
+  script: 'src/index.js',
+  cwd: __dirname,
+  instances: 1,
+  autorestart: true,
+  watch: false,
+  max_memory_restart: '500M',
+  merge_logs: true,
+  time: true,
+};
+
+const martingale = {
+  TRADE_BUDGET_USD: '3',
+  MARTINGALE_MULTIPLIER: '3',
+  MARTINGALE_MAX_LOSSES: '5',
+  OHLCV_EXCHANGE: 'okx',
+  OHLCV_MARKET_TYPE: 'swap',
+  ORDER_TYPE: 'GTC',
+  SETTLE_SOURCE: 'okx',
+  CANDLE_FETCH_LIMIT: '200',
+};
+
+function app(name, tf, minutes) {
+  const env = {
+    BOT_INSTANCE: tf,
+    CANDLE_TIMEFRAME: tf,
+    MARKET_CYCLE_MINUTES: String(minutes),
+    ...martingale,
+  };
+  return {
+    ...shared,
+    name,
+    error_file: `logs/pm2-${tf}-error.log`,
+    out_file: `logs/pm2-${tf}-out.log`,
+    env_dry: {
+      NODE_ENV: 'production',
+      DRY_RUN: 'true',
+      ...env,
+    },
+    env_live: {
+      NODE_ENV: 'production',
+      DRY_RUN: 'false',
+      ...env,
+    },
+  };
+}
+
 module.exports = {
   apps: [
-    {
-      name: 'V3',
-      script: 'src/index.js',
-      cwd: __dirname,
-      instances: 1,
-      autorestart: true,
-      watch: false,
-      max_memory_restart: '500M',
-      error_file: 'logs/pm2-error.log',
-      out_file: 'logs/pm2-out.log',
-      merge_logs: true,
-      time: true,
-      env_dry: {
-        NODE_ENV: 'production',
-        DRY_RUN: 'true',
-        OHLCV_EXCHANGE: 'okx',
-        OHLCV_MARKET_TYPE: 'swap',
-        ORDER_TYPE: 'GTC',
-        SETTLE_SOURCE: 'okx',
-        SESSION_GATE_ENABLED: 'true',
-        ACTIVITY_PROBE_USDT_MIN: '30000000',
-        ACTIVITY_MIN_HITS: '11',
-        ACTIVITY_TIER_BETS: '3,3,3,3,3,3,3,3,6,9,15,24',
-        MIN_OPEN_TIERS: '8,9,10,11,12',
-        TRADE_BUDGET_USD: '3',
-      },
-      env_live: {
-        NODE_ENV: 'production',
-        DRY_RUN: 'false',
-        OHLCV_EXCHANGE: 'okx',
-        OHLCV_MARKET_TYPE: 'swap',
-        ORDER_TYPE: 'GTC',
-        SETTLE_SOURCE: 'okx',
-        SESSION_GATE_ENABLED: 'true',
-        ACTIVITY_PROBE_USDT_MIN: '30000000',
-        ACTIVITY_MIN_HITS: '11',
-        ACTIVITY_TIER_BETS: '3,3,3,3,3,3,3,3,6,9,15,24',
-        MIN_OPEN_TIERS: '8,9,10,11,12',
-        TRADE_BUDGET_USD: '3',
-      },
-    },
+    app('V3-5m', '5m', 5),
+    app('V3-15m', '15m', 15),
+    app('V3-1h', '1h', 60),
   ],
 };

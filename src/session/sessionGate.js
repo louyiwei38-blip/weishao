@@ -612,7 +612,7 @@ export function formatSessionTelegramBlock(sessionCtx) {
   const activityLine = burst?.activityHits != null
     ? `\n活跃: <b>${burst.activityHits}/${burst.activityWindowBars}</b> (${Math.round((burst.activityFreq ?? 0) * 100)}%)` +
       (config.dryRun
-        ? ` · 最低开单 <b>≥档${minFloor}</b> (档${config.minOpenTiers.join('/')} 并行统计)`
+        ? ` · 最低开单 <b>≥档${minFloor}</b>`
         : ` · 需 ≥ <b>${minHits}</b> 根`) +
       ` · 当前档<b>${burst.activityTier ?? '—'}</b> ($${burst.tierBaseBet ?? '—'})`
     : '';

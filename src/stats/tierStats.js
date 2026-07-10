@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+﻿import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -11,13 +11,21 @@ const LOGS_DIR = join(__dirname, '..', '..', 'logs');
 const STATE_FILE = join(LOGS_DIR, 'min-open-tier-stats-state.json');
 const SETTLE_LOG = join(LOGS_DIR, 'settlements.jsonl');
 
+const DEFAULT_MIN_OPEN_TIERS = [8, 9, 10, 11, 12];
+
+function configuredMinOpenTiers() {
+  return Array.isArray(config.minOpenTiers) && config.minOpenTiers.length > 0
+    ? config.minOpenTiers
+    : DEFAULT_MIN_OPEN_TIERS;
+}
+
 function emptyBucket() {
   return { trades: 0, wins: 0, losses: 0, pnlUsd: 0 };
 }
 
 function emptyState() {
   const byMinOpenTier = {};
-  for (const t of config.minOpenTiers) byMinOpenTier[t] = emptyBucket();
+  for (const t of configuredMinOpenTiers()) byMinOpenTier[t] = emptyBucket();
   return { byMinOpenTier, updatedAt: null };
 }
 
@@ -33,7 +41,7 @@ function persist() {
 function clampMinOpenTier(tier) {
   const t = Math.round(Number(tier));
   if (!Number.isFinite(t)) return null;
-  if (!config.minOpenTiers.includes(t)) return null;
+  if (!configuredMinOpenTiers().includes(t)) return null;
   return t;
 }
 
@@ -55,7 +63,7 @@ function applyEntry(minOpenTier, { won, pnlUsd }) {
 
 function resolveMinOpenTier(entry) {
   if (entry.minOpenTier != null) return entry.minOpenTier;
-  if (entry.entryTier != null && config.minOpenTiers.includes(entry.entryTier)) {
+  if (entry.entryTier != null && configuredMinOpenTiers().includes(entry.entryTier)) {
     return entry.entryTier;
   }
   return null;
@@ -96,7 +104,7 @@ function rebuildFromSettlements() {
 
   persist();
   if (count > 0) {
-    logger.info('[minOpenTierStats] 已从 settlements 回填最低开单档统计', { entries: count });
+    logger.info('[minOpenTierStats] rebuilt from settlements', { entries: count });
   }
 }
 
@@ -104,7 +112,7 @@ export function init() {
   if (existsSync(STATE_FILE)) {
     try {
       state = { ...emptyState(), ...JSON.parse(readFileSync(STATE_FILE, 'utf8')) };
-      for (const t of config.minOpenTiers) {
+      for (const t of configuredMinOpenTiers()) {
         state.byMinOpenTier[t] = { ...emptyBucket(), ...state.byMinOpenTier[t] };
       }
       return;
@@ -118,7 +126,7 @@ export function init() {
 export function recordMinOpenSettlement(minOpenTier, { won, pnlUsd } = {}) {
   applyEntry(minOpenTier, { won, pnlUsd });
   persist();
-  logger.info('[minOpenTierStats] 最低开单档结算', {
+  logger.info('[minOpenTierStats] settlement', {
     minOpenTier: clampMinOpenTier(minOpenTier),
     won,
     pnlUsd,
@@ -137,28 +145,28 @@ function winRatePct(wins, losses) {
   return n > 0 ? (wins / n) * 100 : 0;
 }
 
-/** Telegram block: min-open tiers 8–12 */
+/** Telegram block for offline min-open tier stats (not used by live bot). */
 export function formatTelegramBlock() {
   const rows = [];
-  for (const t of config.minOpenTiers) {
+  for (const t of configuredMinOpenTiers()) {
     const b = state.byMinOpenTier[t];
     if (!b || b.trades === 0) continue;
     const wr = winRatePct(b.wins, b.losses);
     rows.push(
-      `≥档<b>${t}</b>: ${b.trades}笔 ${formatPnlUsd(b.pnlUsd)} ` +
-      `${wr.toFixed(0)}% (${b.wins}胜/${b.losses}输)`,
+      `tier <b>${t}</b>: ${b.trades} · ${formatPnlUsd(b.pnlUsd)} ` +
+      `${wr.toFixed(0)}% (${b.wins}W/${b.losses}L)`,
     );
   }
   if (rows.length === 0) {
-    return '\n📈 <b>最低开单档统计</b>: 暂无成交';
+    return '\n📊 <b>min-open tiers</b>: none';
   }
-  return `\n📈 <b>最低开单档统计</b>\n${rows.join('\n')}`;
+  return `\n📊 <b>min-open tiers</b>\n${rows.join('\n')}`;
 }
 
 export function formatLogFields() {
   const snap = getSnapshot();
   const active = {};
-  for (const t of config.minOpenTiers) {
+  for (const t of configuredMinOpenTiers()) {
     const b = snap.byMinOpenTier[t];
     if (b?.trades > 0) {
       active[t] = {
@@ -176,10 +184,10 @@ export function formatLogFields() {
 export function formatTracksLine(tracks, { activityTier, activityHits } = {}) {
   if (!tracks?.length) return '';
   const parts = tracks.map(
-    (tr) => `≥${tr.minOpenTier}档 $${tr.actualBet.toFixed(2)}`,
+    (tr) => `>=${tr.minOpenTier} $${tr.actualBet.toFixed(2)}`,
   );
   const head = activityTier != null
-    ? `当前活跃档<b>${activityTier}</b> (${activityHits ?? '—'}/12)\n`
+    ? `tier <b>${activityTier}</b> (${activityHits ?? '—'}/12)\n`
     : '';
-  return `${head}并行: ${parts.join(' · ')}`;
+  return `${head}tracks: ${parts.join(' · ')}`;
 }
