@@ -1,8 +1,10 @@
 /**
- * PM2 — 5m + 15m + 1h Vegas bots in parallel (same wallet / .env credentials)
+ * PM2 — BTC + ETH × (5m + 15m + 1h) 六实例并行（同一钱包 / .env 凭证）
  *
  * 模拟盘: npm run pm2:dry
  * 实盘:   npm run pm2:start
+ * 仅 ETH: npm run pm2:eth:dry / pm2:eth:start
+ * 仅 BTC: npm run pm2:btc:dry / pm2:btc:start
  * 日志:   pm2 logs
  * 停止:   npm run pm2:stop
  *
@@ -21,17 +23,20 @@ const shared = {
   time: true,
 };
 
-function app(name, tf, minutes) {
+/** @param {'BTC'|'ETH'} base @param {'5m'|'15m'|'1h'} tf @param {number} minutes */
+function app(base, tf, minutes) {
+  const id = `${base.toLowerCase()}-${tf}`;
   const env = {
-    BOT_INSTANCE: tf,
+    BOT_INSTANCE: id,
     CANDLE_TIMEFRAME: tf,
     MARKET_CYCLE_MINUTES: String(minutes),
+    TRADING_SYMBOL: `${base}/USDT`,
   };
   return {
     ...shared,
-    name,
-    error_file: `logs/pm2-${tf}-error.log`,
-    out_file: `logs/pm2-${tf}-out.log`,
+    name: `V3-${id}`,
+    error_file: `logs/pm2-${id}-error.log`,
+    out_file: `logs/pm2-${id}-out.log`,
     env_dry: {
       NODE_ENV: 'production',
       DRY_RUN: 'true',
@@ -45,10 +50,16 @@ function app(name, tf, minutes) {
   };
 }
 
+const TIMEFRAMES = [
+  ['5m', 5],
+  ['15m', 15],
+  ['1h', 60],
+];
+
+const SYMBOLS = ['BTC', 'ETH'];
+
 module.exports = {
-  apps: [
-    app('V3-5m', '5m', 5),
-    app('V3-15m', '15m', 15),
-    app('V3-1h', '1h', 60),
-  ],
+  apps: SYMBOLS.flatMap((base) =>
+    TIMEFRAMES.map(([tf, minutes]) => app(base, tf, minutes)),
+  ),
 };

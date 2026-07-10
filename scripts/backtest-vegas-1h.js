@@ -3,8 +3,8 @@
  *
  * Usage:
  *   node scripts/backtest-vegas-1h.js --timeframe=15m --from=2020-01-01
- *   node scripts/backtest-vegas-1h.js --timeframe=5m --from=2020-01-01
- *   node scripts/backtest-vegas-1h.js --timeframe=1h --from=2020-01-01
+ *   node scripts/backtest-vegas-1h.js --timeframe=5m --from=2020-01-01 --symbol=ETH/USDT
+ *   node scripts/backtest-vegas-1h.js --timeframe=1h --from=2020-01-01 --symbol=ETH/USDT
  */
 import ccxt from 'ccxt';
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs';
@@ -21,8 +21,6 @@ import { computeNetSettlementPnl } from './lib/polymarketFees.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = join(__dirname, '..', 'logs');
-
-const SYMBOL = 'BTC/USDT:USDT';
 
 const TF_MS = {
   '1m': 60_000,
@@ -48,6 +46,14 @@ function argBool(name, fallback) {
   return hit.split('=')[1].toLowerCase() !== 'false';
 }
 
+/** spot-style ETH/USDT → swap ETH/USDT:USDT */
+function resolveSwapSymbol(raw) {
+  if (!raw) return 'ETH/USDT:USDT';
+  if (raw.includes(':')) return raw;
+  const [base, quote = 'USDT'] = raw.split('/');
+  return `${base}/${quote}:USDT`;
+}
+
 const TIMEFRAME = argStr('timeframe', '1h');
 const BAR_MS = TF_MS[TIMEFRAME];
 if (!BAR_MS) {
@@ -55,6 +61,8 @@ if (!BAR_MS) {
   process.exit(1);
 }
 
+const SYMBOL = resolveSwapSymbol(argStr('symbol', 'ETH/USDT'));
+const SYMBOL_BASE = SYMBOL.split('/')[0].toLowerCase();
 const FROM_ARG = argStr('from');
 const DAYS = argNum('days', 365);
 const BASE_BET = argNum('base', 3);
@@ -63,7 +71,7 @@ const MAX_LOSSES = argNum('maxLosses', 5);
 const ENTRY_PRICE = argNum('entry', 0.5);
 const USE_FEE = argBool('fee', true);
 const FORCE_FETCH = process.argv.includes('--force');
-const CACHE_FILE = join(OUT_DIR, `ohlcv-${TIMEFRAME}-okx-swap-cache.json`);
+const CACHE_FILE = join(OUT_DIR, `ohlcv-${TIMEFRAME}-okx-swap-${SYMBOL_BASE}-cache.json`);
 
 function resolveRange() {
   const toMs = Date.now();
@@ -366,6 +374,7 @@ async function main() {
   const { fromMs, toMs, label } = resolveRange();
 
   console.log('=== Vegas channel backtest ===');
+  console.log(`Symbol: ${SYMBOL}`);
   console.log(`Timeframe: ${TIMEFRAME}`);
   console.log(`Period: ${label}`);
   console.log(`Base $${BASE_BET} ×${MULT} maxLosses=${MAX_LOSSES} entry=${ENTRY_PRICE} fee=${USE_FEE}`);
