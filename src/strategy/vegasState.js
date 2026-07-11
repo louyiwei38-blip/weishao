@@ -2,6 +2,8 @@
  * Vegas strategy phase state machine (persisted).
  *
  *   need_outside → armed → in_chain → need_outside (win or max-loss halt)
+ *
+ * Channel bands are fetched from OKX indicators API (EMA144/169).
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
@@ -10,12 +12,12 @@ import { fileURLToPath } from 'url';
 import config from '../config.js';
 import logger from '../utils/logger.js';
 import { scopedLogPath } from '../utils/instancePaths.js';
+import { fetchOkxVegasBands } from '../collector/okxIndicators.js';
 import {
   buildSignal,
-  vegasBands,
   evaluateVegasEntryAt,
   bodyOutsideAt,
-  EMA_SLOW,
+  MIN_SIGNAL_CANDLES,
 } from './vegasChannel.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -89,11 +91,11 @@ export function getState() {
 }
 
 /**
- * Resolve this cycle's trade signal from phase + candles.
+ * Resolve this cycle's trade signal from phase + candles + OKX EMA.
  * @param {object[]} candles
- * @returns {object} signal object (buildSignal shape) + phase meta
+ * @returns {Promise<object>} signal object (buildSignal shape) + phase meta
  */
-export function resolveSignal(candles) {
+export async function resolveSignal(candles) {
   const s = entry();
   const symbol = config.symbol;
   const timeframe = config.timeframe;
@@ -124,11 +126,11 @@ export function resolveSignal(candles) {
     return signalObj;
   }
 
-  if (!candles || candles.length < EMA_SLOW + 1 || iCurr < 1) {
+  if (!candles || candles.length < MIN_SIGNAL_CANDLES || iCurr < 1) {
     const signalObj = buildSignal(candles, symbol, timeframe, {
       signal: 'NONE',
       signalId: null,
-      reason: `K 线不足（需 ≥ ${EMA_SLOW + 1}）`,
+      reason: `K 线不足（需 ≥ ${MIN_SIGNAL_CANDLES}）`,
       bands: null,
       prevOutside: null,
       kMinus2: null,
@@ -139,8 +141,24 @@ export function resolveSignal(candles) {
     return signalObj;
   }
 
-  // Single EMA pass per cycle
-  const bands = vegasBands(candles);
+  let bands;
+  try {
+    bands = await fetchOkxVegasBands(candles, { limit: 30 });
+  } catch (err) {
+    logger.error('[vegas] OKX EMA 拉取失败', { error: err?.message });
+    const signalObj = buildSignal(candles, symbol, timeframe, {
+      signal: 'NONE',
+      signalId: null,
+      reason: `OKX EMA 拉取失败: ${err?.message ?? err}`,
+      bands: null,
+      prevOutside: null,
+      kMinus2: candles.at(-2) ?? null,
+      kMinus1: candles.at(-1) ?? null,
+    });
+    signalObj.phase = s.phase;
+    signalObj.lockedSignal = null;
+    return signalObj;
+  }
 
   if (s.phase === 'need_outside') {
     const check = bodyOutsideAt(candles, bands, iCurr);
@@ -154,13 +172,16 @@ export function resolveSignal(candles) {
         outsideSeenAt: s.outsideSeenAt,
         upper: check.bands?.upper,
         lower: check.bands?.lower,
+        source: 'okx_ema',
       });
       // Fall through to armed evaluation in the same cycle
     } else {
       const signalObj = buildSignal(candles, symbol, timeframe, {
         signal: 'NONE',
         signalId: null,
-        reason: '等待至少一根 K 线实体完全在维加斯通道外',
+        reason: check.bands
+          ? '等待至少一根 K 线实体完全在维加斯通道外'
+          : 'OKX EMA 未对齐到当前 K 线，等待下一周期',
         bands: check.bands,
         prevOutside: null,
         kMinus2: candles.at(-2) ?? null,
@@ -182,6 +203,7 @@ export function resolveSignal(candles) {
       signal: evaluation.signal,
       signalId: evaluation.signalId,
       reason: evaluation.reason,
+      source: 'okx_ema',
     });
 
     const signalObj = buildSignal(candles, symbol, timeframe, evaluation);

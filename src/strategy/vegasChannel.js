@@ -1,7 +1,8 @@
 /**
- * Vegas channel (EMA144 / EMA169) cross-entry strategy for 1h Polymarket up/down.
+ * Vegas channel (EMA144 / EMA169) cross-entry strategy.
  *
- *   Channel: lower = min(EMA144, EMA169), upper = max(EMA144, EMA169)
+ * Channel bands come from OKX indicators API (see collector/okxIndicators.js):
+ *   upper = max(EMA144, EMA169), lower = min(EMA144, EMA169)
  *   Body above: min(open, close) > upper
  *   Body below: max(open, close) < lower
  *   From above: prev body above + curr low <= upper  → UP
@@ -13,49 +14,20 @@ import logger from '../utils/logger.js';
 export const EMA_FAST = 144;
 export const EMA_SLOW = 169;
 
-/**
- * Standard EMA series (null until period bars available).
- * @param {number[]} closes
- * @param {number} period
- * @returns {(number|null)[]}
- */
-export function computeEma(closes, period) {
-  const out = new Array(closes.length).fill(null);
-  if (closes.length < period) return out;
-
-  const k = 2 / (period + 1);
-  let sum = 0;
-  for (let i = 0; i < period; i++) sum += closes[i];
-  let ema = sum / period;
-  out[period - 1] = ema;
-
-  for (let i = period; i < closes.length; i++) {
-    ema = closes[i] * k + ema * (1 - k);
-    out[i] = ema;
-  }
-  return out;
-}
+/** Minimum closed candles needed once OKX EMA is available (prev + curr). */
+export const MIN_SIGNAL_CANDLES = 2;
 
 /**
- * @param {{ open: number, high: number, low: number, close: number, t?: number }[]} candles
- * @returns {({ ema144: number, ema169: number, upper: number, lower: number }|null)[]}
+ * @param {number} ema144
+ * @param {number} ema169
  */
-export function vegasBands(candles) {
-  const closes = candles.map((c) => c.close);
-  const ema144 = computeEma(closes, EMA_FAST);
-  const ema169 = computeEma(closes, EMA_SLOW);
-
-  return candles.map((_, i) => {
-    const a = ema144[i];
-    const b = ema169[i];
-    if (a == null || b == null) return null;
-    return {
-      ema144: a,
-      ema169: b,
-      upper: Math.max(a, b),
-      lower: Math.min(a, b),
-    };
-  });
+export function bandFromEma(ema144, ema169) {
+  return {
+    ema144,
+    ema169,
+    upper: Math.max(ema144, ema169),
+    lower: Math.min(ema144, ema169),
+  };
 }
 
 /**
@@ -113,7 +85,7 @@ export function evaluateVegasEntryAt(candles, bands, iCurr) {
     return {
       signal: 'NONE',
       signalId: null,
-      reason: 'EMA 通道尚未就绪',
+      reason: 'OKX EMA 通道尚未对齐到最近 K 线',
       bands: bandCurr,
       prevOutside: null,
       kMinus2,
@@ -187,24 +159,6 @@ export function evaluateVegasEntryAt(candles, bands, iCurr) {
 }
 
 /**
- * Evaluate cross-entry on the two most recent closed candles.
- */
-export function evaluateVegasEntry(candles) {
-  if (!candles || candles.length < EMA_SLOW + 1) {
-    return {
-      signal: 'NONE',
-      signalId: null,
-      reason: `K 线不足（需 ≥ ${EMA_SLOW + 1}，当前 ${candles?.length ?? 0}）`,
-      bands: null,
-      prevOutside: null,
-      kMinus2: null,
-      kMinus1: null,
-    };
-  }
-  return evaluateVegasEntryAt(candles, vegasBands(candles), candles.length - 1);
-}
-
-/**
  * Body-outside check at index i with precomputed bands.
  */
 export function bodyOutsideAt(candles, bands, i) {
@@ -216,27 +170,18 @@ export function bodyOutsideAt(candles, bands, i) {
 }
 
 /**
- * Whether the latest closed candle body is fully outside the channel.
- */
-export function latestBodyOutside(candles) {
-  if (!candles || candles.length < EMA_SLOW) {
-    return { outside: false, side: null, bands: null, candle: null };
-  }
-  const bands = vegasBands(candles);
-  return bodyOutsideAt(candles, bands, candles.length - 1);
-}
-
-/**
  * Build a structured signal object for logging / Telegram.
  * @param {object[]} candles
  * @param {string} symbol
  * @param {string} timeframe
- * @param {object} [evaluation] — optional precomputed evaluateVegasEntry result
+ * @param {object} [evaluation] — precomputed evaluateVegasEntryAt result (required)
  */
-export function buildSignal(candles, symbol, timeframe, evaluation = null) {
-  const ev = evaluation ?? evaluateVegasEntry(candles);
-  const kMinus2 = ev.kMinus2;
-  const kMinus1 = ev.kMinus1;
+export function buildSignal(candles, symbol, timeframe, evaluation) {
+  if (!evaluation) {
+    throw new Error('buildSignal requires a precomputed evaluation (OKX EMA bands)');
+  }
+  const kMinus2 = evaluation.kMinus2;
+  const kMinus1 = evaluation.kMinus1;
   return {
     symbol,
     timeframe,
@@ -259,10 +204,10 @@ export function buildSignal(candles, symbol, timeframe, evaluation = null) {
           c: kMinus1.close,
         }
       : null,
-    bands: ev.bands,
-    prevOutside: ev.prevOutside,
-    signal: ev.signal,
-    signalId: ev.signalId,
-    reason: ev.reason,
+    bands: evaluation.bands,
+    prevOutside: evaluation.prevOutside,
+    signal: evaluation.signal,
+    signalId: evaluation.signalId,
+    reason: evaluation.reason,
   };
 }

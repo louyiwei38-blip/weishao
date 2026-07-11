@@ -27,7 +27,7 @@ async function main() {
   const candles = await fetchClosedCandles(config.candleLimit);
   console.log('candles:', candles.length, 'last:', candles.at(-1)?.t);
 
-  const signalObj = vegasState.resolveSignal(candles);
+  const signalObj = await vegasState.resolveSignal(candles);
   const vg = vegasState.getState();
   console.log('\n[1] Phase:', vg.phase, 'locked:', vg.lockedSignal);
   console.log('    Signal:', signalObj.signal, signalObj.signalId, '-', signalObj.reason);

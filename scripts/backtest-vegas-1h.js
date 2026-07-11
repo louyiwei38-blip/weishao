@@ -1,10 +1,10 @@
 /**
- * Vegas channel strategy backtest (OKX / Binance USDT swap).
+ * Vegas channel strategy backtest (OKX USDT swap + OKX EMA144/169 indicators).
  *
  * Usage:
  *   node scripts/backtest-vegas-1h.js --timeframe=15m --from=2020-01-01
  *   node scripts/backtest-vegas-1h.js --timeframe=5m --from=2020-01-01 --symbol=XRP/USDT
- *   node scripts/backtest-vegas-1h.js --timeframe=1h --from=2020-01-01 --symbol=XRP/USDT --exchange=binance
+ *   node scripts/backtest-vegas-1h.js --timeframe=1h --from=2020-01-01 --symbol=XRP/USDT
  */
 import ccxt from 'ccxt';
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs';
@@ -12,11 +12,15 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 import {
-  EMA_SLOW,
-  vegasBands,
+  MIN_SIGNAL_CANDLES,
   evaluateVegasEntryAt,
   bodyOutsideAt,
 } from '../src/strategy/vegasChannel.js';
+import {
+  toOkxInstId,
+  toOkxBar,
+  fetchOkxVegasBandsHistory,
+} from '../src/collector/okxIndicators.js';
 import { computeNetSettlementPnl } from './lib/polymarketFees.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -63,12 +67,12 @@ if (!BAR_MS) {
 
 const SYMBOL = resolveSwapSymbol(argStr('symbol', 'XRP/USDT'));
 const SYMBOL_BASE = SYMBOL.split('/')[0].toLowerCase();
-/** OKX late listings may lack 2020 history; prefer Binance for altcoins */
-const EXCHANGE_ID = (
-  argStr('exchange') || (['bnb', 'sol', 'xrp'].includes(SYMBOL_BASE) ? 'binance' : 'okx')
-).toLowerCase();
-if (!['okx', 'binance'].includes(EXCHANGE_ID)) {
-  console.error(`Unsupported --exchange=${EXCHANGE_ID}. Use: okx, binance`);
+/** Candles + EMA both from OKX (Vegas bands are OKX indicators). */
+const EXCHANGE_ID = (argStr('exchange') || 'okx').toLowerCase();
+if (EXCHANGE_ID !== 'okx') {
+  console.error(
+    `Vegas backtest requires OKX EMA; --exchange=${EXCHANGE_ID} is not supported. Use: okx`,
+  );
   process.exit(1);
 }
 const FROM_ARG = argStr('from');
@@ -83,6 +87,13 @@ const CACHE_FILE = join(
   OUT_DIR,
   `ohlcv-${TIMEFRAME}-${EXCHANGE_ID}-swap-${SYMBOL_BASE}-cache.json`,
 );
+const EMA_CACHE_FILE = join(
+  OUT_DIR,
+  `ema-vegas-${TIMEFRAME}-okx-${SYMBOL_BASE}-cache.json`,
+);
+
+const OKX_INST_ID = toOkxInstId(SYMBOL, 'swap');
+const OKX_BAR = toOkxBar(TIMEFRAME);
 
 function resolveRange() {
   const toMs = Date.now();
@@ -99,13 +110,6 @@ function resolveRange() {
 }
 
 function createExchange() {
-  if (EXCHANGE_ID === 'binance') {
-    return new ccxt.binance({
-      enableRateLimit: true,
-      timeout: 60_000,
-      options: { defaultType: 'future' },
-    });
-  }
   return new ccxt.okx({
     enableRateLimit: true,
     timeout: 60_000,
@@ -113,13 +117,7 @@ function createExchange() {
   });
 }
 
-/** Binance USDT-M often uses BNB/USDT; OKX uses BNB/USDT:USDT */
 function fetchSymbolForExchange() {
-  if (EXCHANGE_ID === 'binance') {
-    const [base, rest] = SYMBOL.split('/');
-    const quote = (rest || 'USDT').split(':')[0];
-    return `${base}/${quote}`;
-  }
   return SYMBOL;
 }
 
@@ -158,7 +156,8 @@ async function fetchAllCandles(exchange, symbol, timeframe, since, until) {
 }
 
 async function ensureCandles(fromMs, toMs) {
-  const needSince = fromMs - (EMA_SLOW + 50) * BAR_MS;
+  // Warmup buffer for listing edge; EMA itself comes from OKX indicators API
+  const needSince = fromMs - 50 * BAR_MS;
   let candles = existsSync(CACHE_FILE) ? JSON.parse(readFileSync(CACHE_FILE, 'utf8')) : [];
   const cacheStart = candles[0]?.t ?? Infinity;
   const cacheEnd = candles.at(-1)?.t ?? 0;
@@ -183,6 +182,76 @@ async function ensureCandles(fromMs, toMs) {
   return candles;
 }
 
+/**
+ * Load or fetch OKX EMA144/169 bands aligned to candle timestamps.
+ * Cache stores { t, ema144, ema169, upper, lower }[] parallel to candles by t.
+ */
+async function ensureOkxBands(candles) {
+  if (!candles.length) return [];
+
+  if (existsSync(EMA_CACHE_FILE) && !FORCE_FETCH) {
+    try {
+      const cached = JSON.parse(readFileSync(EMA_CACHE_FILE, 'utf8'));
+      if (cached?.instId === OKX_INST_ID && cached?.bar === OKX_BAR && Array.isArray(cached.points)) {
+        const byTs = new Map(cached.points.map((p) => [p.t, p]));
+        const bands = candles.map((c) => {
+          const p = byTs.get(c.t);
+          if (!p) return null;
+          return {
+            ema144: p.ema144,
+            ema169: p.ema169,
+            upper: p.upper,
+            lower: p.lower,
+          };
+        });
+        const hit = bands.filter(Boolean).length;
+        if (hit >= candles.length * 0.9) {
+          console.log(
+            `Using OKX EMA cache: ${hit}/${candles.length} bars aligned (${OKX_INST_ID} ${OKX_BAR})`,
+          );
+          return bands;
+        }
+        console.log(`OKX EMA cache coverage low (${hit}/${candles.length}), refetching…`);
+      }
+    } catch {
+      console.log('OKX EMA cache unreadable, refetching…');
+    }
+  }
+
+  console.log(`Fetching OKX EMA144/169 for ${OKX_INST_ID} ${OKX_BAR}…`);
+  let lastLog = 0;
+  const bands = await fetchOkxVegasBandsHistory(candles, {
+    instId: OKX_INST_ID,
+    bar: OKX_BAR,
+    onProgress: (n) => {
+      if (n - lastLog >= 500) {
+        console.log(`  … EMA points ${n}`);
+        lastLog = n;
+      }
+    },
+  });
+
+  const points = [];
+  for (let i = 0; i < candles.length; i += 1) {
+    const b = bands[i];
+    if (!b) continue;
+    points.push({
+      t: candles[i].t,
+      ema144: b.ema144,
+      ema169: b.ema169,
+      upper: b.upper,
+      lower: b.lower,
+    });
+  }
+  if (!existsSync(OUT_DIR)) mkdirSync(OUT_DIR, { recursive: true });
+  writeFileSync(
+    EMA_CACHE_FILE,
+    JSON.stringify({ instId: OKX_INST_ID, bar: OKX_BAR, points }),
+  );
+  console.log(`OKX EMA aligned ${points.length}/${candles.length} → ${EMA_CACHE_FILE}`);
+  return bands;
+}
+
 function candleOutcome(candle) {
   return candle.close >= candle.open ? 'UP' : 'DOWN';
 }
@@ -191,10 +260,8 @@ function fmtUsd(n) {
   return n >= 0 ? `+$${n.toFixed(2)}` : `-$${Math.abs(n).toFixed(2)}`;
 }
 
-function runBacktest(candles, fromMs, toMs) {
-  console.log('Precomputing Vegas bands…');
-  const bands = vegasBands(candles);
-  console.log('Running simulation…');
+function runBacktest(candles, bands, fromMs, toMs) {
+  console.log('Running simulation (OKX EMA bands)…');
 
   let phase = 'need_outside';
   let lockedSignal = null;
@@ -206,9 +273,10 @@ function runBacktest(candles, fromMs, toMs) {
   let chainWins = 0;
   let chainHalts = 0;
 
-  for (let i = EMA_SLOW; i < candles.length - 1; i += 1) {
+  for (let i = MIN_SIGNAL_CANDLES; i < candles.length - 1; i += 1) {
     const signalBar = candles[i];
     if (signalBar.t < fromMs || signalBar.t >= toMs) continue;
+    if (!bands[i] || !bands[i - 1]) continue;
 
     const settleBar = candles[i + 1];
     const outcome = candleOutcome(settleBar);
@@ -356,7 +424,9 @@ function summarize(trades, chains, chainWins, chainHalts, fromMs, toMs) {
       fee: USE_FEE,
       symbol: SYMBOL,
       exchange: EXCHANGE_ID,
+      instId: OKX_INST_ID,
       timeframe: TIMEFRAME,
+      emaSource: 'okx_indicators',
     },
     totals: {
       trades: trades.length,
@@ -416,9 +486,9 @@ function printMonthly(summary) {
 async function main() {
   const { fromMs, toMs, label } = resolveRange();
 
-  console.log('=== Vegas channel backtest ===');
-  console.log(`Symbol: ${SYMBOL}  exchange: ${EXCHANGE_ID}`);
-  console.log(`Timeframe: ${TIMEFRAME}`);
+  console.log('=== Vegas channel backtest (OKX EMA) ===');
+  console.log(`Symbol: ${SYMBOL}  exchange: ${EXCHANGE_ID}  instId: ${OKX_INST_ID}`);
+  console.log(`Timeframe: ${TIMEFRAME}  bar: ${OKX_BAR}`);
   console.log(`Period: ${label}`);
   console.log(`Base $${BASE_BET} ×${MULT} maxLosses=${MAX_LOSSES} entry=${ENTRY_PRICE} fee=${USE_FEE}`);
 
@@ -430,13 +500,20 @@ async function main() {
     );
   }
 
-  const firstTradeable = candles.length > EMA_SLOW ? candles[EMA_SLOW].t : fromMs;
+  const bands = await ensureOkxBands(candles);
+  const firstAligned = candles.findIndex((_, i) => bands[i] && bands[i - 1]);
+  const firstTradeable = firstAligned >= MIN_SIGNAL_CANDLES ? candles[firstAligned].t : fromMs;
   const effectiveFrom = Math.max(fromMs, firstTradeable);
   if (effectiveFrom > fromMs) {
-    console.log(`Note: effective from ${new Date(effectiveFrom).toISOString()}`);
+    console.log(`Note: effective from ${new Date(effectiveFrom).toISOString()} (OKX EMA aligned)`);
   }
 
-  const { trades, chains, chainWins, chainHalts } = runBacktest(candles, effectiveFrom, toMs);
+  const { trades, chains, chainWins, chainHalts } = runBacktest(
+    candles,
+    bands,
+    effectiveFrom,
+    toMs,
+  );
   const summary = summarize(trades, chains, chainWins, chainHalts, effectiveFrom, toMs);
 
   if (!existsSync(OUT_DIR)) mkdirSync(OUT_DIR, { recursive: true });

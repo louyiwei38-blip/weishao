@@ -35,7 +35,7 @@ import {
   settleSourceLabel,
 } from './trader/chainlinkSettle.js';
 import * as vegasState from './strategy/vegasState.js';
-import { EMA_SLOW } from './strategy/vegasChannel.js';
+import { MIN_SIGNAL_CANDLES } from './strategy/vegasChannel.js';
 import { findCurrentCycleMarket, resolveOrderPricePolicy } from './market/polymarket.js';
 import {
   getBalance,
@@ -179,11 +179,11 @@ async function runCycle(cycleStartTs) {
       return;
     }
 
-    if (candles.length < EMA_SLOW + 1) {
+    if (candles.length < MIN_SIGNAL_CANDLES) {
       cycleStatus = 'insufficient_candles';
-      logger.warn('[main] K 线数量不足（EMA169）', {
+      logger.warn('[main] K 线数量不足', {
         got: candles.length,
-        need: EMA_SLOW + 1,
+        need: MIN_SIGNAL_CANDLES,
       });
       return;
     }
@@ -218,8 +218,8 @@ async function runCycle(cycleStartTs) {
       return;
     }
 
-    // ── FR-2: Vegas channel signal / martingale continuation ──
-    const signalObj = vegasState.resolveSignal(candles);
+    // ── FR-2: Vegas channel signal / martingale continuation (OKX EMA) ──
+    const signalObj = await vegasState.resolveSignal(candles);
     lastSignal = signalObj.signal;
     writeSignalLog(signalObj);
 
@@ -689,7 +689,7 @@ async function scheduler() {
     symbol: config.symbol,
     timeframe: config.timeframe,
     instanceId: config.instanceId,
-    strategy: 'vegas_channel_ema144_169',
+    strategy: 'vegas_channel_okx_ema144_169',
     signalOhlcv: {
       exchange: signalOhlcv.exchange,
       market: signalOhlcv.label,
