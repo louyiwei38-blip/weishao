@@ -46,6 +46,7 @@ import {
   initDailyLoss,
   getDailyLossUsd,
   clearOrderDedup,
+  warnOrderPolicyMismatch,
 } from './trader/executor.js';
 import { fetchFillFromOrder, formatFillNote, formatPriceOddsLines, formatSettlementTradeLines } from './trader/fillSync.js';
 import {
@@ -496,6 +497,11 @@ async function confirmOrderFilled(pending) {
   if (config.dryRun) return true;
   if (!pending?.orderId) return true;
 
+  // Order was already confirmed at placement / resting fill watch.
+  if (Number(pending.fill?.usdcSpent) > 0 || Number(pending.actualBet) > 0) {
+    return true;
+  }
+
   try {
     const client = await getClobClient();
     const fill = await fetchFillFromOrder(client, pending.orderId);
@@ -531,7 +537,9 @@ async function applySettlement(pending, { candles } = {}) {
 
   const result = await computeSettlement(pending, { candles });
   if (!result.ready) {
-    logger.debug('[settle] 结算尚未就绪', {
+    const cycleEnd = pending.cycleStartTs + CYCLE_MS;
+    const log = Date.now() > cycleEnd + CYCLE_MS ? logger.warn : logger.debug;
+    log('[settle] 结算尚未就绪', {
       window: formatBeijingTime(pending.cycleStartTs),
       reason: result.reason,
       source: config.settleSource,
@@ -563,7 +571,9 @@ async function applySettlement(pending, { candles } = {}) {
   const { won, winningOutcome, targetPrice, closePrice, settleDelta } = result;
   const side = signal === 'UP' ? '📈 UP' : '📉 DOWN';
   const windowLabel = formatBeijingTime(cycleStartTs);
-  const sourceLabel = settleSourceLabel();
+  const sourceLabel = result.sourceUsed === 'okx_fallback'
+    ? `${settleSourceLabel()} → OKX 回退`
+    : settleSourceLabel();
   const price = entryPrice ?? limitPrice ?? null;
 
   const pnlUsd = stats.computeSettlementPnl(won, actualBet, price);
@@ -684,6 +694,7 @@ async function scheduler() {
   stats.init();
   initDailyLoss();
   loadPending();
+  warnOrderPolicyMismatch();
 
   logger.info('▶ 机器人启动', {
     symbol: config.symbol,

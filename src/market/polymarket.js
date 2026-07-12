@@ -4,20 +4,91 @@ import { formatBeijingTime } from '../utils/datetime.js';
 import { withRetry } from '../utils/retry.js';
 
 const GAMMA_API = config.poly.gammaApi;
+const ET_TZ = 'America/New_York';
+
+/** Polymarket 1h slugs use full asset names, not ticker abbreviations. */
+const HOURLY_SLUG_ASSET_NAMES = {
+  BTC: 'bitcoin',
+  ETH: 'ethereum',
+  SOL: 'solana',
+  BNB: 'bnb',
+  XRP: 'xrp',
+  DOGE: 'dogecoin',
+};
 
 /** Simple in-memory cache per cycle boundary */
 let cache = { cycleTs: 0, market: null };
 
-/** e.g. BTC/USDT + 1h → btc-updown-1h-1780758600 */
-export function buildMarketSlug(windowStartSec, symbol = config.symbol, timeframe = config.timeframe) {
+function hourlySlugAssetName(symbol) {
   const [base] = symbol.split('/');
   if (!base) throw new Error(`Invalid TRADING_SYMBOL: ${symbol}`);
-  return `${base.toLowerCase()}-updown-${timeframe}-${windowStartSec}`;
+  return HOURLY_SLUG_ASSET_NAMES[base.toUpperCase()] ?? base.toLowerCase();
+}
+
+/** Build ET hour label for 1h slug, e.g. "9am", "10pm". */
+function formatHourlySlugParts(windowStartMs) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: ET_TZ,
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    hour12: true,
+  }).formatToParts(new Date(windowStartMs));
+
+  const get = (type) => parts.find((p) => p.type === type)?.value ?? '';
+  return {
+    month: get('month').toLowerCase(),
+    day: get('day'),
+    year: get('year'),
+    hourLabel: `${get('hour').toLowerCase()}${get('dayPeriod').toLowerCase()}`,
+  };
+}
+
+function buildHourlyMarketSlug(windowStartMs, symbol, includeYear = false) {
+  const name = hourlySlugAssetName(symbol);
+  const { month, day, year, hourLabel } = formatHourlySlugParts(windowStartMs);
+  if (includeYear) {
+    return `${name}-up-or-down-${month}-${day}-${year}-${hourLabel}-et`;
+  }
+  return `${name}-up-or-down-${month}-${day}-${hourLabel}-et`;
+}
+
+/**
+ * Return slug candidates for the current window (tried in order).
+ * 5m/15m/4h: {base}-updown-{tf}-{unix}
+ * 1h: {name}-up-or-down-{month}-{day}[-{year}]-{hour}{am|pm}-et (ET boundaries)
+ */
+export function buildMarketSlugCandidates(
+  windowStartMs,
+  symbol = config.symbol,
+  timeframe = config.timeframe,
+) {
+  const [base] = symbol.split('/');
+  if (!base) throw new Error(`Invalid TRADING_SYMBOL: ${symbol}`);
+
+  if (timeframe === '1h') {
+    return [
+      buildHourlyMarketSlug(windowStartMs, symbol, false),
+      buildHourlyMarketSlug(windowStartMs, symbol, true),
+    ];
+  }
+
+  const windowStartSec = Math.floor(windowStartMs / 1000);
+  return [`${base.toLowerCase()}-updown-${timeframe}-${windowStartSec}`];
+}
+
+/** @deprecated Prefer buildMarketSlugCandidates — 1h returns the primary ET slug only. */
+export function buildMarketSlug(windowStartSec, symbol = config.symbol, timeframe = config.timeframe) {
+  return buildMarketSlugCandidates(windowStartSec * 1000, symbol, timeframe)[0];
 }
 
 /**
  * Fetch the configured symbol's Up/Down market for the CURRENT window.
- * Polymarket slug format: {base}-updown-{timeframe}-{windowStartUnixSec}
+ *
+ * Slug formats:
+ * - 5m / 15m / 4h: {base}-updown-{timeframe}-{windowStartUnixSec}
+ * - 1h: {name}-up-or-down-{month}-{day}[-{year}]-{hour}{am|pm}-et (US Eastern)
  *
  * The signal is derived from closed candles and predicts the direction of the
  * window that just opened, so we trade THAT window — the one starting exactly
@@ -32,23 +103,21 @@ export async function findCurrentCycleMarket(cycleStartTs, deadlineMs) {
     return cache.market;
   }
 
-  // Trade the window that just opened (the one the signal predicts)
   const windowStartMs = cycleStartTs;
-  const windowStartSec = Math.floor(windowStartMs / 1000);
-  const slug = buildMarketSlug(windowStartSec);
+  const slugCandidates = buildMarketSlugCandidates(windowStartMs);
 
   logger.info('[market] 按 slug 拉取事件', {
-    slug,
+    slug: slugCandidates[0],
+    slugCandidates,
     symbol: config.symbol,
+    timeframe: config.timeframe,
     windowStart: formatBeijingTime(windowStartMs),
   });
 
   let parsed;
   try {
-    // Retry when Gamma is slow, times out, or the new cycle event is not indexed yet
-    // (empty slug response is common in the first seconds after a window opens).
     parsed = await withRetry(
-      async () => fetchAndValidateEvent(slug),
+      async () => fetchAndValidateEventCandidates(slugCandidates),
       {
         label: 'gamma-event',
         maxAttempts: config.gammaFetchAttempts,
@@ -57,11 +126,11 @@ export async function findCurrentCycleMarket(cycleStartTs, deadlineMs) {
       }
     );
   } catch (err) {
-    logger.error('[market] 拉取事件失败', { slug, error: err?.message });
+    logger.error('[market] 拉取事件失败', { slugCandidates, error: err?.message });
     return null;
   }
 
-  const { event, m, upTokenId, downTokenId, upPrice, downPrice } = parsed;
+  const { event, m, upTokenId, downTokenId, upPrice, downPrice, slug } = parsed;
 
   const result = {
     conditionId: m.conditionId,
@@ -69,8 +138,8 @@ export async function findCurrentCycleMarket(cycleStartTs, deadlineMs) {
     question: m.question ?? event.title,
     slug,
     endDate: m.endDate ?? event.endDate,
-    yesTokenId: upTokenId,   // UP signal → buy Up token
-    noTokenId: downTokenId,  // DOWN signal → buy Down token
+    yesTokenId: upTokenId,
+    noTokenId: downTokenId,
     yesPrice: upPrice,
     noPrice: downPrice ?? (upPrice != null ? +(1 - upPrice).toFixed(4) : null),
   };
@@ -163,6 +232,21 @@ async function fetchEventBySlug(slug) {
   const event = list[0] ?? null;
   logger.debug('[market] Gamma 请求', { slug, ms: Date.now() - t0, found: Boolean(event) });
   return event;
+}
+
+/** Try slug candidates in order; throws the last error to trigger withRetry. */
+async function fetchAndValidateEventCandidates(slugCandidates) {
+  let lastErr;
+  for (const slug of slugCandidates) {
+    try {
+      const parsed = await fetchAndValidateEvent(slug);
+      return { ...parsed, slug };
+    } catch (err) {
+      lastErr = err;
+      logger.debug('[market] slug 未命中，尝试下一个', { slug, error: err?.message });
+    }
+  }
+  throw lastErr ?? new Error('no slug candidates');
 }
 
 /** Fetch slug and validate trade readiness; throws to trigger withRetry. */

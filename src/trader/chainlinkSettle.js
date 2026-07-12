@@ -87,11 +87,23 @@ async function fetchClosePriceAtEnd(cycleStartTs) {
   return null;
 }
 
+function findCandleByOpenTime(candles, cycleStartTs) {
+  if (!Array.isArray(candles) || !candles.length) return null;
+  const exact = candles.find((k) => k.t === cycleStartTs);
+  if (exact) return exact;
+  // Some exchanges return open times offset by a few ms.
+  return candles.find((k) => Math.abs(k.t - cycleStartTs) < 1000) ?? null;
+}
+
 async function resolveCandleForCycle(cycleStartTs, candles) {
-  const fromBatch = candles?.find((k) => k.t === cycleStartTs);
+  const fromBatch = findCandleByOpenTime(candles, cycleStartTs);
   if (fromBatch) return fromBatch;
 
-  const deadline = Date.now() + config.chainlink.settleMaxWaitMs;
+  const cycleEndedAgo = Date.now() - settleWakeMs(cycleStartTs);
+  const isHistorical = cycleEndedAgo > config.chainlink.settleMaxWaitMs;
+  const deadline = isHistorical
+    ? Date.now()
+    : Date.now() + config.chainlink.settleMaxWaitMs;
   let lastErr = null;
 
   while (Date.now() <= deadline) {
@@ -99,17 +111,27 @@ async function resolveCandleForCycle(cycleStartTs, candles) {
       return await fetchClosedCandleAt(cycleStartTs);
     } catch (err) {
       lastErr = err;
+      if (isHistorical) break;
       await sleep(500);
     }
   }
 
   if (lastErr) {
-    logger.warn('[settle] OKX K 线拉取超时', {
+    logger.warn('[settle] OKX K 线拉取失败', {
       window: formatBeijingTime(cycleStartTs),
+      historical: isHistorical,
       error: lastErr?.message,
     });
   }
   return null;
+}
+
+const CHAINLINK_FALLBACK_REASONS = new Set(['no_target_price', 'no_close_price']);
+
+function canFallbackToOkx(chainlinkResult, cycleStartTs) {
+  if (!chainlinkResult || chainlinkResult.ready) return false;
+  if (!CHAINLINK_FALLBACK_REASONS.has(chainlinkResult.reason)) return false;
+  return Date.now() >= settleWakeMs(cycleStartTs);
 }
 
 /**
@@ -152,12 +174,35 @@ export async function computeOkxSettlement(pendingBet, { candles } = {}) {
 
 /**
  * Route settlement to the configured source.
+ * Chainlink mode falls back to OKX candles when RTDS buffer lacks old ticks
+ * (e.g. pending bet restored after restart hours later).
  */
 export async function computeSettlement(pendingBet, ctx = {}) {
   if (usesOkxSettlement()) {
     return computeOkxSettlement(pendingBet, ctx);
   }
-  return computeChainlinkSettlement(pendingBet);
+
+  const chainlinkResult = await computeChainlinkSettlement(pendingBet);
+  if (chainlinkResult.ready) {
+    return { ...chainlinkResult, sourceUsed: 'chainlink' };
+  }
+
+  const { cycleStartTs } = pendingBet;
+  if (!canFallbackToOkx(chainlinkResult, cycleStartTs)) {
+    return chainlinkResult;
+  }
+
+  const okxResult = await computeOkxSettlement(pendingBet, ctx);
+  if (!okxResult.ready) {
+    return okxResult;
+  }
+
+  logger.warn('[settle] Chainlink 数据不可用，已回退 OKX K 线结算', {
+    window: formatBeijingTime(cycleStartTs),
+    chainlinkReason: chainlinkResult.reason,
+  });
+
+  return { ...okxResult, sourceUsed: 'okx_fallback' };
 }
 
 /**

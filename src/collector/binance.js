@@ -150,6 +150,18 @@ export async function fetchClosedCandles(limit = config.candleLimit) {
  * Fetch a single closed OHLCV candle whose open time equals openTimeMs.
  * Used for OKX-based settlement when the candle is not in the in-memory batch.
  */
+function pickClosedCandleRow(raw, openTimeMs, cycleMs) {
+  if (!raw?.length) return null;
+
+  const lastOpen = raw[raw.length - 1][0];
+  const closed = lastOpen >= openTimeMs + cycleMs ? raw : raw.slice(0, -1);
+
+  const exact = closed.find(([t]) => t === openTimeMs);
+  if (exact) return exact;
+
+  return closed.find(([t]) => Math.abs(t - openTimeMs) < 1000) ?? null;
+}
+
 export async function fetchClosedCandleAt(openTimeMs) {
   const cycleMs = config.cycleMinutes * 60 * 1000;
   let lastErr;
@@ -159,7 +171,7 @@ export async function fetchClosedCandleAt(openTimeMs) {
       const ex = getExchange(exchangeId);
       const fetchSymbol = getOhlcvSymbol(exchangeId);
       const raw = await withRetry(
-        () => ex.fetchOHLCV(fetchSymbol, config.timeframe, openTimeMs, 3),
+        () => ex.fetchOHLCV(fetchSymbol, config.timeframe, openTimeMs - cycleMs, 5),
         {
           label: `fetchOHLCV(${exchangeId},${fetchSymbol},at=${openTimeMs})`,
           maxAttempts: 2,
@@ -167,13 +179,7 @@ export async function fetchClosedCandleAt(openTimeMs) {
         },
       );
 
-      if (!raw?.length) {
-        throw new Error(`empty OHLCV @ ${openTimeMs}`);
-      }
-
-      const lastOpen = raw[raw.length - 1][0];
-      const closed = lastOpen >= openTimeMs + cycleMs ? raw : raw.slice(0, -1);
-      const row = closed.find(([t]) => t === openTimeMs);
+      const row = pickClosedCandleRow(raw, openTimeMs, cycleMs);
       if (!row) {
         throw new Error(`candle not found @ ${openTimeMs}`);
       }

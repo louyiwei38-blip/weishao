@@ -115,6 +115,49 @@ function resolveExecutionMode() {
   return { mode: 'limit', orderType: OrderType.GTC, label: 'GTC' };
 }
 
+const CAP_LIMIT_EXEC = { mode: 'limit', orderType: OrderType.GTC, label: 'GTC' };
+const CAP_MARKET_EXEC = { mode: 'market', orderType: OrderType.FOK, label: 'FOK' };
+
+/**
+ * Cap-aware routing: ask <= cap → market; ask > cap → limit at cap.
+ * Only applies when ORDER_TYPE=FOK/FAK and ORDER_PRICE_CAP > 0.
+ * GTC always limits at best ask (cap only clips when ask exceeds cap).
+ */
+function resolveCapAwareRouting(exec, { hasCap, priceCapped }) {
+  if (hasCap && exec.mode === 'market') {
+    if (priceCapped) {
+      return { useLimitOrder: true, marketExec: exec, limitExec: CAP_LIMIT_EXEC };
+    }
+    return { useLimitOrder: false, marketExec: exec, limitExec: CAP_LIMIT_EXEC };
+  }
+
+  const useLimitOrder = exec.mode === 'limit' || priceCapped;
+  const limitExec = priceCapped && exec.mode === 'market' ? CAP_LIMIT_EXEC : exec;
+  return { useLimitOrder, marketExec: exec, limitExec };
+}
+
+/** Log / warn at startup so GTC + cap is not mistaken for cap-threshold mode. */
+export function warnOrderPolicyMismatch() {
+  const exec = resolveExecutionMode();
+  const cap = config.orderPriceCap;
+  if (exec.mode === 'limit' && cap > 0) {
+    logger.warn(
+      '[executor] ORDER_TYPE=GTC：始终按订单簿最优卖价挂限价；' +
+      '若需「盘口 ≤ 阈值市价吃单、盘口 > 阈值按阈值限价」请设 ORDER_TYPE=FOK 并配置 ORDER_PRICE_CAP'
+    );
+    return;
+  }
+  if (exec.mode === 'market' && cap > 0) {
+    logger.info('[executor] 下单策略', {
+      mode: 'cap_threshold',
+      orderType: exec.label,
+      orderPriceCap: cap,
+      belowCap: 'market',
+      aboveCap: `limit@${cap}`,
+    });
+  }
+}
+
 function roundToTick(value, tickSize, up = false) {
   const tick = parseFloat(tickSize) || 0.01;
   const steps = value / tick;
@@ -671,10 +714,11 @@ export async function placeOrder(params) {
   const exec = resolveExecutionMode();
 
   if (config.dryRun) {
-    const useLimitOrder = exec.mode === 'limit' || priceCapped;
-    const effectiveExec = priceCapped && exec.mode === 'market'
-      ? { mode: 'limit', orderType: OrderType.GTC, label: 'GTC' }
-      : exec;
+    const effectiveMaxPrice = maxLimitPrice
+      ?? (config.orderPriceCap > 0 ? config.orderPriceCap : null);
+    const hasCap = effectiveMaxPrice != null && effectiveMaxPrice > 0;
+    const routing = resolveCapAwareRouting(exec, { hasCap, priceCapped });
+    const { useLimitOrder, marketExec, limitExec: effectiveExec } = routing;
     const logBase = {
       ts: new Date().toISOString(),
       conditionId, cycleStartTs,
@@ -682,7 +726,7 @@ export async function placeOrder(params) {
       actualBet, baseBet, martingaleBet, consecutiveLosses,
       yesPrice, noPrice, dryRun: config.dryRun,
       orderKind: useLimitOrder ? 'limit' : 'market',
-      orderType: effectiveExec.label,
+      orderType: useLimitOrder ? effectiveExec.label : marketExec.label,
       ...(activityTier != null ? { activityTier, activityHits } : {}),
       ...(dynamicBaseBet != null ? { dynamicBaseBet } : {}),
       ...(priceCapped ? { priceCapped, originalYesPrice, maxLimitPrice } : {}),
@@ -698,7 +742,7 @@ export async function placeOrder(params) {
       resting: useLimitOrder,
       usdcSpent: actualBet,
       orderKind: useLimitOrder ? 'limit' : 'market',
-      orderType: effectiveExec.label,
+      orderType: useLimitOrder ? effectiveExec.label : marketExec.label,
     };
   }
 
@@ -716,11 +760,9 @@ export async function placeOrder(params) {
   }
 
   const finalPriceCapped = bookCap.priceCapped;
-  // FOK/FAK: market when book ask <= cap; limit at cap when book ask exceeds ORDER_PRICE_CAP
-  const useLimitOrder = exec.mode === 'limit' || finalPriceCapped;
-  const effectiveExec = finalPriceCapped && exec.mode === 'market'
-    ? { mode: 'limit', orderType: OrderType.GTC, label: 'GTC' }
-    : exec;
+  const hasCap = effectiveMaxPrice != null && effectiveMaxPrice > 0;
+  const routing = resolveCapAwareRouting(exec, { hasCap, priceCapped: finalPriceCapped });
+  const { useLimitOrder, marketExec, limitExec: effectiveExec } = routing;
 
   const logBase = {
     ts: new Date().toISOString(),
@@ -752,7 +794,7 @@ export async function placeOrder(params) {
   if (useLimitOrder) {
     return submitLimitOrder(client, shared, effectiveExec);
   }
-  return submitMarketOrder(client, shared, exec);
+  return submitMarketOrder(client, shared, marketExec);
 }
 
 let dailyLossUsd = 0;

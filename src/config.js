@@ -114,7 +114,7 @@ const config = {
   maxDailyLossUsd: num('MAX_DAILY_LOSS_USD', 10000),
   minBalanceUsd: num('MIN_BALANCE_USD', 0),
   maxBetUsd: num('MAX_BET_USD', 10000),
-  orderType: optional('ORDER_TYPE', 'GTC'),
+  orderType: optional('ORDER_TYPE', 'FOK'),
   orderFillAttempts: num('ORDER_FILL_ATTEMPTS', 8),
   orderRetryDelayMs: num('ORDER_RETRY_DELAY_MS', 10000),
   /** Limit order: tick offset from best ask (0 = at best ask) */

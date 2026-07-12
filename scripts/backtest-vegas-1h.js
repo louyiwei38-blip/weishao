@@ -76,6 +76,7 @@ if (EXCHANGE_ID !== 'okx') {
   process.exit(1);
 }
 const FROM_ARG = argStr('from');
+const TO_ARG = argStr('to');
 const DAYS = argNum('days', 365);
 const BASE_BET = argNum('base', 3);
 const MULT = argNum('mult', 3);
@@ -96,11 +97,15 @@ const OKX_INST_ID = toOkxInstId(SYMBOL, 'swap');
 const OKX_BAR = toOkxBar(TIMEFRAME);
 
 function resolveRange() {
-  const toMs = Date.now();
+  const toMs = TO_ARG
+    ? Date.parse(TO_ARG.includes('T') ? TO_ARG : `${TO_ARG}T23:59:59.999Z`)
+    : Date.now();
+  if (!Number.isFinite(toMs)) throw new Error(`Invalid --to=${TO_ARG}`);
   if (FROM_ARG) {
     const fromMs = Date.parse(FROM_ARG.includes('T') ? FROM_ARG : `${FROM_ARG}T00:00:00.000Z`);
     if (!Number.isFinite(fromMs)) throw new Error(`Invalid --from=${FROM_ARG}`);
-    return { fromMs, toMs, label: `${new Date(fromMs).toISOString().slice(0, 10)} → now` };
+    const toLabel = TO_ARG ? new Date(toMs).toISOString().slice(0, 10) : 'now';
+    return { fromMs, toMs, label: `${new Date(fromMs).toISOString().slice(0, 10)} → ${toLabel}` };
   }
   return {
     fromMs: toMs - DAYS * 24 * 60 * 60_000,
@@ -126,12 +131,14 @@ async function fetchAllCandles(exchange, symbol, timeframe, since, until) {
   let cursor = since;
   let batches = 0;
   let emptySkips = 0;
+  // Allow enough forward skips to reach late listings (e.g. OKX SOL ~2021) on short TFs
+  const maxEmptySkips = Math.ceil((until - since) / (BAR_MS * 300)) + 8;
   while (cursor < until) {
     const batch = await exchange.fetchOHLCV(symbol, timeframe, cursor, 300);
     if (!batch.length) {
       // Listing may start later than --from (e.g. OKX BNB); skip forward
       emptySkips += 1;
-      if (emptySkips > 64) break;
+      if (emptySkips > maxEmptySkips) break;
       cursor += BAR_MS * 300;
       await new Promise((r) => setTimeout(r, 40));
       continue;
@@ -517,7 +524,7 @@ async function main() {
   const summary = summarize(trades, chains, chainWins, chainHalts, effectiveFrom, toMs);
 
   if (!existsSync(OUT_DIR)) mkdirSync(OUT_DIR, { recursive: true });
-  const tag = TIMEFRAME;
+  const tag = `${SYMBOL_BASE}-${TIMEFRAME}`;
   const outJson = join(OUT_DIR, `backtest-vegas-${tag}.json`);
   const outCsv = join(OUT_DIR, `backtest-vegas-${tag}-trades.csv`);
   // Keep trades out of giant JSON for 5m — summary + monthly only; full trades in CSV
