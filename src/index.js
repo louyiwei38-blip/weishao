@@ -1104,6 +1104,18 @@ async function scheduler() {
     });
   }
 
+  // Stagger startup TG across 9 PM2 instances to reduce 429 bursts
+  {
+    const id = String(config.instanceId || '');
+    let h = 0;
+    for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+    const staggerMs = (h % 9) * 1200;
+    if (staggerMs > 0) {
+      logger.info('[telegram] 启动通知错峰', { staggerMs, instanceId: id });
+      await sleepUntilShutdown(staggerMs);
+    }
+  }
+
   await notifyTelegram(
     `${tgHead('▶ <b>机器人启动</b>')}\n` +
     `标的: ${config.symbol}\n` +

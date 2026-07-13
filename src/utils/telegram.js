@@ -1,5 +1,6 @@
 import config from '../config.js';
 import logger from './logger.js';
+import { sleep } from './retry.js';
 
 /** Escape dynamic text for Telegram HTML parse_mode (& < > must not appear raw). */
 export function escapeHtml(text) {
@@ -23,7 +24,9 @@ async function postTelegram(text, { parseMode, messageThreadId } = {}) {
     disable_web_page_preview: true,
   };
   if (parseMode) payload.parse_mode = parseMode;
-  const threadId = messageThreadId ?? config.telegram.messageThreadId;
+  const threadId = messageThreadId === undefined
+    ? config.telegram.messageThreadId
+    : messageThreadId;
   if (Number.isFinite(threadId) && threadId > 0) {
     payload.message_thread_id = threadId;
   }
@@ -40,15 +43,25 @@ function stripHtml(text) {
   return String(text).replace(/<[^>]*>/g, '');
 }
 
+function parseRetryAfterSec(status, bodyText) {
+  if (status !== 429) return null;
+  try {
+    const j = JSON.parse(bodyText);
+    const n = Number(j?.parameters?.retry_after ?? j?.retry_after);
+    if (Number.isFinite(n) && n > 0) return Math.min(n, 30);
+  } catch {
+    // ignore
+  }
+  const m = String(bodyText).match(/retry after (\d+)/i);
+  if (m) return Math.min(Number(m[1]), 30);
+  return 3;
+}
+
 /**
- * Send a message to Telegram. Non-blocking and fail-safe: never throws, so a
- * notification failure can't break the trading loop.
+ * Send a message to Telegram. Non-blocking and fail-safe: never throws.
+ * Retries on HTTP 429 using Telegram's retry_after (multi-instance startups).
  *
- * Routes to a forum topic when config.telegram.messageThreadId is set
- * (one group + Topics: BTC 5m / ETH 1h / …).
- *
- * @param {string} text  – message text (supports basic HTML in static parts;
- *                         use escapeHtml() for dynamic values containing & < >)
+ * @param {string} text
  */
 export async function notifyTelegram(text) {
   const { botToken, chatId, messageThreadId } = config.telegram;
@@ -57,42 +70,75 @@ export async function notifyTelegram(text) {
     return;
   }
 
-  try {
-    let res = await postTelegram(text, {
-      parseMode: 'HTML',
-      messageThreadId,
-    });
+  const maxAttempts = 4;
+  let threadId = messageThreadId;
+  let parseMode = 'HTML';
+  let payloadText = text;
 
-    if (!res.ok) {
+  try {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const res = await postTelegram(payloadText, {
+        parseMode,
+        messageThreadId: threadId,
+      });
+
+      if (res.ok) {
+        if (attempt > 1) {
+          logger.info('[telegram] 重试后发送成功', {
+            attempt,
+            messageThreadId: threadId ?? null,
+          });
+        }
+        return;
+      }
+
       const body = await res.text();
+      const retryAfter = parseRetryAfterSec(res.status, body);
+
+      if (retryAfter != null && attempt < maxAttempts) {
+        logger.warn('[telegram] 限流 — 等待后重试', {
+          attempt,
+          retryAfterSec: retryAfter,
+          messageThreadId: threadId ?? null,
+        });
+        await sleep(retryAfter * 1000 + 200);
+        continue;
+      }
+
       const threadMissing =
-        Boolean(messageThreadId) &&
+        Boolean(threadId) &&
         (body.includes('message thread not found') ||
           body.includes('MESSAGE_THREAD_NOT_FOUND') ||
           body.includes('not a forum'));
 
-      if (threadMissing) {
+      if (threadMissing && attempt < maxAttempts) {
         logger.warn('[telegram] 话题无效 — 回退发到群（无 thread）', {
-          messageThreadId,
+          messageThreadId: threadId,
           body: body.slice(0, 160),
         });
-        res = await postTelegram(text, { parseMode: 'HTML', messageThreadId: null });
-      } else if (res.status === 400 && body.includes("can't parse entities")) {
-        logger.warn('[telegram] HTML 解析失败 — 降级为纯文本重试');
-        res = await postTelegram(stripHtml(text), { messageThreadId });
+        threadId = null;
+        continue;
       }
 
-      if (!res.ok) {
-        let retryBody = body;
-        if (!res.bodyUsed) {
-          retryBody = await res.text().catch(() => body);
-        }
-        logger.warn('[telegram] sendMessage 失败', {
-          status: res.status,
-          messageThreadId: messageThreadId ?? null,
-          body: String(retryBody).slice(0, 200),
-        });
+      if (
+        parseMode === 'HTML' &&
+        res.status === 400 &&
+        body.includes("can't parse entities") &&
+        attempt < maxAttempts
+      ) {
+        logger.warn('[telegram] HTML 解析失败 — 降级为纯文本重试');
+        parseMode = undefined;
+        payloadText = stripHtml(text);
+        continue;
       }
+
+      logger.warn('[telegram] sendMessage 失败', {
+        status: res.status,
+        attempt,
+        messageThreadId: threadId ?? null,
+        body: body.slice(0, 200),
+      });
+      return;
     }
   } catch (err) {
     logger.warn('[telegram] 通知发送异常', { error: err?.message });
