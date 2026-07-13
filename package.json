@@ -23,6 +23,8 @@
     "create-api-key": "node scripts/create-api-key.js",
     "test-cycle": "node scripts/test-cycle.js",
     "verify:fast-path": "node scripts/verify-fast-path.js",
+    "setup:tg-topics": "node scripts/setup-telegram-topics.js",
+    "test:telegram": "node scripts/test-telegram.js",
     "pm2:start": "pm2 start ecosystem.config.cjs --env live",
     "pm2:dry": "pm2 start ecosystem.config.cjs --env dry",
     "pm2:restart": "pm2 restart ecosystem.config.cjs",

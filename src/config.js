@@ -19,6 +19,8 @@ const PM2_OWNED_KEYS = [
   'TRADING_SYMBOL',
   'DRY_RUN',
   'NODE_ENV',
+  /** Per-instance Telegram forum topic (injected by ecosystem from TELEGRAM_THREAD_*). */
+  'TELEGRAM_MESSAGE_THREAD_ID',
 ];
 
 const pm2Owned = {};
@@ -152,10 +154,28 @@ const config = {
   martingaleMultiplier: num('MARTINGALE_MULTIPLIER', 3),
   martingaleMaxLosses: num('MARTINGALE_MAX_LOSSES', 5),
 
-  // Telegram notifications
+  // Telegram notifications (one forum group + per-instance topic thread)
   telegram: {
     botToken: optional('TELEGRAM_BOT_TOKEN', ''),
     chatId: optional('TELEGRAM_CHAT_ID', ''),
+    /**
+     * Forum topic thread id. Resolution order:
+     * 1) TELEGRAM_MESSAGE_THREAD_ID (PM2 per-process, from ecosystem)
+     * 2) TELEGRAM_THREAD_{INSTANCE} e.g. TELEGRAM_THREAD_BTC_5M for BOT_INSTANCE=btc-5m
+     */
+    messageThreadId: (() => {
+      const rawInstance = optional('BOT_INSTANCE', timeframe);
+      const instanceId = String(rawInstance).replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
+      const pick = (raw) => {
+        if (raw === undefined || String(raw).trim() === '') return null;
+        const n = Number(raw);
+        return Number.isFinite(n) && n > 0 ? n : null;
+      };
+      const fromPm2 = pick(process.env.TELEGRAM_MESSAGE_THREAD_ID);
+      if (fromPm2 != null) return fromPm2;
+      const key = `TELEGRAM_THREAD_${instanceId.replace(/-/g, '_').toUpperCase()}`;
+      return pick(process.env[key]);
+    })(),
   },
 
   // Risk — symmetric cap for YES/NO limit orders; 0 = no cap

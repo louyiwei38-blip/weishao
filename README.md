@@ -80,7 +80,7 @@ npm run start:1h
 
 - 共用同一 `.env` 钱包 / CLOB 凭证
 - `BOT_INSTANCE` + `CANDLE_TIMEFRAME` 隔离状态与日志
-- Telegram 消息带 `[15m]` / `[5m]` 前缀
+- Telegram 消息带 `[BTC·15m]` / `[ETH·5m]` 前缀；可用**一个论坛群 + Topics**按实例分话题（见 [DEPLOY.md](./DEPLOY.md)）
 - `MAX_DAILY_LOSS_USD` **按实例分别累计**（两路合计可能超过单路上限）
 - `MARKET_CYCLE_MINUTES` 可省略：由 `CANDLE_TIMEFRAME` 自动推导（`5m→5`，`15m→15`，`1h→60`）
 

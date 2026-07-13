@@ -78,7 +78,7 @@ const SETTLE_LOG  = scopedLogPath(LOGS_DIR, 'settlements.jsonl');
 const PENDING_FILE = scopedLogPath(LOGS_DIR, 'pending-bet.json');
 
 const CYCLE_MS = config.cycleMinutes * 60 * 1000;
-const TF_TAG = `[${config.timeframe}]`;
+const TF_TAG = `[${String(config.symbol || '').split('/')[0] || '?'}·${config.timeframe}]`;
 
 function tgHead(titleHtml) {
   return `${TF_TAG} ${titleHtml}`;

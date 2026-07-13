@@ -136,8 +136,28 @@ pm2 save && pm2 startup
 切换实盘：`.env` 配好私钥后 `npm run pm2:start`。
 
 > **`.env` 优先级：** 预算 / 马丁 / 结算 / OHLCV / Telegram 等以 `.env` 为准。  
-> PM2 仅覆盖：`BOT_INSTANCE`、`CANDLE_TIMEFRAME`、`MARKET_CYCLE_MINUTES`、`DRY_RUN`。  
-> 改完 `.env` 后需 `pm2 delete V3-5m V3-15m V3-1h` 再 `npm run pm2:start`（或 `pm2 restart … --update-env`），旧进程 env 不会自动刷新。
+> PM2 仅覆盖：`BOT_INSTANCE`、`CANDLE_TIMEFRAME`、`MARKET_CYCLE_MINUTES`、`TRADING_SYMBOL`、`DRY_RUN`、`TELEGRAM_MESSAGE_THREAD_ID`。  
+> 改完 `.env` 后需 `pm2 delete …` 再 `npm run pm2:start`（或 `pm2 restart … --update-env`），旧进程 env 不会自动刷新。
+
+### Telegram 论坛话题（推荐：一个群拆开六路消息）
+
+1. 新建 Telegram **群组** → 开启 **Topics（话题）**  
+2. 把 Bot 拉进群并设为管理员（需能管理话题）  
+3. `.env` 填好 `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`（群 ID，多为 `-100…`）  
+4. 生成六个话题并写入 thread id：
+
+```bash
+npm run setup:tg-topics -- --write-env
+# 或先预览：npm run setup:tg-topics -- --dry
+```
+
+5. 验证某个话题：
+
+```bash
+node scripts/test-telegram.js --instance=btc-5m
+```
+
+6. 重启 PM2：`pm2 delete all && npm run pm2:start`
 
 ---
 
