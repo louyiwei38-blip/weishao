@@ -60,6 +60,16 @@ import * as stats from './stats/manager.js';
 import { notifyTelegram, escapeHtml } from './utils/telegram.js';
 import { formatBeijingTime } from './utils/datetime.js';
 import { scopedLogPath } from './utils/instancePaths.js';
+import {
+  shouldMgContFastPath,
+  nextCycleStartTs,
+  isWithinTradeWindow,
+  resolveCycleSignalDelayMs,
+} from './utils/fastPath.js';
+import {
+  isSignalDataNotReady,
+  resolveSignalDataDeadlineMs,
+} from './utils/signalData.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOGS_DIR    = join(__dirname, '..', 'logs');
@@ -80,6 +90,22 @@ let pendingBet = null;
 
 let shutdownRequested = false;
 let cycleInProgress = null;
+/** All in-flight cycle/fast-path work — awaited on graceful shutdown. */
+const inFlightWork = new Set();
+/** Serialize placeOrder across runCycle + settlement-driven MG_CONT fast path. */
+let tradeLock = Promise.resolve();
+/** Cycle starts that already have a live fill / resting watch. */
+const orderedCycleTs = new Set();
+let placingForCycle = null;
+
+function trackWork(promise) {
+  const wrapped = Promise.resolve(promise).finally(() => {
+    inFlightWork.delete(wrapped);
+  });
+  inFlightWork.add(wrapped);
+  return wrapped;
+}
+
 
 // ─────────────────────────────────────────
 // Startup
@@ -152,124 +178,125 @@ async function formatBalanceTelegramLine(balance) {
 }
 
 // ─────────────────────────────────────────
-// Core per-cycle logic
+// Trade lock / ordered-cycle tracking
 // ─────────────────────────────────────────
 
-async function runCycle(cycleStartTs) {
-  const cycleStartedAt = Date.now();
-  let cycleStatus = 'ok';
-  let cycleError = null;
-  let lastSignal = null;
+function pruneOrderedCycles(nowMs = Date.now()) {
+  const cutoff = nowMs - CYCLE_MS * 3;
+  for (const ts of orderedCycleTs) {
+    if (ts < cutoff) orderedCycleTs.delete(ts);
+  }
+}
 
-  logger.info('━━━ 周期开始', {
-    cycle: formatBeijingTime(cycleStartTs),
-    dryRun: config.dryRun,
+function markCycleOrdered(cycleStartTs) {
+  pruneOrderedCycles();
+  orderedCycleTs.add(cycleStartTs);
+}
+
+function unmarkCycleOrdered(cycleStartTs) {
+  orderedCycleTs.delete(cycleStartTs);
+}
+
+function isCycleOrdered(cycleStartTs) {
+  return orderedCycleTs.has(cycleStartTs) || placingForCycle === cycleStartTs;
+}
+
+/**
+ * @template T
+ * @param {number} cycleStartTs
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T | { status: string }>}
+ */
+async function withTradeLock(cycleStartTs, fn) {
+  const prev = tradeLock;
+  let release;
+  tradeLock = new Promise((r) => {
+    release = r;
   });
-
-  clearOrderDedup();
-
+  await prev;
   try {
-    // ── FR-1: Fetch OHLCV for signals ──
-    let candles;
-    try {
-      candles = await fetchClosedCandles(config.candleLimit);
-    } catch (err) {
-      cycleStatus = 'ohlcv_failed';
-      cycleError = err?.message;
-      logger.error('[main] K 线拉取失败', { error: err?.message });
-      return;
-    }
+    if (shutdownRequested) return { status: 'shutdown' };
+    if (pendingBet) return { status: 'pending_unsettled' };
+    if (hasActiveRestingFillWatch()) return { status: 'resting_fill_pending' };
+    if (isCycleOrdered(cycleStartTs)) return { status: 'already_ordered' };
+    placingForCycle = cycleStartTs;
+    return await fn();
+  } finally {
+    if (placingForCycle === cycleStartTs) placingForCycle = null;
+    release();
+  }
+}
 
-    if (candles.length < MIN_SIGNAL_CANDLES) {
-      cycleStatus = 'insufficient_candles';
-      logger.warn('[main] K 线数量不足', {
-        got: candles.length,
-        need: MIN_SIGNAL_CANDLES,
-      });
-      return;
-    }
+function buildMgContSignal(lockedSignal, reason) {
+  return {
+    symbol: config.symbol,
+    timeframe: config.timeframe,
+    evaluatedAt: new Date().toISOString(),
+    signal: lockedSignal,
+    signalId: 'MG_CONT',
+    reason,
+    phase: 'in_chain',
+    lockedSignal,
+    kMinus2: null,
+    kMinus1: null,
+    bands: null,
+    prevOutside: null,
+  };
+}
 
-    // ── Settle the PREVIOUS cycle's bet (OKX K 线 or Chainlink) ──
-    if (pendingBet) {
-      await trySettlePending(pendingBet, { candles });
-    }
+// ─────────────────────────────────────────
+// Shared order placement (runCycle + MG_CONT fast path)
+// ─────────────────────────────────────────
 
-    // Never open a new position while a prior bet is still unsettled
-    if (pendingBet) {
-      cycleStatus = 'pending_unsettled';
-      logger.warn('[main] 上笔注单尚未结算 — 跳过本周期下单', {
-        pendingCycle: formatBeijingTime(pendingBet.cycleStartTs),
-        pendingSignal: pendingBet.signal,
-      });
-      return;
-    }
+/**
+ * Discover market + size + place order for a cycle window.
+ * @returns {Promise<{ status: string, signal?: string, signalId?: string }>}
+ */
+async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
+  if (signalObj?.signal !== 'UP' && signalObj?.signal !== 'DOWN') {
+    return { status: 'no_signal' };
+  }
 
-    // GTC resting fill still being watched — avoid stacking orders
-    if (hasActiveRestingFillWatch()) {
-      cycleStatus = 'resting_fill_pending';
-      logger.warn('[main] 仍有 GTC 挂单监视中 — 跳过本周期下单');
-      return;
-    }
+  if (!isWithinTradeWindow(Date.now(), cycleStartTs, CYCLE_MS, config.minTradeRemainingMs)) {
+    logger.warn('[main] 周期剩余时间不足 — 跳过下单', {
+      cycle: formatBeijingTime(cycleStartTs),
+      source,
+      minRemainingMs: config.minTradeRemainingMs,
+    });
+    return { status: 'too_late' };
+  }
 
-    const kMinus1 = candles.at(-1);
-
-    if (!isCandleFresh(kMinus1, CYCLE_MS)) {
-      cycleStatus = 'stale_candle';
-      logger.warn('[main] K 线过期 — 跳过本周期');
-      return;
-    }
-
-    // ── FR-2: Vegas channel signal / martingale continuation (OKX EMA) ──
-    const signalObj = await vegasState.resolveSignal(candles);
-    lastSignal = signalObj.signal;
-    writeSignalLog(signalObj);
-
-    const vg = vegasState.getState();
-    logger.info('[main] 信号', {
+  if (isDailyLossExceeded()) {
+    logger.warn('[main] 已达当日亏损上限 — 今日停止交易', {
       signal: signalObj.signal,
       signalId: signalObj.signalId,
-      reason: signalObj.reason,
-      phase: signalObj.phase ?? vg.phase,
-      lockedSignal: signalObj.lockedSignal ?? vg.lockedSignal,
+      source,
     });
+    return { status: 'daily_loss_limit' };
+  }
 
-    if (signalObj.signal === 'NONE') {
-      cycleStatus = 'no_signal';
-      logger.info('[main] 无信号 — 跳过下单');
-      await notifyTelegram(
-        `${tgHead('⏭ <b>无信号 — 跳过本周期</b>')}\n` +
-        `窗口: ${formatBeijingTime(cycleStartTs)}\n` +
-        `标的: ${config.symbol} · ${config.timeframe}\n` +
-        `阶段: ${escapeHtml(signalObj.phase ?? vg.phase)}\n` +
-        `原因: ${escapeHtml(signalObj.reason)}\n` +
-        await formatBalanceTelegramLine() +
-        formatStatsTelegramBlock()
-      );
-      return;
-    }
+  return withTradeLock(cycleStartTs, async () => {
+    const cycleEndMs = cycleStartTs + CYCLE_MS;
+    const tradeDeadline = Math.min(
+      Date.now() + config.cycleTimeoutMs,
+      cycleEndMs - Math.min(5_000, config.minTradeRemainingMs / 2),
+    );
 
-    if (isDailyLossExceeded()) {
-      cycleStatus = 'daily_loss_limit';
-      logger.warn('[main] 已达当日亏损上限 — 今日停止交易', {
-        signal: signalObj.signal,
-        signalId: signalObj.signalId,
-      });
-      return;
-    }
+    // Parallel: Gamma market + balance
+    const [market, balance] = await Promise.all([
+      findCurrentCycleMarket(cycleStartTs, tradeDeadline),
+      getBalance(),
+    ]);
 
-    const tradeDeadline = Date.now() + config.cycleTimeoutMs;
-
-    // ── FR-3: Market discovery ──
-    const market = await findCurrentCycleMarket(cycleStartTs, tradeDeadline);
     if (!market) {
-      cycleStatus = 'market_not_found';
       logger.warn('[main] 未找到 Polymarket 市场 — 跳过下单', {
         symbol: config.symbol,
         timeframe: config.timeframe,
         signal: signalObj.signal,
         signalId: signalObj.signalId,
+        source,
       });
-      return;
+      return { status: 'market_not_found', signal: signalObj.signal, signalId: signalObj.signalId };
     }
 
     const pricePolicy = resolveOrderPricePolicy(market, signalObj.signal);
@@ -285,43 +312,39 @@ async function runCycle(cycleStartTs) {
         maxLimitPrice: pricePolicy.maxLimitPrice,
         signal: signalObj.signal,
         signalId: signalObj.signalId,
+        source,
       });
     }
 
-    // ── FR-4.5 / FR-4.6: Martingale bet sizing ──
-    const balance = await getBalance();
-
     if (balance < config.minBalanceUsd) {
-      cycleStatus = 'low_balance';
       logger.warn('[main] pUSD 余额低于下限', {
         balance,
         min: config.minBalanceUsd,
         signal: signalObj.signal,
         signalId: signalObj.signalId,
+        source,
       });
-      return;
+      return { status: 'low_balance', signal: signalObj.signal, signalId: signalObj.signalId };
     }
 
     const mgState = martingale.getState();
     const { actualBet, skipReason } = martingale.prepareOrder(balance);
-
     if (skipReason) {
-      cycleStatus = `martingale_${skipReason}`;
       logger.info('[main] 马丁格尔策略跳过下单', {
         skipReason,
         signal: signalObj.signal,
         signalId: signalObj.signalId,
+        source,
         ...stats.formatLogFields(),
       });
-      return;
+      return { status: `martingale_${skipReason}`, signal: signalObj.signal, signalId: signalObj.signalId };
     }
 
-    // ── FR-4: Place order ──
     const orderResult = await placeOrder({
       signal: signalObj.signal,
       signalId: signalObj.signalId,
       yesTokenId: market.yesTokenId,
-      noTokenId:  market.noTokenId,
+      noTokenId: market.noTokenId,
       conditionId: market.conditionId,
       cycleStartTs,
       actualBet,
@@ -336,17 +359,20 @@ async function runCycle(cycleStartTs) {
     });
 
     if (orderResult.skipped) {
-      cycleStatus = `order_${orderResult.skipReason ?? 'skipped'}`;
       logger.info('[main] 订单已跳过', {
         reason: orderResult.skipReason,
         signal: signalObj.signal,
         signalId: signalObj.signalId,
+        source,
       });
-      return;
+      return {
+        status: `order_${orderResult.skipReason ?? 'skipped'}`,
+        signal: signalObj.signal,
+        signalId: signalObj.signalId,
+      };
     }
 
     const spent = orderResult.usdcSpent || 0;
-    const cycleEndMs = cycleStartTs + CYCLE_MS;
 
     if (spent > 0) {
       registerPendingBet({
@@ -371,11 +397,13 @@ async function runCycle(cycleStartTs) {
       const capNote = pricePolicy.priceCapped
         ? `\n💰 ${signalObj.signal === 'UP' ? 'YES' : 'NO'} 盘口 $${signalObj.signal === 'UP' ? pricePolicy.originalYesPrice : pricePolicy.originalNoPrice} 超阈值 — 按 $${pricePolicy.maxLimitPrice} 挂单\n`
         : '';
+      const sourceNote = source === 'mg_cont_fast' ? `\n⚡ 快路径: 结算输后续单\n` : '';
       await notifyTelegram(
         `${tgHead('🤖 <b>开单成交</b>')}\n` +
         `方向: <b>${side}</b> (${signalObj.signalId})\n` +
         `周期: ${config.timeframe}\n` +
         `原因: ${escapeHtml(signalObj.reason)}\n` +
+        sourceNote +
         capNote +
         priceOdds +
         (fillNote ? `成交明细: ${escapeHtml(fillNote)}\n` : '') +
@@ -386,10 +414,15 @@ async function runCycle(cycleStartTs) {
         `时间: ${formatBeijingTime(cycleStartTs)}\n` +
         formatStatsTelegramBlock()
       );
-    } else if (orderResult.resting) {
+      return { status: 'filled', signal: signalObj.signal, signalId: signalObj.signalId };
+    }
+
+    if (orderResult.resting) {
+      markCycleOrdered(cycleStartTs);
       logger.info('[main] 限价单挂单中 — 监视成交', {
         orderId: orderResult.orderId,
         limitPrice: orderResult.limitPrice,
+        source,
       });
       scheduleRestingFillWatch({
         orderId: orderResult.orderId,
@@ -412,11 +445,13 @@ async function runCycle(cycleStartTs) {
       const capNote = pricePolicy.priceCapped
         ? `\n💰 ${signalObj.signal === 'UP' ? 'YES' : 'NO'} 盘口 $${signalObj.signal === 'UP' ? pricePolicy.originalYesPrice : pricePolicy.originalNoPrice} 超阈值 — 按 $${pricePolicy.maxLimitPrice} 挂单\n`
         : '';
+      const sourceNote = source === 'mg_cont_fast' ? `\n⚡ 快路径: 结算输后续单\n` : '';
       await notifyTelegram(
         `${tgHead('⏳ <b>限价挂单</b>')}\n` +
         `方向: <b>${side}</b> (${signalObj.signalId})\n` +
         `周期: ${config.timeframe}\n` +
         `原因: ${escapeHtml(signalObj.reason)}\n` +
+        sourceNote +
         capNote +
         priceOdds +
         formatChainTelegramLines(mgState) +
@@ -425,13 +460,320 @@ async function runCycle(cycleStartTs) {
         `周期内自动监视成交\n` +
         formatStatsTelegramBlock()
       );
-    } else {
-      cycleStatus = 'order_no_fill';
-      logger.warn('[main] 订单已接受但未成交且非挂单状态', {
+      return { status: 'resting', signal: signalObj.signal, signalId: signalObj.signalId };
+    }
+
+    logger.warn('[main] 订单已接受但未成交且非挂单状态', {
+      signal: signalObj.signal,
+      signalId: signalObj.signalId,
+      source,
+    });
+    return { status: 'order_no_fill', signal: signalObj.signal, signalId: signalObj.signalId };
+  });
+}
+
+/**
+ * After loss settlement (not halted): immediately bet the next cycle window.
+ */
+async function maybeMgContFastPath(settledCycleStartTs) {
+  const vg = vegasState.getState();
+  if (!shouldMgContFastPath({
+    enabled: config.mgContFastPath,
+    won: false,
+    halted: false,
+    phase: vg.phase,
+    lockedSignal: vg.lockedSignal,
+  })) {
+    return { status: 'not_eligible' };
+  }
+
+  const nextCycle = nextCycleStartTs(settledCycleStartTs, CYCLE_MS);
+  if (!isWithinTradeWindow(Date.now(), nextCycle, CYCLE_MS, config.minTradeRemainingMs)) {
+    logger.info('[main] MG_CONT 快路径 — 下一窗口剩余时间不足，交由常规调度', {
+      nextCycle: formatBeijingTime(nextCycle),
+    });
+    return { status: 'too_late' };
+  }
+
+  const signalObj = buildMgContSignal(
+    vg.lockedSignal,
+    `结算输 — 同向快路径续单（锁定 ${vg.lockedSignal}）`,
+  );
+  writeSignalLog(signalObj);
+  logger.info('[main] MG_CONT 快路径 — 结算输后立即续单', {
+    settledCycle: formatBeijingTime(settledCycleStartTs),
+    nextCycle: formatBeijingTime(nextCycle),
+    lockedSignal: vg.lockedSignal,
+    consecutiveLosses: martingale.getState().consecutiveLosses,
+  });
+
+  return executeTrade({
+    cycleStartTs: nextCycle,
+    signalObj,
+    source: 'mg_cont_fast',
+  });
+}
+
+// ─────────────────────────────────────────
+// Core per-cycle logic
+// ─────────────────────────────────────────
+
+async function runCycle(cycleStartTs) {
+  const cycleStartedAt = Date.now();
+  let cycleStatus = 'ok';
+  let cycleError = null;
+  let lastSignal = null;
+  let candles = null;
+
+  logger.info('━━━ 周期开始', {
+    cycle: formatBeijingTime(cycleStartTs),
+    dryRun: config.dryRun,
+  });
+
+  clearOrderDedup();
+
+  try {
+    // ── Settle previous bet first (may trigger MG_CONT fast path for THIS cycle) ──
+    if (pendingBet && pendingBet.cycleStartTs !== cycleStartTs) {
+      const settleDeadline = resolveSignalDataDeadlineMs({
+        nowMs: Date.now(),
+        cycleStartTs,
+        cycleMs: CYCLE_MS,
+        maxWaitMs: config.signalDataMaxWaitMs,
+        minTradeRemainingMs: config.minTradeRemainingMs,
+      });
+      let settleAttempt = 0;
+
+      while (
+        pendingBet &&
+        pendingBet.cycleStartTs !== cycleStartTs &&
+        !shutdownRequested &&
+        Date.now() < settleDeadline
+      ) {
+        settleAttempt += 1;
+
+        // Best-effort OHLCV for OKX settle / cross-check — do NOT block Chainlink settle
+        if (!candles) {
+          try {
+            candles = await fetchClosedCandles(config.candleLimit);
+          } catch (err) {
+            logger.warn('[main] 结算辅助 K 线拉取失败（继续尝试结算）', {
+              attempt: settleAttempt,
+              error: err?.message,
+              settleSource: config.settleSource,
+            });
+          }
+        }
+
+        const settled = await trySettlePending(pendingBet, {
+          candles: candles || undefined,
+        });
+        if (settled) break;
+
+        logger.warn('[main] 上笔尚未结算 — 周期内短间隔重试', {
+          attempt: settleAttempt,
+          pendingCycle: formatBeijingTime(pendingBet.cycleStartTs),
+          retryMs: config.signalDataRetryMs,
+          deadlineInMs: settleDeadline - Date.now(),
+        });
+        await sleepUntilShutdown(config.signalDataRetryMs);
+      }
+    }
+
+    if (pendingBet) {
+      if (pendingBet.cycleStartTs === cycleStartTs) {
+        cycleStatus = 'already_ordered';
+        logger.info('[main] 本周期已有待结算注单（快路径）— 跳过重复下单', {
+          cycle: formatBeijingTime(cycleStartTs),
+          signal: pendingBet.signal,
+        });
+        return;
+      }
+      cycleStatus = 'pending_unsettled';
+      logger.warn('[main] 上笔注单尚未结算 — 跳过本周期下单', {
+        pendingCycle: formatBeijingTime(pendingBet.cycleStartTs),
+        pendingSignal: pendingBet.signal,
+      });
+      return;
+    }
+
+    if (hasActiveRestingFillWatch()) {
+      cycleStatus = 'resting_fill_pending';
+      logger.warn('[main] 仍有 GTC 挂单监视中 — 跳过本周期下单');
+      return;
+    }
+
+    if (isCycleOrdered(cycleStartTs)) {
+      cycleStatus = 'already_ordered';
+      logger.info('[main] 本周期已下单（快路径）— 跳过重复下单', {
+        cycle: formatBeijingTime(cycleStartTs),
+      });
+      return;
+    }
+
+    const vgEarly = vegasState.getState();
+    const inChainCont =
+      vgEarly.phase === 'in_chain' &&
+      (vgEarly.lockedSignal === 'UP' || vgEarly.lockedSignal === 'DOWN');
+
+    // ── in_chain: skip OHLCV/EMA — direction already locked ──
+    if (inChainCont) {
+      const signalObj = buildMgContSignal(
+        vgEarly.lockedSignal,
+        `马丁同向续单（锁定 ${vgEarly.lockedSignal}）`,
+      );
+      lastSignal = signalObj.signal;
+      writeSignalLog(signalObj);
+      logger.info('[main] 信号', {
         signal: signalObj.signal,
         signalId: signalObj.signalId,
+        reason: signalObj.reason,
+        phase: signalObj.phase,
+        lockedSignal: signalObj.lockedSignal,
+        path: 'in_chain_fast',
       });
+
+      const result = await executeTrade({
+        cycleStartTs,
+        signalObj,
+        source: 'in_chain',
+      });
+      cycleStatus = result.status === 'filled' || result.status === 'resting' ? 'ok' : result.status;
+      return;
     }
+
+    // ── New signal path: fresh closed candles + OKX EMA (retry in-cycle if not ready) ──
+    const dataDeadline = resolveSignalDataDeadlineMs({
+      nowMs: Date.now(),
+      cycleStartTs,
+      cycleMs: CYCLE_MS,
+      maxWaitMs: config.signalDataMaxWaitMs,
+      minTradeRemainingMs: config.minTradeRemainingMs,
+    });
+
+    let signalObj = null;
+    let dataAttempt = 0;
+    let lastDataError = null;
+
+    while (!shutdownRequested && Date.now() < dataDeadline) {
+      dataAttempt += 1;
+
+      try {
+        candles = await fetchClosedCandles(config.candleLimit);
+        lastDataError = null;
+      } catch (err) {
+        lastDataError = err?.message ?? String(err);
+        logger.warn('[main] K 线拉取失败 — 周期内重试', {
+          attempt: dataAttempt,
+          error: lastDataError,
+          retryMs: config.signalDataRetryMs,
+          deadlineInMs: dataDeadline - Date.now(),
+        });
+        await sleepUntilShutdown(config.signalDataRetryMs);
+        continue;
+      }
+
+      if (candles.length < MIN_SIGNAL_CANDLES) {
+        logger.warn('[main] K 线数量不足 — 周期内重试', {
+          attempt: dataAttempt,
+          got: candles.length,
+          need: MIN_SIGNAL_CANDLES,
+        });
+        await sleepUntilShutdown(config.signalDataRetryMs);
+        continue;
+      }
+
+      const kMinus1 = candles.at(-1);
+      if (!isCandleFresh(kMinus1, CYCLE_MS)) {
+        logger.warn('[main] K 线未新鲜 — 周期内重试', {
+          attempt: dataAttempt,
+          candleT: formatBeijingTime(kMinus1.t),
+          retryMs: config.signalDataRetryMs,
+          deadlineInMs: dataDeadline - Date.now(),
+        });
+        await sleepUntilShutdown(config.signalDataRetryMs);
+        continue;
+      }
+
+      signalObj = await vegasState.resolveSignal(candles);
+
+      if (isSignalDataNotReady(signalObj.reason, signalObj.retryable)) {
+        logger.warn('[main] 信号数据未就绪（EMA/对齐）— 周期内重试', {
+          attempt: dataAttempt,
+          reason: signalObj.reason,
+          phase: signalObj.phase,
+          retryMs: config.signalDataRetryMs,
+          deadlineInMs: dataDeadline - Date.now(),
+        });
+        signalObj = null;
+        await sleepUntilShutdown(config.signalDataRetryMs);
+        continue;
+      }
+
+      break;
+    }
+
+    if (shutdownRequested) {
+      cycleStatus = 'shutdown';
+      return;
+    }
+
+    if (!signalObj) {
+      cycleStatus = lastDataError ? 'ohlcv_failed' : 'signal_data_timeout';
+      cycleError = lastDataError
+        ?? `等待新鲜 K 线/EMA 对齐超时（attempts=${dataAttempt}）`;
+      logger.error('[main] 周期内信号数据仍未就绪 — 保留窗口剩余时间不再强开', {
+        attempts: dataAttempt,
+        error: cycleError,
+        deadline: formatBeijingTime(dataDeadline),
+      });
+      await notifyTelegram(
+        `${tgHead('⚠️ <b>信号数据超时</b>')}\n` +
+        `窗口: ${formatBeijingTime(cycleStartTs)}\n` +
+        `标的: ${config.symbol} · ${config.timeframe}\n` +
+        `重试: ${dataAttempt} 次后仍未就绪\n` +
+        `原因: ${escapeHtml(cycleError)}\n` +
+        await formatBalanceTelegramLine() +
+        formatStatsTelegramBlock()
+      );
+      return;
+    }
+
+    lastSignal = signalObj.signal;
+    writeSignalLog(signalObj);
+
+    const vg = vegasState.getState();
+    logger.info('[main] 信号', {
+      signal: signalObj.signal,
+      signalId: signalObj.signalId,
+      reason: signalObj.reason,
+      phase: signalObj.phase ?? vg.phase,
+      lockedSignal: signalObj.lockedSignal ?? vg.lockedSignal,
+      path: 'vegas_entry',
+      dataAttempts: dataAttempt,
+    });
+
+    if (signalObj.signal === 'NONE') {
+      cycleStatus = 'no_signal';
+      logger.info('[main] 无信号 — 跳过下单');
+      await notifyTelegram(
+        `${tgHead('⏭ <b>无信号 — 跳过本周期</b>')}\n` +
+        `窗口: ${formatBeijingTime(cycleStartTs)}\n` +
+        `标的: ${config.symbol} · ${config.timeframe}\n` +
+        `阶段: ${escapeHtml(signalObj.phase ?? vg.phase)}\n` +
+        `原因: ${escapeHtml(signalObj.reason)}\n` +
+        await formatBalanceTelegramLine() +
+        formatStatsTelegramBlock()
+      );
+      return;
+    }
+
+    const result = await executeTrade({
+      cycleStartTs,
+      signalObj,
+      source: 'vegas_entry',
+    });
+    cycleStatus = result.status === 'filled' || result.status === 'resting' ? 'ok' : result.status;
   } catch (err) {
     cycleStatus = 'error';
     cycleError = err?.message;
@@ -483,6 +825,7 @@ function registerPendingBet({
     entryPrice: entryPrice ?? fill?.entryPrice ?? limitPrice ?? null,
     fill: fill ?? null,
   };
+  markCycleOrdered(cycleStartTs);
   savePending();
   scheduleChainlinkSettlement(pendingBet);
   logger.info('[main] 待结算注单已登记', {
@@ -511,6 +854,7 @@ async function confirmOrderFilled(pending) {
       orderId: pending.orderId,
       status: fill.status,
     });
+    unmarkCycleOrdered(pending.cycleStartTs);
     pendingBet = null;
     savePending();
     return false;
@@ -664,6 +1008,23 @@ async function applySettlement(pending, { candles } = {}) {
     formatStatsTelegramBlock()
   );
 
+  // Settlement-driven fast path: loss + still in_chain → order next window ASAP
+  if (shouldMgContFastPath({
+    enabled: config.mgContFastPath,
+    won,
+    halted,
+    phase: vegasState.getState().phase,
+    lockedSignal: vegasState.getState().lockedSignal,
+  })) {
+    const fastPromise = trackWork(
+      maybeMgContFastPath(cycleStartTs).catch((err) => {
+        logger.error('[main] MG_CONT 快路径异常', { error: err?.message, stack: err?.stack });
+        return { status: 'error' };
+      }),
+    );
+    await fastPromise;
+  }
+
   return true;
 }
 
@@ -710,12 +1071,19 @@ async function scheduler() {
     dryRun: config.dryRun,
     cycleMinutes: config.cycleMinutes,
     signalDelayMs: config.signalDelayMs,
+    inChainSignalDelayMs: config.inChainSignalDelayMs,
+    prewarmMs: config.prewarmMs,
+    mgContFastPath: config.mgContFastPath,
+    signalDataRetryMs: config.signalDataRetryMs,
+    signalDataMaxWaitMs: config.signalDataMaxWaitMs,
     cycleTimeoutMs: config.cycleTimeoutMs,
     settlement: config.settleSource,
+    settleBufferMs: config.chainlink.settleBufferMs,
     tradeBudgetUsd: config.tradeBudgetUsd,
     martingaleMultiplier: config.martingaleMultiplier,
     martingaleMaxLosses: config.martingaleMaxLosses,
     orderType: config.orderType,
+    orderRetryDelayMs: config.orderRetryDelayMs,
     orderPriceCap: config.orderPriceCap,
     envFile: existsSync(join(__dirname, '..', '.env')) ? '.env loaded (override)' : '.env missing',
     vegas: vegasState.getState(),
@@ -827,26 +1195,65 @@ async function scheduler() {
   // eslint-disable-next-line no-constant-condition
   while (!shutdownRequested) {
     const boundary = nextCycleBoundary();
-    const waitMs   = boundary - Date.now();
+    const waitMs = boundary - Date.now();
+    const prewarmMs = config.prewarmMs;
 
     logger.debug('[scheduler] 等待下一周期边界', {
       boundary: formatBeijingTime(boundary),
       waitMs,
+      prewarmMs,
     });
 
-    await sleepUntilShutdown(waitMs);
-    if (shutdownRequested) break;
+    // Prefetch Gamma / CLOB / balance before the boundary so order path is hot
+    if (waitMs > prewarmMs && prewarmMs > 0) {
+      await sleepUntilShutdown(waitMs - prewarmMs);
+      if (shutdownRequested) break;
 
-    await sleepUntilShutdown(config.signalDelayMs);
-    if (shutdownRequested) break;
-
-    cycleInProgress = runCycle(boundary)
-      .catch((err) => {
-        logger.error('[main] 周期执行异常', { error: err?.message, stack: err?.stack });
-      })
-      .finally(() => {
-        cycleInProgress = null;
+      const prewarmDeadline = boundary + Math.max(config.signalDelayMs, 10_000) + 30_000;
+      logger.info('[scheduler] 周期前预热', {
+        boundary: formatBeijingTime(boundary),
+        prewarmMs,
       });
+      await Promise.allSettled([
+        findCurrentCycleMarket(boundary, prewarmDeadline),
+        getBalance(),
+        getClobClient(),
+      ]);
+
+      await sleepUntilShutdown(Math.max(0, boundary - Date.now()));
+    } else {
+      await sleepUntilShutdown(waitMs);
+    }
+    if (shutdownRequested) break;
+
+    const vg = vegasState.getState();
+    const delayMs = resolveCycleSignalDelayMs({
+      phase: vg.phase,
+      lockedSignal: vg.lockedSignal,
+      hasPending: Boolean(pendingBet),
+      signalDelayMs: config.signalDelayMs,
+      inChainSignalDelayMs: config.inChainSignalDelayMs,
+      settleBufferMs: config.chainlink.settleBufferMs,
+    });
+
+    logger.debug('[scheduler] 边界后信号延迟', {
+      delayMs,
+      phase: vg.phase,
+      hasPending: Boolean(pendingBet),
+    });
+
+    await sleepUntilShutdown(delayMs);
+    if (shutdownRequested) break;
+
+    cycleInProgress = trackWork(
+      runCycle(boundary)
+        .catch((err) => {
+          logger.error('[main] 周期执行异常', { error: err?.message, stack: err?.stack });
+        })
+        .finally(() => {
+          cycleInProgress = null;
+        }),
+    );
 
     await cycleInProgress;
   }
@@ -872,6 +1279,10 @@ function setupGracefulShutdown() {
       } catch {
         // already logged in runCycle
       }
+    }
+
+    if (inFlightWork.size > 0) {
+      await Promise.allSettled([...inFlightWork]);
     }
 
     stopChainlinkSettler();

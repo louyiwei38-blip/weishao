@@ -3,6 +3,7 @@ import { existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { resolvePrivateKey } from './utils/secrets.js';
+import { defaultSignalDelayMs } from './utils/fastPath.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const envPath = join(__dirname, '..', '.env');
@@ -97,7 +98,20 @@ const config = {
   symbol: optional('TRADING_SYMBOL', 'BTC/USDT'),
   timeframe,
   candleLimit: num('CANDLE_FETCH_LIMIT', 200),
-  signalDelayMs: num('SIGNAL_DELAY_MS', 10000),
+  /** New-signal delay after UTC boundary; timeframe-aware default (5m→3s, 15m→4s, 1h→5s). */
+  signalDelayMs: num('SIGNAL_DELAY_MS', defaultSignalDelayMs(timeframe)),
+  /** in_chain MG_CONT: short delay (no candle/EMA needed). */
+  inChainSignalDelayMs: num('IN_CHAIN_SIGNAL_DELAY_MS', 300),
+  /** Prefetch Gamma/CLOB/balance this many ms before the next boundary. */
+  prewarmMs: num('PREWARM_MS', 5000),
+  /** After Chainlink/OKX loss (< max losses): place next-cycle order immediately. */
+  mgContFastPath: bool('MG_CONT_FAST_PATH', true),
+  /** Skip order if fewer than this many ms remain in the cycle window. */
+  minTradeRemainingMs: num('MIN_TRADE_REMAINING_MS', 15_000),
+  /** New-signal path: retry interval when candle stale / EMA not aligned. */
+  signalDataRetryMs: num('SIGNAL_DATA_RETRY_MS', 800),
+  /** New-signal path: max wait for fresh candle + aligned EMA (still within cycle). */
+  signalDataMaxWaitMs: num('SIGNAL_DATA_MAX_WAIT_MS', 60_000),
 
   /**
    * Isolates pending-bet / heartbeat / stats / daily-loss when multiple
@@ -116,7 +130,8 @@ const config = {
   maxBetUsd: num('MAX_BET_USD', 10000),
   orderType: optional('ORDER_TYPE', 'FOK'),
   orderFillAttempts: num('ORDER_FILL_ATTEMPTS', 8),
-  orderRetryDelayMs: num('ORDER_RETRY_DELAY_MS', 10000),
+  /** FOK retry gap — keep short so failed eats retry quickly inside the window. */
+  orderRetryDelayMs: num('ORDER_RETRY_DELAY_MS', 1000),
   /** Limit order: tick offset from best ask (0 = at best ask) */
   limitPriceOffsetTicks: num('LIMIT_PRICE_OFFSET_TICKS', 0),
   /** Short poll after order post (ms) */
@@ -191,7 +206,7 @@ const config = {
 
   // Chainlink RTDS settlement (Polymarket official oracle)
   chainlink: {
-    settleBufferMs: num('CHAINLINK_SETTLE_BUFFER_MS', 3000),
+    settleBufferMs: num('CHAINLINK_SETTLE_BUFFER_MS', 1500),
     settleMaxWaitMs: num('CHAINLINK_SETTLE_MAX_WAIT_MS', 15000),
     openWindowMs: num('CHAINLINK_OPEN_WINDOW_MS', 5000),
     bufferMinutes: num('CHAINLINK_BUFFER_MINUTES', 30),

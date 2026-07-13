@@ -118,6 +118,7 @@ export async function resolveSignal(candles) {
       reason: `马丁同向续单（锁定 ${s.lockedSignal}）`,
       phase: s.phase,
       lockedSignal: s.lockedSignal,
+      retryable: false,
     };
     logger.info('[vegas] 链路中 — 跳过新信号检测', {
       lockedSignal: s.lockedSignal,
@@ -138,6 +139,7 @@ export async function resolveSignal(candles) {
     });
     signalObj.phase = s.phase;
     signalObj.lockedSignal = null;
+    signalObj.retryable = true;
     return signalObj;
   }
 
@@ -157,6 +159,7 @@ export async function resolveSignal(candles) {
     });
     signalObj.phase = s.phase;
     signalObj.lockedSignal = null;
+    signalObj.retryable = true;
     return signalObj;
   }
 
@@ -176,12 +179,13 @@ export async function resolveSignal(candles) {
       });
       // Fall through to armed evaluation in the same cycle
     } else {
+      const misaligned = !check.bands;
       const signalObj = buildSignal(candles, symbol, timeframe, {
         signal: 'NONE',
         signalId: null,
-        reason: check.bands
-          ? '等待至少一根 K 线实体完全在维加斯通道外'
-          : 'OKX EMA 未对齐到当前 K 线，等待下一周期',
+        reason: misaligned
+          ? 'OKX EMA 未对齐到当前 K 线'
+          : '等待至少一根 K 线实体完全在维加斯通道外',
         bands: check.bands,
         prevOutside: null,
         kMinus2: candles.at(-2) ?? null,
@@ -189,6 +193,7 @@ export async function resolveSignal(candles) {
       });
       signalObj.phase = s.phase;
       signalObj.lockedSignal = null;
+      signalObj.retryable = misaligned;
       return signalObj;
     }
   }
@@ -209,6 +214,7 @@ export async function resolveSignal(candles) {
     const signalObj = buildSignal(candles, symbol, timeframe, evaluation);
     signalObj.phase = s.phase;
     signalObj.lockedSignal = s.lockedSignal;
+    signalObj.retryable = false;
     return signalObj;
   }
 
@@ -220,6 +226,7 @@ export async function resolveSignal(candles) {
   const signalObj = buildSignal(candles, symbol, timeframe, evaluation);
   signalObj.phase = s.phase;
   signalObj.lockedSignal = null;
+  signalObj.retryable = /未对齐|尚未对齐/.test(String(evaluation.reason || ''));
   return signalObj;
 }
 

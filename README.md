@@ -40,10 +40,10 @@ Polymarket **5 分钟 / 15 分钟 / 1 小时**涨跌盘口可同时运行：各�
 
 | `SETTLE_SOURCE` | 数据源 | 规则 |
 |-----------------|--------|------|
-| `okx`（**默认**） | OKX 永续同周期 K 线 | `close >= open → UP`，否则 DOWN |
-| `chainlink` | Polymarket RTDS | `close >= target → UP`（需 RTDS 连通） |
+| `okx` | OKX 永续同周期 K 线 | `close >= open → UP`，否则 DOWN |
+| `chainlink`（**默认**） | Polymarket RTDS | `close >= target → UP`（需 RTDS 连通） |
 
-默认 OKX 模式不启 Chainlink RTDS。
+默认 Chainlink 模式会启 RTDS；`SETTLE_SOURCE=okx` 时不启 Chainlink RTDS。
 
 ---
 
@@ -152,7 +152,11 @@ docs/
 | `MARKET_CYCLE_MINUTES` | 随 timeframe | 可省略，由 `CANDLE_TIMEFRAME` 推导 |
 | `BOT_INSTANCE` | = timeframe | 状态文件后缀 |
 | `CANDLE_FETCH_LIMIT` | 200 | EMA169 需 ≥170 |
-| `SIGNAL_DELAY_MS` | 10000 | 周期边界后延迟再拉 K |
+| `SIGNAL_DELAY_MS` | 按周期 | 新信号：周期边界后延迟再拉 K（默认 5m→3s / 15m→4s / 1h→5s） |
+| `IN_CHAIN_SIGNAL_DELAY_MS` | 300 | `in_chain` 续单延迟（无需等 K 线） |
+| `MG_CONT_FAST_PATH` | true | 结算输且未满连亏上限时，立即对下一窗口同向下单 |
+| `SIGNAL_DATA_RETRY_MS` | 800 | K 未新鲜 / EMA 未对齐时周期内重试间隔 |
+| `SIGNAL_DATA_MAX_WAIT_MS` | 60000 | 周期内等待数据就绪上限（仍预留下单窗口） |
 
 ### 马丁 / 风控
 
@@ -166,7 +170,7 @@ docs/
 | `ORDER_PRICE_CAP` | 0.95 | YES/NO 限价封顶；`0`=不限制 |
 | `ORDER_TYPE` | GTC | `GTC` 限价 / `FOK` 市价 |
 | `DRY_RUN` | false | `true`=模拟下单 |
-| `SETTLE_SOURCE` | okx | `okx` / `chainlink` |
+| `SETTLE_SOURCE` | chainlink | `okx` / `chainlink` |
 
 钱包 / Telegram 见 `.env.example`。
 
@@ -175,20 +179,20 @@ docs/
 ## 运行逻辑（单实例）
 
 ```
-周期边界 + SIGNAL_DELAY
+周期边界前 PREWARM：预热 Gamma / CLOB / 余额
+周期边界 + 延迟（新信号 SIGNAL_DELAY / in_chain 短延迟）
   │
-  ├─ 拉 OKX 永续同周期 K 线（≥170 根算 EMA）
-  ├─ 尝试结算上一笔 pending-bet
-  ├─ 若仍有未结算 / GTC 监视中 → 跳过下单
-  ├─ vegas：need_outside / armed 穿越 / in_chain 同向续单
+  ├─ 若有 pending → 拉 K 并结算（输且未 halt → MG_CONT 快路径立刻下下一窗）
+  ├─ in_chain：跳过 OHLCV/EMA，同向续单（并行 Gamma+余额）
+  ├─ armed：新鲜度检查 + OKX EMA 穿越 → 有信号则下单
   ├─ 风控：日亏损 / 余额
-  ├─ Gamma 发现当前盘口 → CLOB 下单
   └─ 成交后登记 pending → 周期结束结算 → 更新马丁 + vegas
 ```
 
 - **无信号 / 风控拦截**：不下单；`in_chain` 时方向锁定保持  
 - **赢**：马丁重置 → `need_outside`  
-- **连亏 5**：止损重置 → `need_outside`（须再等通道外实体）  
+- **连亏 5**：止损重置 → `need_outside`（须再等通道外实体；**不会**走快路径续单）  
+- **结算输且连亏 &lt; 5**：结算完成后立即同向续下一窗（`MG_CONT_FAST_PATH`）  
 - GTC 未成交不计入马丁  
 
 ---
@@ -245,7 +249,7 @@ pm2 save && pm2 startup
 
 - 钱包需有足够 **pUSD**（≥ `MIN_BALANCE_USD`）；双开时注意两路马丁同时加仓的余额与敞口
 - 国内：`OHLCV_EXCHANGE=okx`；需访问 `gamma-api.polymarket.com` 与 `clob.polymarket.com`
-- 默认 `SETTLE_SOURCE=okx`，无需 Chainlink；改 `chainlink` 需能连 `wss://ws-live-data.polymarket.com`
+- 默认 `SETTLE_SOURCE=chainlink`（需能连 `wss://ws-live-data.polymarket.com`）；改 `okx` 则用永续 K 线结算、可不启 RTDS
 - 首次务必 `DRY_RUN` / `pm2:dry` 确认信号与 slug 正常后再实盘
 - 若曾跑过旧单进程 `V3`，先 `pm2 delete V3` 再 `pm2:start`
 - `.env` 中旧版 `SESSION_GATE_*`、`ACTIVITY_*`、`VOLATILITY_*` 等实盘不再读取，可删除
