@@ -32,12 +32,15 @@ const writeEnv = process.argv.includes('--write-env');
 const checkOnly = process.argv.includes('--check');
 
 const INSTANCES = [
-  { id: 'btc-5m', name: 'BTC 5m' },
-  { id: 'btc-15m', name: 'BTC 15m' },
-  { id: 'btc-1h', name: 'BTC 1h' },
-  { id: 'eth-5m', name: 'ETH 5m' },
-  { id: 'eth-15m', name: 'ETH 15m' },
-  { id: 'eth-1h', name: 'ETH 1h' },
+  { id: 'sol-5m', name: 'SOL 5m' },
+  { id: 'sol-15m', name: 'SOL 15m' },
+  { id: 'sol-1h', name: 'SOL 1h' },
+  { id: 'bnb-5m', name: 'BNB 5m' },
+  { id: 'bnb-15m', name: 'BNB 15m' },
+  { id: 'bnb-1h', name: 'BNB 1h' },
+  { id: 'xrp-5m', name: 'XRP 5m' },
+  { id: 'xrp-15m', name: 'XRP 15m' },
+  { id: 'xrp-1h', name: 'XRP 1h' },
 ];
 
 function envKey(id) {

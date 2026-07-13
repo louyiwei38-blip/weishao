@@ -154,7 +154,7 @@ npm run setup:tg-topics -- --write-env
 5. 验证某个话题：
 
 ```bash
-node scripts/test-telegram.js --instance=btc-5m
+node scripts/test-telegram.js --instance=sol-5m
 ```
 
 6. 重启 PM2：`pm2 delete all && npm run pm2:start`
