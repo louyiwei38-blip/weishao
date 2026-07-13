@@ -3,18 +3,17 @@
  * Create Telegram forum topics for each bot instance and print .env lines.
  *
  * Prerequisites:
- * 1) Create a Telegram GROUP, enable Topics (Forum)
+ * 1) Create a Telegram GROUP, enable Topics (Forum) — MUST be on before this script
  * 2) Add your bot as admin (can manage topics)
  * 3) .env has TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID (group id, often -100...)
  *
  * Usage:
  *   node scripts/setup-telegram-topics.js
- *   node scripts/setup-telegram-topics.js --dry   # only print planned topics
- *
- * Then paste printed TELEGRAM_THREAD_* lines into .env and:
- *   pm2 delete all && npm run pm2:start
+ *   node scripts/setup-telegram-topics.js --dry
+ *   node scripts/setup-telegram-topics.js --check   # only verify is_forum
+ *   node scripts/setup-telegram-topics.js --write-env
  */
-import { existsSync, readFileSync, appendFileSync } from 'fs';
+import { existsSync, appendFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
@@ -30,6 +29,7 @@ const token = process.env.TELEGRAM_BOT_TOKEN;
 const chatId = process.env.TELEGRAM_CHAT_ID;
 const dry = process.argv.includes('--dry');
 const writeEnv = process.argv.includes('--write-env');
+const checkOnly = process.argv.includes('--check');
 
 const INSTANCES = [
   { id: 'btc-5m', name: 'BTC 5m' },
@@ -51,8 +51,24 @@ async function api(method, body) {
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(15_000),
   });
-  const json = await res.json();
-  return json;
+  return res.json();
+}
+
+function printForumHelp() {
+  console.error(`
+[原因] 当前群还不是「论坛群」(is_forum=false)，Telegram 拒绝 createForumTopic。
+脚本无法替你打开 Topics，必须在手机/电脑 Telegram 里手动开启：
+
+  1. 打开群 → 点群名 → 编辑（铅笔）
+  2. 打开「话题」/ Topics / 话题模式
+  3. 保存后，群顶应出现话题列表（综合/General）
+  4. 再确认 Bot 是管理员，且勾选「管理话题」
+
+然后先检查：
+  node scripts/setup-telegram-topics.js --check
+看到 is_forum: true 后再：
+  npm run setup:tg-topics -- --write-env
+`);
 }
 
 if (!token || !chatId) {
@@ -62,6 +78,33 @@ if (!token || !chatId) {
 
 console.log('chatId:', chatId);
 console.log('dry   :', dry);
+
+const chatInfo = await api('getChat', { chat_id: chatId });
+if (!chatInfo.ok) {
+  console.error('[FAIL] getChat failed:', chatInfo.description || chatInfo);
+  process.exit(1);
+}
+
+const chat = chatInfo.result || {};
+console.log('title :', chat.title || '(none)');
+console.log('type  :', chat.type || '(none)');
+console.log('is_forum:', chat.is_forum === true);
+
+if (checkOnly) {
+  if (chat.is_forum === true) {
+    console.log('\n[OK] 群已是论坛，可以创建话题。');
+    process.exit(0);
+  }
+  printForumHelp();
+  process.exit(1);
+}
+
+if (chat.is_forum !== true) {
+  console.error('\n[FAIL] the chat is not a forum');
+  printForumHelp();
+  process.exit(1);
+}
+
 console.log('');
 
 const lines = [
@@ -90,7 +133,8 @@ for (const inst of INSTANCES) {
 
   if (!json.ok) {
     console.error(`[FAIL] createForumTopic ${inst.name}:`, json.description || json);
-    console.error('  Hint: enable Topics on the group; bot must be admin with manage topics.');
+    if (String(json.description || '').includes('not a forum')) printForumHelp();
+    else console.error('  Hint: bot must be admin with manage topics.');
     process.exit(1);
   }
 
@@ -98,7 +142,6 @@ for (const inst of INSTANCES) {
   console.log(`[ok] ${inst.name} → ${key}=${threadId}`);
   lines.push(`${key}=${threadId}`);
 
-  // Pin a marker message into the topic so you can verify routing
   await api('sendMessage', {
     chat_id: chatId,
     message_thread_id: threadId,
@@ -110,11 +153,10 @@ console.log('\n--- paste into .env ---');
 console.log(lines.filter((l) => l.startsWith('TELEGRAM_')).join('\n'));
 
 if (writeEnv && !dry) {
-  const block = `\n${lines.join('\n')}\n`;
-  appendFileSync(envPath, block, 'utf8');
+  appendFileSync(envPath, `\n${lines.join('\n')}\n`, 'utf8');
   console.log(`\n[ok] appended to ${envPath}`);
 } else {
   console.log('\nTip: re-run with --write-env to append these lines to .env automatically.');
 }
 
-console.log('\nThen: pm2 delete all && npm run pm2:start   # or pm2 restart --update-env');
+console.log('\nThen: pm2 delete all && npm run pm2:start');
