@@ -16,6 +16,7 @@ export const SYMBOL_CHAINLINK = {
   'SOL/USDT': 'sol/usd',
   'BNB/USDT': 'bnb/usd',
   'XRP/USDT': 'xrp/usd',
+  'DOGE/USDT': 'doge/usd',
 };
 
 /** @type {Map<string, Array<{ timestamp: number, value: number }>>} */

@@ -70,18 +70,19 @@ npm run start:1h
 
 ---
 
-## 三实例（5m + 15m + 1h）→ PM2 现为 SOL/BNB/XRP 九开
+## 三实例（5m + 15m + 1h）→ PM2 现为 SOL/BNB/XRP/DOGE 十二开
 
 | PM2 进程 | 周期 | 盘口 slug 示例 |
 |----------|------|----------------|
 | `V3-sol-5m` 等 | 5 分钟 | `sol-updown-5m-<unix>` |
 | `V3-bnb-15m` 等 | 15 分钟 | `bnb-updown-15m-<unix>` |
 | `V3-xrp-1h` 等 | 1 小时 | `xrp` / `solana` 等 1h ET slug |
+| `V3-doge-5m` 等 | 5 分钟 | `doge-updown-5m-<unix>` / 1h=`dogecoin-...` |
 
 - 共用同一 `.env` 钱包 / CLOB 凭证
 - `BOT_INSTANCE` + `CANDLE_TIMEFRAME` 隔离状态与日志
-- Telegram 消息带 `[SOL·15m]` / `[BNB·5m]` 前缀；可用**一个论坛群 + Topics**按实例分话题（见 [DEPLOY.md](./DEPLOY.md)）
-- `MAX_DAILY_LOSS_USD` **按实例分别累计**（两路合计可能超过单路上限）
+- Telegram 消息带 `[SOL·15m]` / `[DOGE·5m]` 前缀；可用**一个论坛群 + Topics**按实例分话题（见 [DEPLOY.md](./DEPLOY.md)）
+- `MAX_DAILY_LOSS_USD` **按实例分别累计**（多路合计可能超过单路上限）
 - `MARKET_CYCLE_MINUTES` 可省略：由 `CANDLE_TIMEFRAME` 自动推导（`5m→5`，`15m→15`，`1h→60`）
 
 ---
@@ -201,13 +202,13 @@ docs/
 
 | 命令 | 说明 |
 |------|------|
-| `npm run pm2:start` | 实盘九开 **SOL+BNB+XRP × 5m/15m/1h** |
-| `npm run pm2:dry` | 模拟盘九开 |
+| `npm run pm2:start` | 实盘十二开 **SOL+BNB+XRP+DOGE × 5m/15m/1h** |
+| `npm run pm2:dry` | 模拟盘十二开 |
 | `npm run pm2:restart` | 重启全部实例 |
 | `npm run pm2:stop` | 停止全部实例 |
 | `npm run pm2:logs` | 查看日志 |
-| `npm run pm2:sol:start` / `bnb` / `xrp` | 只开某一标的三周期 |
-| `npm run start:sol:5m` 等 | 单进程实盘 |
+| `npm run pm2:sol:start` / `bnb` / `xrp` / `doge` | 只开某一标的三周期 |
+| `npm run start:sol:5m` / `start:doge:5m` 等 | 单进程实盘 |
 | `npm run dry:5m` / `dry:15m` / `dry:1h` | 单进程空跑 |
 | `npm run encrypt-key` | 加密私钥 |
 | `npm run create-api-key` | 生成 CLOB API 凭证 |

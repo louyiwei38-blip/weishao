@@ -41,6 +41,9 @@ const INSTANCES = [
   { id: 'xrp-5m', name: 'XRP 5m' },
   { id: 'xrp-15m', name: 'XRP 15m' },
   { id: 'xrp-1h', name: 'XRP 1h' },
+  { id: 'doge-5m', name: 'DOGE 5m' },
+  { id: 'doge-15m', name: 'DOGE 15m' },
+  { id: 'doge-1h', name: 'DOGE 1h' },
 ];
 
 function envKey(id) {

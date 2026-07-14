@@ -249,7 +249,7 @@ won = (bet signal == winningOutcome)
 | `src/index.js` | UTC 周期调度、pending bet、结算/TG 编排（`BOT_INSTANCE` 隔离状态） |
 | `src/utils/instancePaths.js` | 多周期并行时的日志/状态文件后缀 |
 | `src/collector/binance.js` | CCXT OHLCV（信号 1h） |
-| `src/collector/chainlink.js` | RTDS WebSocket；支持 BTC/ETH/SOL/BNB |
+| `src/collector/chainlink.js` | RTDS WebSocket；支持 BTC/ETH/SOL/BNB/XRP/DOGE |
 | `src/strategy/vegasChannel.js` | EMA144/169、实体外、影线入、穿越判定 |
 | `src/strategy/vegasState.js` | need_outside / armed / in_chain 状态机 |
 | `src/strategy/reversalContinuation.js` | 旧 5m 策略（回测脚本用） |

@@ -16,6 +16,7 @@ import { writeHeartbeat } from './utils/heartbeat.js';
 import {
   fetchClosedCandles,
   isCandleFresh,
+  areSignalCandlesAligned,
   describeOhlcvSource,
 } from './collector/binance.js';
 import {
@@ -684,10 +685,25 @@ async function runCycle(cycleStartTs) {
       }
 
       const kMinus1 = candles.at(-1);
-      if (!isCandleFresh(kMinus1, CYCLE_MS)) {
+      const kMinus2 = candles.at(-2);
+      if (!isCandleFresh(kMinus1, CYCLE_MS, { cycleStartTs })) {
         logger.warn('[main] K 线未新鲜 — 周期内重试', {
           attempt: dataAttempt,
           candleT: formatBeijingTime(kMinus1.t),
+          expectedT: formatBeijingTime(cycleStartTs - CYCLE_MS),
+          cycle: formatBeijingTime(cycleStartTs),
+          retryMs: config.signalDataRetryMs,
+          deadlineInMs: dataDeadline - Date.now(),
+        });
+        await sleepUntilShutdown(config.signalDataRetryMs);
+        continue;
+      }
+      if (!areSignalCandlesAligned(kMinus2, kMinus1, CYCLE_MS)) {
+        logger.warn('[main] 信号 K 线未对齐 — 周期内重试', {
+          attempt: dataAttempt,
+          kMinus2T: kMinus2 ? formatBeijingTime(kMinus2.t) : null,
+          kMinus1T: formatBeijingTime(kMinus1.t),
+          cycle: formatBeijingTime(cycleStartTs),
           retryMs: config.signalDataRetryMs,
           deadlineInMs: dataDeadline - Date.now(),
         });
@@ -708,6 +724,33 @@ async function runCycle(cycleStartTs) {
         signalObj = null;
         await sleepUntilShutdown(config.signalDataRetryMs);
         continue;
+      }
+
+      // VG entry must use this window's last two closed bars — else unlock & refetch.
+      if (signalObj.signalId === 'VG_UP' || signalObj.signalId === 'VG_DOWN') {
+        const expectedK1 = cycleStartTs - CYCLE_MS;
+        const expectedK2 = expectedK1 - CYCLE_MS;
+        const sigK1 = signalObj.kMinus1?.t;
+        const sigK2 = signalObj.kMinus2?.t;
+        const k1Ok = sigK1 != null && Math.abs(sigK1 - expectedK1) <= 2_000;
+        const k2Ok = sigK2 != null && Math.abs(sigK2 - expectedK2) <= 2_000;
+        if (!k1Ok || !k2Ok) {
+          logger.warn('[main] 信号 K 线与窗口不对齐 — 撤销锁定并重拉重判', {
+            attempt: dataAttempt,
+            signalId: signalObj.signalId,
+            kMinus2T: sigK2 != null ? formatBeijingTime(sigK2) : null,
+            kMinus1T: sigK1 != null ? formatBeijingTime(sigK1) : null,
+            expectedK2: formatBeijingTime(expectedK2),
+            expectedK1: formatBeijingTime(expectedK1),
+            cycle: formatBeijingTime(cycleStartTs),
+            retryMs: config.signalDataRetryMs,
+            deadlineInMs: dataDeadline - Date.now(),
+          });
+          vegasState.abortEntryLock('candle_misaligned_retry');
+          signalObj = null;
+          await sleepUntilShutdown(config.signalDataRetryMs);
+          continue;
+        }
       }
 
       break;

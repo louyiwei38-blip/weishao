@@ -198,21 +198,57 @@ export async function fetchClosedCandleAt(openTimeMs) {
   throw lastErr ?? new Error(`fetchClosedCandleAt failed @ ${openTimeMs}`);
 }
 
+/** Allow tiny exchange/clock skew only — never a full cycle of staleness. */
+const CANDLE_TS_TOLERANCE_MS = 2_000;
+
 /**
- * Validate candle timestamp aligns with expected cycle boundary.
+ * Expected open time of the latest *closed* candle.
+ * Prefer cycleStartTs (the window being traded) so a delayed runCycle
+ * cannot accept the previous bar as "fresh".
+ * @param {number} cycleMs
+ * @param {{ cycleStartTs?: number, nowMs?: number, signalDelayMs?: number }} [opts]
  */
-export function isCandleFresh(candle, cycleMs) {
-  const nowMs = Date.now();
-  const expectedOpenMs =
-    Math.floor((nowMs - config.signalDelayMs) / cycleMs) * cycleMs - cycleMs;
+export function expectedClosedCandleOpenMs(cycleMs, opts = {}) {
+  if (opts.cycleStartTs != null && Number.isFinite(opts.cycleStartTs)) {
+    return opts.cycleStartTs - cycleMs;
+  }
+  const nowMs = opts.nowMs ?? Date.now();
+  const delay = opts.signalDelayMs ?? config.signalDelayMs;
+  return Math.floor((nowMs - delay) / cycleMs) * cycleMs - cycleMs;
+}
+
+/**
+ * Validate last closed candle matches the expected open for this cycle.
+ * Rejects even one-bar staleness (previously `diff > cycleMs` allowed it).
+ * @param {{ t: number }} candle
+ * @param {number} cycleMs
+ * @param {{ cycleStartTs?: number, nowMs?: number }} [opts]
+ */
+export function isCandleFresh(candle, cycleMs, opts = {}) {
+  const expectedOpenMs = expectedClosedCandleOpenMs(cycleMs, opts);
   const diff = Math.abs(candle.t - expectedOpenMs);
-  if (diff > cycleMs) {
+  if (diff > CANDLE_TS_TOLERANCE_MS) {
     logger.warn('[collector] K 线时间戳不匹配', {
       candleT: formatBeijingTime(candle.t),
       expectedT: formatBeijingTime(expectedOpenMs),
       diffMs: diff,
+      cycleStartTs:
+        opts.cycleStartTs != null ? formatBeijingTime(opts.cycleStartTs) : undefined,
     });
     return false;
   }
   return true;
+}
+
+/**
+ * Ensure the two signal bars are consecutive cycle opens (no gap / reorder).
+ * @param {{ t: number }} kMinus2
+ * @param {{ t: number }} kMinus1
+ * @param {number} cycleMs
+ */
+export function areSignalCandlesAligned(kMinus2, kMinus1, cycleMs) {
+  if (!kMinus2?.t || !kMinus1?.t || !Number.isFinite(cycleMs) || cycleMs <= 0) {
+    return false;
+  }
+  return Math.abs(kMinus1.t - kMinus2.t - cycleMs) <= CANDLE_TS_TOLERANCE_MS;
 }

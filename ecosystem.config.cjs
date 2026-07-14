@@ -1,9 +1,9 @@
 /**
- * PM2 — SOL + BNB + XRP × (5m + 15m + 1h) 九实例并行（同一钱包 / .env 凭证）
+ * PM2 — SOL + BNB + XRP + DOGE × (5m + 15m + 1h) 十二实例并行（同一钱包 / .env 凭证）
  *
  * 模拟盘: npm run pm2:dry
  * 实盘:   npm run pm2:start
- * 单标的: npm run pm2:sol:start / pm2:bnb:start / pm2:xrp:start
+ * 单标的: npm run pm2:sol:start / pm2:bnb:start / pm2:xrp:start / pm2:doge:start
  * 日志:   pm2 logs
  * 停止:   npm run pm2:stop
  *
@@ -41,7 +41,7 @@ function threadIdFor(instanceId) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-/** @param {'SOL'|'BNB'|'XRP'} base @param {'5m'|'15m'|'1h'} tf @param {number} minutes */
+/** @param {'SOL'|'BNB'|'XRP'|'DOGE'} base @param {'5m'|'15m'|'1h'} tf @param {number} minutes */
 function app(base, tf, minutes) {
   const id = `${base.toLowerCase()}-${tf}`;
   const threadId = threadIdFor(id);
@@ -76,7 +76,7 @@ const TIMEFRAMES = [
   ['1h', 60],
 ];
 
-const SYMBOLS = ['SOL', 'BNB', 'XRP'];
+const SYMBOLS = ['SOL', 'BNB', 'XRP', 'DOGE'];
 
 module.exports = {
   apps: SYMBOLS.flatMap((base) =>

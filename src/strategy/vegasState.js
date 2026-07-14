@@ -258,3 +258,21 @@ export function onSettled(won, halted) {
   s.phase = 'in_chain';
   persist();
 }
+
+/**
+ * Undo a just-locked entry when candle/window check fails mid-cycle.
+ * Returns to armed so the next refetch can re-evaluate the cross; does not clear outsideSeenAt.
+ */
+export function abortEntryLock(reason = 'aborted') {
+  const s = entry();
+  if (s.phase !== 'in_chain') return false;
+  const prev = s.lockedSignal;
+  s.phase = 'armed';
+  s.lockedSignal = null;
+  persist();
+  logger.warn('[vegas] 已撤销入场锁定 — 回到 armed', {
+    reason,
+    previousLocked: prev,
+  });
+  return true;
+}
