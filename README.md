@@ -1,8 +1,8 @@
 # Polymarket Vegas Channel Bot
 
-OKX USDT 永续 K 线 · EMA144/EMA169 维加斯通道穿越入场 · 同向马丁 **$3 ×3 / 连亏 5** · **5m + 15m + 1h 三实例并行** · CLOB V2 · OKX/Chainlink 结算 · GTC 限价
+OKX USDT 永续 K 线 · EMA144/EMA169 维加斯通道穿越入场 · 同向马丁 **$3 ×3 / 连亏 5** · **BTC + ETH × 5m/15m/1h 六实例并行** · CLOB V2 · OKX/Chainlink 结算 · GTC 限价
 
-Polymarket **5 分钟 / 15 分钟 / 1 小时**涨跌盘口可同时运行：各拉对应周期 OKX 永续 K 线，按维加斯通道穿越产生信号；CLOB 限价/市价下单；默认 **OKX 永续 K 线**结算；同向马丁管理仓位。状态文件按实例隔离，互不覆盖。
+Polymarket **BTC / ETH** 的 **5 分钟 / 15 分钟 / 1 小时**涨跌盘口可同时运行：各拉对应周期 OKX 永续 K 线，按维加斯通道穿越产生信号；CLOB 限价/市价下单；默认 **Chainlink** 结算；同向马丁管理仓位。状态文件按实例隔离，互不覆盖。
 
 > 架构细节见 **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)** · 部署见 **[DEPLOY.md](./DEPLOY.md)**
 
@@ -54,34 +54,30 @@ npm install
 cp .env.example .env          # 模拟盘可 DRY_RUN=true
 node scripts/check-env.js
 
-# 推荐：PM2 同时跑 5m + 15m + 1h
-npm run pm2:dry               # 模拟盘三开
-npm run pm2:start             # 实盘三开
+# 推荐：PM2 同时跑 BTC+ETH × 5m/15m/1h
+npm run pm2:dry               # 模拟盘六开
+npm run pm2:start             # 实盘六开
 pm2 logs
 
 # 或单实例
 npm run dry:5m
-npm run dry:15m
-npm run dry:1h
-npm run start:5m
-npm run start:15m
-npm run start:1h
+npm run start:btc:5m
+npm run start:eth:1h
 ```
 
 ---
 
-## 三实例（5m + 15m + 1h）→ PM2 现为 SOL/BNB/XRP/DOGE 十二开
+## 多实例 → PM2 现为 BTC/ETH 六开（× 5m/15m/1h）
 
 | PM2 进程 | 周期 | 盘口 slug 示例 |
 |----------|------|----------------|
-| `V3-sol-5m` 等 | 5 分钟 | `sol-updown-5m-<unix>` |
-| `V3-bnb-15m` 等 | 15 分钟 | `bnb-updown-15m-<unix>` |
-| `V3-xrp-1h` 等 | 1 小时 | `xrp` / `solana` 等 1h ET slug |
-| `V3-doge-5m` 等 | 5 分钟 | `doge-updown-5m-<unix>` / 1h=`dogecoin-...` |
+| `V3-btc-5m` 等 | 5 分钟 | `btc-updown-5m-<unix>` |
+| `V3-btc-15m` 等 | 15 分钟 | `btc-updown-15m-<unix>` |
+| `V3-eth-1h` 等 | 1 小时 | `ethereum` / `btc` 等 1h ET slug |
 
 - 共用同一 `.env` 钱包 / CLOB 凭证
 - `BOT_INSTANCE` + `CANDLE_TIMEFRAME` 隔离状态与日志
-- Telegram 消息带 `[SOL·15m]` / `[DOGE·5m]` 前缀；可用**一个论坛群 + Topics**按实例分话题（见 [DEPLOY.md](./DEPLOY.md)）
+- Telegram 消息带 `[BTC·15m]` / `[ETH·5m]` 前缀；可用**一个论坛群 + Topics**按实例分话题（见 [DEPLOY.md](./DEPLOY.md)）
 - `MAX_DAILY_LOSS_USD` **按实例分别累计**（多路合计可能超过单路上限）
 - `MARKET_CYCLE_MINUTES` 可省略：由 `CANDLE_TIMEFRAME` 自动推导（`5m→5`，`15m→15`，`1h→60`）
 
@@ -202,13 +198,13 @@ docs/
 
 | 命令 | 说明 |
 |------|------|
-| `npm run pm2:start` | 实盘十二开 **SOL+BNB+XRP+DOGE × 5m/15m/1h** |
-| `npm run pm2:dry` | 模拟盘十二开 |
+| `npm run pm2:start` | 实盘六开 **BTC+ETH × 5m/15m/1h** |
+| `npm run pm2:dry` | 模拟盘六开 |
 | `npm run pm2:restart` | 重启全部实例 |
 | `npm run pm2:stop` | 停止全部实例 |
 | `npm run pm2:logs` | 查看日志 |
-| `npm run pm2:sol:start` / `bnb` / `xrp` / `doge` | 只开某一标的三周期 |
-| `npm run start:sol:5m` / `start:doge:5m` 等 | 单进程实盘 |
+| `npm run pm2:btc:start` / `pm2:eth:start` | 只开某一标的三周期 |
+| `npm run start:btc:5m` / `start:eth:5m` 等 | 单进程实盘 |
 | `npm run dry:5m` / `dry:15m` / `dry:1h` | 单进程空跑 |
 | `npm run encrypt-key` | 加密私钥 |
 | `npm run create-api-key` | 生成 CLOB API 凭证 |
@@ -249,9 +245,9 @@ pm2 save && pm2 startup
 
 ## 注意事项
 
-- 钱包需有足够 **pUSD**（≥ `MIN_BALANCE_USD`）；双开时注意两路马丁同时加仓的余额与敞口
+- 钱包需有足够 **pUSD**（≥ `MIN_BALANCE_USD`）；六开时注意多路马丁同时加仓的余额与敞口
 - 国内：`OHLCV_EXCHANGE=okx`；需访问 `gamma-api.polymarket.com` 与 `clob.polymarket.com`
 - 默认 `SETTLE_SOURCE=chainlink`（需能连 `wss://ws-live-data.polymarket.com`）；改 `okx` 则用永续 K 线结算、可不启 RTDS
 - 首次务必 `DRY_RUN` / `pm2:dry` 确认信号与 slug 正常后再实盘
-- 若曾跑过旧单进程 `V3`，先 `pm2 delete V3` 再 `pm2:start`
+- 若曾跑过旧标的（SOL/BNB 等），先 `pm2 delete all` 再 `pm2:start`（实例名已变为 `V3-btc-*` / `V3-eth-*`）
 - `.env` 中旧版 `SESSION_GATE_*`、`ACTIVITY_*`、`VOLATILITY_*` 等实盘不再读取，可删除

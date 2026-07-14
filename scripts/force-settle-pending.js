@@ -2,9 +2,9 @@
  * One-shot: load pending-bet for an instance and attempt settlement.
  *
  * Usage:
- *   node scripts/force-settle-pending.js --instance=xrp-5m
- *   node scripts/force-settle-pending.js --instance=xrp-5m --symbol=XRP/USDT
- *   node scripts/force-settle-pending.js --instance=xrp-5m --clear   # void pending without settling
+ *   node scripts/force-settle-pending.js --instance=btc-5m
+ *   node scripts/force-settle-pending.js --instance=btc-5m --symbol=BTC/USDT
+ *   node scripts/force-settle-pending.js --instance=btc-5m --clear   # void pending without settling
  */
 import { existsSync, readFileSync, rmSync } from 'fs';
 import { join, dirname } from 'path';
@@ -16,7 +16,7 @@ const symbolArg = args.find((a) => a.startsWith('--symbol='));
 const clearOnly = args.includes('--clear');
 
 if (!instanceArg) {
-  console.error('Usage: node scripts/force-settle-pending.js --instance=xrp-5m [--symbol=XRP/USDT] [--clear]');
+  console.error('Usage: node scripts/force-settle-pending.js --instance=btc-5m [--symbol=BTC/USDT] [--clear]');
   process.exit(1);
 }
 

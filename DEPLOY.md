@@ -120,7 +120,7 @@ DRY_RUN=true node scripts/test-cycle.js
 
 ---
 
-## 五、PM2 常驻（5m + 15m + 1h 三开）
+## 五、PM2 常驻（BTC + ETH × 5m/15m/1h 六开）
 
 ```bash
 sudo npm install -g pm2
@@ -129,7 +129,7 @@ mkdir -p logs
 
 export POLY_KEY_PASSWORD="你的解密密码"
 npm run pm2:dry          # 或 npm run pm2:start 实盘
-pm2 logs                 # V3-5m / V3-15m / V3-1h
+pm2 logs                 # V3-btc-5m / V3-eth-15m 等
 pm2 save && pm2 startup
 ```
 
@@ -144,7 +144,7 @@ pm2 save && pm2 startup
 1. 新建 Telegram **群组** → 开启 **Topics（话题）**  
 2. 把 Bot 拉进群并设为管理员（需能管理话题）  
 3. `.env` 填好 `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`（群 ID，多为 `-100…`）  
-4. 生成六个话题并写入 thread id：
+4. 生成 BTC/ETH × 三周期共六个话题并写入 thread id：
 
 ```bash
 npm run setup:tg-topics -- --write-env
@@ -154,7 +154,7 @@ npm run setup:tg-topics -- --write-env
 5. 验证某个话题：
 
 ```bash
-node scripts/test-telegram.js --instance=sol-5m
+node scripts/test-telegram.js --instance=btc-5m
 ```
 
 6. 重启 PM2：`pm2 delete all && npm run pm2:start`

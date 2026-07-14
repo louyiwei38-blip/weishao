@@ -1,9 +1,9 @@
 /**
- * PM2 — SOL + BNB + XRP + DOGE × (5m + 15m + 1h) 十二实例并行（同一钱包 / .env 凭证）
+ * PM2 — BTC + ETH × (5m + 15m + 1h) 六实例并行（同一钱包 / .env 凭证）
  *
  * 模拟盘: npm run pm2:dry
  * 实盘:   npm run pm2:start
- * 单标的: npm run pm2:sol:start / pm2:bnb:start / pm2:xrp:start / pm2:doge:start
+ * 单标的: npm run pm2:btc:start / pm2:eth:start
  * 日志:   pm2 logs
  * 停止:   npm run pm2:stop
  *
@@ -11,7 +11,7 @@
  * TRADE_BUDGET / MARTINGALE / ORDER_TYPE / SETTLE_SOURCE / OHLCV 等一律读 .env
  *（见 src/config.js：.env override，再恢复下方 PM2 键）。
  *
- * Telegram 论坛话题：在 .env 配置 TELEGRAM_THREAD_SOL_5M 等，
+ * Telegram 论坛话题：在 .env 配置 TELEGRAM_THREAD_BTC_5M 等，
  * 启动时映射为每进程 TELEGRAM_MESSAGE_THREAD_ID（见 scripts/setup-telegram-topics.js）。
  */
 const path = require('path');
@@ -32,7 +32,7 @@ const shared = {
   time: true,
 };
 
-/** BOT_INSTANCE id → TELEGRAM_THREAD_SOL_5M env key */
+/** BOT_INSTANCE id → TELEGRAM_THREAD_BTC_5M env key */
 function threadIdFor(instanceId) {
   const key = `TELEGRAM_THREAD_${String(instanceId).replace(/-/g, '_').toUpperCase()}`;
   const raw = process.env[key];
@@ -41,7 +41,7 @@ function threadIdFor(instanceId) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-/** @param {'SOL'|'BNB'|'XRP'|'DOGE'} base @param {'5m'|'15m'|'1h'} tf @param {number} minutes */
+/** @param {'BTC'|'ETH'} base @param {'5m'|'15m'|'1h'} tf @param {number} minutes */
 function app(base, tf, minutes) {
   const id = `${base.toLowerCase()}-${tf}`;
   const threadId = threadIdFor(id);
@@ -76,7 +76,7 @@ const TIMEFRAMES = [
   ['1h', 60],
 ];
 
-const SYMBOLS = ['SOL', 'BNB', 'XRP', 'DOGE'];
+const SYMBOLS = ['BTC', 'ETH'];
 
 module.exports = {
   apps: SYMBOLS.flatMap((base) =>
