@@ -399,22 +399,27 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
         ? `\n💰 ${signalObj.signal === 'UP' ? 'YES' : 'NO'} 盘口 $${signalObj.signal === 'UP' ? pricePolicy.originalYesPrice : pricePolicy.originalNoPrice} 超阈值 — 按 $${pricePolicy.maxLimitPrice} 挂单\n`
         : '';
       const sourceNote = source === 'mg_cont_fast' ? `\n⚡ 快路径: 结算输后续单\n` : '';
-      await notifyTelegram(
-        `${tgHead('🤖 <b>开单成交</b>')}\n` +
-        `方向: <b>${side}</b> (${signalObj.signalId})\n` +
-        `周期: ${config.timeframe}\n` +
-        `原因: ${escapeHtml(signalObj.reason)}\n` +
-        sourceNote +
-        capNote +
-        priceOdds +
-        (fillNote ? `成交明细: ${escapeHtml(fillNote)}\n` : '') +
-        formatChainTelegramLines(mgState) +
-        `类型: ${orderResult.orderType ?? config.orderType}\n` +
-        await formatBalanceTelegramLine(balance) +
-        `盘口: ${market.slug}\n` +
-        `时间: ${formatBeijingTime(cycleStartTs)}\n` +
-        formatStatsTelegramBlock()
-      );
+      // TG off critical path — do not hold tradeLock waiting on Telegram/balance.
+      trackWork((async () => {
+        await notifyTelegram(
+          `${tgHead('🤖 <b>开单成交</b>')}\n` +
+          `方向: <b>${side}</b> (${signalObj.signalId})\n` +
+          `周期: ${config.timeframe}\n` +
+          `原因: ${escapeHtml(signalObj.reason)}\n` +
+          sourceNote +
+          capNote +
+          priceOdds +
+          (fillNote ? `成交明细: ${escapeHtml(fillNote)}\n` : '') +
+          formatChainTelegramLines(mgState) +
+          `类型: ${orderResult.orderType ?? config.orderType}\n` +
+          await formatBalanceTelegramLine(balance) +
+          `盘口: ${market.slug}\n` +
+          `时间: ${formatBeijingTime(cycleStartTs)}\n` +
+          formatStatsTelegramBlock()
+        );
+      })().catch((err) => {
+        logger.warn('[main] 开单成交 Telegram 推送失败', { error: err?.message });
+      }));
       return { status: 'filled', signal: signalObj.signal, signalId: signalObj.signalId };
     }
 
@@ -447,20 +452,24 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
         ? `\n💰 ${signalObj.signal === 'UP' ? 'YES' : 'NO'} 盘口 $${signalObj.signal === 'UP' ? pricePolicy.originalYesPrice : pricePolicy.originalNoPrice} 超阈值 — 按 $${pricePolicy.maxLimitPrice} 挂单\n`
         : '';
       const sourceNote = source === 'mg_cont_fast' ? `\n⚡ 快路径: 结算输后续单\n` : '';
-      await notifyTelegram(
-        `${tgHead('⏳ <b>限价挂单</b>')}\n` +
-        `方向: <b>${side}</b> (${signalObj.signalId})\n` +
-        `周期: ${config.timeframe}\n` +
-        `原因: ${escapeHtml(signalObj.reason)}\n` +
-        sourceNote +
-        capNote +
-        priceOdds +
-        formatChainTelegramLines(mgState) +
-        await formatBalanceTelegramLine(balance) +
-        `盘口: ${market.slug}\n` +
-        `周期内自动监视成交\n` +
-        formatStatsTelegramBlock()
-      );
+      trackWork((async () => {
+        await notifyTelegram(
+          `${tgHead('⏳ <b>限价挂单</b>')}\n` +
+          `方向: <b>${side}</b> (${signalObj.signalId})\n` +
+          `周期: ${config.timeframe}\n` +
+          `原因: ${escapeHtml(signalObj.reason)}\n` +
+          sourceNote +
+          capNote +
+          priceOdds +
+          formatChainTelegramLines(mgState) +
+          await formatBalanceTelegramLine(balance) +
+          `盘口: ${market.slug}\n` +
+          `周期内自动监视成交\n` +
+          formatStatsTelegramBlock()
+        );
+      })().catch((err) => {
+        logger.warn('[main] 限价挂单 Telegram 推送失败', { error: err?.message });
+      }));
       return { status: 'resting', signal: signalObj.signal, signalId: signalObj.signalId };
     }
 
@@ -871,6 +880,16 @@ function registerPendingBet({
   markCycleOrdered(cycleStartTs);
   savePending();
   scheduleChainlinkSettlement(pendingBet);
+  // Prewarm NEXT window market so loss → MG_CONT can hit Gamma cache immediately.
+  const nextCycle = cycleStartTs + CYCLE_MS;
+  trackWork(
+    findCurrentCycleMarket(nextCycle, nextCycle + CYCLE_MS).catch((err) => {
+      logger.debug('[main] 下一周期盘口预热失败（不影响结算）', {
+        nextCycle: formatBeijingTime(nextCycle),
+        error: err?.message,
+      });
+    }),
+  );
   logger.info('[main] 待结算注单已登记', {
     cycleStartTs: formatBeijingTime(cycleStartTs),
     signal,
@@ -1012,7 +1031,28 @@ async function applySettlement(pending, { candles } = {}) {
   });
 
   const mg = martingale.getState();
-  const balanceLine = await formatBalanceTelegramLine();
+
+  // Settlement-driven fast path FIRST — do not wait on Telegram/balance before re-entry.
+  if (shouldMgContFastPath({
+    enabled: config.mgContFastPath,
+    won,
+    halted,
+    phase: vegasState.getState().phase,
+    lockedSignal: vegasState.getState().lockedSignal,
+  })) {
+    const t0 = Date.now();
+    const fastPromise = trackWork(
+      maybeMgContFastPath(cycleStartTs).catch((err) => {
+        logger.error('[main] MG_CONT 快路径异常', { error: err?.message, stack: err?.stack });
+        return { status: 'error' };
+      }),
+    );
+    const fastResult = await fastPromise;
+    logger.info('[main] MG_CONT 快路径完成', {
+      status: fastResult?.status,
+      elapsedMs: Date.now() - t0,
+    });
+  }
 
   const resultEmoji = won ? '✅' : '❌';
   const resultText = won ? '赢' : '输';
@@ -1030,43 +1070,32 @@ async function applySettlement(pending, { candles } = {}) {
     ? `目标价: $${targetPrice.toFixed(2)} → 收盘价: $${closePrice.toFixed(2)}\n`
     : `开盘: $${targetPrice.toFixed(2)} → 收盘: $${closePrice.toFixed(2)}\n`;
 
-  await notifyTelegram(
-    `${tgHead(`${resultEmoji} <b>结算${resultText}</b> (${sourceLabel})`)}\n` +
-    `窗口: ${windowLabel}\n` +
-    `周期: ${config.timeframe}\n` +
-    `方向: ${side}\n` +
-    formatSettlementTradeLines({
-      entryPrice: price,
-      actualBet,
-      pnlUsd,
-      formatPnl: stats.formatPnlUsd,
-    }) +
-    `本链路盈亏: <b>${stats.formatPnlUsd(chainPnlUsd)}</b>\n` +
-    priceLine +
-    `结果: <b>${winningOutcome}</b> (Δ ${settleDelta >= 0 ? '+' : ''}${settleDelta.toFixed(2)})\n` +
-    mismatchNote + haltNote +
-    `下一注: <b>$${mg.currentBet}</b>  (首注 $${mg.baseBet} · 连败 ${mg.consecutiveLosses})\n` +
-    `今日亏损: $${getDailyLossUsd().toFixed(2)} / $${config.maxDailyLossUsd}\n` +
-    balanceLine +
-    formatStatsTelegramBlock()
-  );
-
-  // Settlement-driven fast path: loss + still in_chain → order next window ASAP
-  if (shouldMgContFastPath({
-    enabled: config.mgContFastPath,
-    won,
-    halted,
-    phase: vegasState.getState().phase,
-    lockedSignal: vegasState.getState().lockedSignal,
-  })) {
-    const fastPromise = trackWork(
-      maybeMgContFastPath(cycleStartTs).catch((err) => {
-        logger.error('[main] MG_CONT 快路径异常', { error: err?.message, stack: err?.stack });
-        return { status: 'error' };
-      }),
+  // Telegram after MG_CONT so settle→order latency is not inflated by TG retries.
+  trackWork((async () => {
+    const balanceLine = await formatBalanceTelegramLine();
+    await notifyTelegram(
+      `${tgHead(`${resultEmoji} <b>结算${resultText}</b> (${sourceLabel})`)}\n` +
+      `窗口: ${windowLabel}\n` +
+      `周期: ${config.timeframe}\n` +
+      `方向: ${side}\n` +
+      formatSettlementTradeLines({
+        entryPrice: price,
+        actualBet,
+        pnlUsd,
+        formatPnl: stats.formatPnlUsd,
+      }) +
+      `本链路盈亏: <b>${stats.formatPnlUsd(chainPnlUsd)}</b>\n` +
+      priceLine +
+      `结果: <b>${winningOutcome}</b> (Δ ${settleDelta >= 0 ? '+' : ''}${settleDelta.toFixed(2)})\n` +
+      mismatchNote + haltNote +
+      `下一注: <b>$${mg.currentBet}</b>  (首注 $${mg.baseBet} · 连败 ${mg.consecutiveLosses})\n` +
+      `今日亏损: $${getDailyLossUsd().toFixed(2)} / $${config.maxDailyLossUsd}\n` +
+      balanceLine +
+      formatStatsTelegramBlock()
     );
-    await fastPromise;
-  }
+  })().catch((err) => {
+    logger.warn('[main] 结算 Telegram 推送失败', { error: err?.message });
+  }));
 
   return true;
 }

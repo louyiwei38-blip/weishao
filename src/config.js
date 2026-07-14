@@ -102,8 +102,8 @@ const config = {
   candleLimit: num('CANDLE_FETCH_LIMIT', 200),
   /** New-signal delay after UTC boundary; timeframe-aware default (5m→3s, 15m→4s, 1h→5s). */
   signalDelayMs: num('SIGNAL_DELAY_MS', defaultSignalDelayMs(timeframe)),
-  /** in_chain MG_CONT: short delay (no candle/EMA needed). */
-  inChainSignalDelayMs: num('IN_CHAIN_SIGNAL_DELAY_MS', 300),
+  /** in_chain MG_CONT: short delay (no candle/EMA needed). Fallback when settle fast-path misses. */
+  inChainSignalDelayMs: num('IN_CHAIN_SIGNAL_DELAY_MS', 100),
   /** Prefetch Gamma/CLOB/balance this many ms before the next boundary. */
   prewarmMs: num('PREWARM_MS', 5000),
   /** After Chainlink/OKX loss (< max losses): place next-cycle order immediately. */
