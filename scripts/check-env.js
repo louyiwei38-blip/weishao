@@ -4,6 +4,10 @@ import { config as loadEnv } from 'dotenv';
 import { existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
+const { buildInstances } = require('./lib/tradingUniverse.cjs');
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const envPath = join(root, '.env');
@@ -52,6 +56,14 @@ if (dynEnabled) {
   console.log(`     tier1=$${process.env.BASE_BET_TIER1_USD ?? '2'} weak=$${process.env.BASE_BET_WEAK_MIN_USD ?? '2'}-$${process.env.BASE_BET_WEAK_MAX_USD ?? '3'} amp=$${process.env.BASE_BET_AMP_MIN_USD ?? '4'}-$${process.env.BASE_BET_AMP_MAX_USD ?? '12'}`);
 } else {
   status('TRADE_BUDGET_USD');
+}
+
+console.log('\n--- Trading universe (PM2) ---');
+{
+  const instances = buildInstances(process.env);
+  console.log(
+    `OK  TRADING_SYMBOLS → ${instances.length} process(es): ${instances.map((i) => i.id).join(', ')}`,
+  );
 }
 
 console.log('\n--- Recommended ---');

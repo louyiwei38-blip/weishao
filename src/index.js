@@ -1,6 +1,6 @@
 /**
  * Polymarket Vegas Channel Bot — entry point
- * OKX OHLCV | EMA144/169 Vegas cross-entry | Same-dir Martingale ×3 / 5-loss stop
+ * OKX OHLCV | EMA144/169 Vegas cross-entry | Same-dir Martingale ×1 / 5-loss stop
  * Multi-instance: BOT_INSTANCE + CANDLE_TIMEFRAME (PM2: 15m + 5m)
  */
 
@@ -42,6 +42,7 @@ import {
   getBalance,
   getClobClient,
   placeOrder,
+  peekExpectedEntryPrice,
   recordLoss,
   isDailyLossExceeded,
   initDailyLoss,
@@ -57,6 +58,7 @@ import {
   hasActiveRestingFillWatch,
 } from './trader/restingFillWatcher.js';
 import * as martingale from './martingale/manager.js';
+import { formatBankrollTelegramLines } from './martingale/bankroll.js';
 import * as stats from './stats/manager.js';
 import { notifyTelegram, escapeHtml } from './utils/telegram.js';
 import { formatBeijingTime } from './utils/datetime.js';
@@ -116,12 +118,13 @@ function formatStatsTelegramBlock() {
   return stats.formatTelegramBlock();
 }
 
-/** 开单/结算共用：本链路累计盈亏 + 马丁进度 */
-function formatChainTelegramLines(mgState = martingale.getState()) {
+/** 开单/结算共用：本链路累计盈亏 + 马丁进度 + 共享资金线 */
+function formatChainTelegramLines(mgState = martingale.getState(), sizing = null) {
   const chainPnl = Number(mgState.chainPnlUsd) || 0;
   return (
     `本链路盈亏: <b>${stats.formatPnlUsd(chainPnl)}</b>\n` +
-    `马丁: 首注 $${mgState.baseBet} · 连败 ${mgState.consecutiveLosses} · 当前注 $${mgState.currentBet}\n`
+    `马丁: 默认首注 $${config.tradeBudgetUsd} · 连败 ${mgState.consecutiveLosses} · 本单注 $${mgState.currentBet}\n` +
+    formatBankrollTelegramLines(sizing)
   );
 }
 
@@ -328,14 +331,30 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
       return { status: 'low_balance', signal: signalObj.signal, signalId: signalObj.signalId };
     }
 
+    const tokenID = signalObj.signal === 'UP' ? market.yesTokenId : market.noTokenId;
+    let sizingPrice =
+      signalObj.signal === 'UP'
+        ? (pricePolicy.yesPrice ?? market.yesPrice)
+        : (pricePolicy.noPrice ?? market.noPrice);
+    try {
+      const quote = await peekExpectedEntryPrice(tokenID);
+      if (quote?.entryPrice > 0) sizingPrice = quote.entryPrice;
+    } catch (err) {
+      logger.warn('[main] 订单簿询价失败 — 用 Gamma 价估算仓位', {
+        error: err?.message ?? String(err),
+        sizingPrice,
+      });
+    }
+
     const mgState = martingale.getState();
-    const { actualBet, skipReason } = martingale.prepareOrder(balance);
+    const { actualBet, skipReason, sizing } = martingale.prepareOrder(balance, sizingPrice);
     if (skipReason) {
       logger.info('[main] 马丁格尔策略跳过下单', {
         skipReason,
         signal: signalObj.signal,
         signalId: signalObj.signalId,
         source,
+        sizing,
         ...stats.formatLogFields(),
       });
       return { status: `martingale_${skipReason}`, signal: signalObj.signal, signalId: signalObj.signalId };
@@ -349,7 +368,7 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
       conditionId: market.conditionId,
       cycleStartTs,
       actualBet,
-      baseBet: mgState.baseBet,
+      baseBet: config.tradeBudgetUsd,
       consecutiveLosses: mgState.consecutiveLosses,
       yesPrice: pricePolicy.yesPrice ?? market.yesPrice,
       noPrice: pricePolicy.noPrice ?? market.noPrice,
@@ -357,6 +376,8 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
       priceCapped: pricePolicy.priceCapped,
       originalYesPrice: pricePolicy.originalYesPrice,
       deadlineMs: tradeDeadline,
+      sizing,
+      availableBalance: balance,
     });
 
     if (orderResult.skipped) {
@@ -410,7 +431,7 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
           capNote +
           priceOdds +
           (fillNote ? `成交明细: ${escapeHtml(fillNote)}\n` : '') +
-          formatChainTelegramLines(mgState) +
+          formatChainTelegramLines(mgState, sizing) +
           `类型: ${orderResult.orderType ?? config.orderType}\n` +
           await formatBalanceTelegramLine(balance) +
           `盘口: ${market.slug}\n` +
@@ -438,6 +459,10 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
         signalReason: signalObj.reason,
         cycleEndMs,
         limitPrice: orderResult.limitPrice,
+        companionOrderIds: orderResult.companionOrderIds || (
+          orderResult.topUpOrderId ? [orderResult.topUpOrderId] : []
+        ),
+        topUpOrderId: orderResult.topUpOrderId || null,
       });
 
       const side = signalObj.signal === 'UP' ? '📈 买涨 UP' : '📉 买跌 DOWN';
@@ -461,7 +486,7 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
           sourceNote +
           capNote +
           priceOdds +
-          formatChainTelegramLines(mgState) +
+          formatChainTelegramLines(mgState, sizing) +
           await formatBalanceTelegramLine(balance) +
           `盘口: ${market.slug}\n` +
           `周期内自动监视成交\n` +
@@ -1088,7 +1113,8 @@ async function applySettlement(pending, { candles } = {}) {
       priceLine +
       `结果: <b>${winningOutcome}</b> (Δ ${settleDelta >= 0 ? '+' : ''}${settleDelta.toFixed(2)})\n` +
       mismatchNote + haltNote +
-      `下一注: <b>$${mg.currentBet}</b>  (首注 $${mg.baseBet} · 连败 ${mg.consecutiveLosses})\n` +
+      `连败: ${mg.consecutiveLosses} · 默认首注 $${config.tradeBudgetUsd}\n` +
+      formatBankrollTelegramLines() +
       `今日亏损: $${getDailyLossUsd().toFixed(2)} / $${config.maxDailyLossUsd}\n` +
       balanceLine +
       formatStatsTelegramBlock()
@@ -1129,6 +1155,18 @@ async function scheduler() {
   loadPending();
   warnOrderPolicyMismatch();
 
+  let startupBalance = null;
+  try {
+    startupBalance = await getBalance();
+    martingale.bankroll.ensurePrincipal(startupBalance);
+  } catch (err) {
+    logger.warn('[main] 启动时读取余额失败 — 本金将在首单前锁定', {
+      error: err?.message ?? String(err),
+    });
+  }
+
+  const br = martingale.bankroll.getState();
+
   logger.info('▶ 机器人启动', {
     symbol: config.symbol,
     timeframe: config.timeframe,
@@ -1154,6 +1192,8 @@ async function scheduler() {
     tradeBudgetUsd: config.tradeBudgetUsd,
     martingaleMultiplier: config.martingaleMultiplier,
     martingaleMaxLosses: config.martingaleMaxLosses,
+    bankroll: br,
+    startupBalance,
     orderType: config.orderType,
     orderRetryDelayMs: config.orderRetryDelayMs,
     orderPriceCap: config.orderPriceCap,
@@ -1176,12 +1216,12 @@ async function scheduler() {
     });
   }
 
-  // Stagger startup TG across 9 PM2 instances to reduce 429 bursts
+  // Stagger startup TG across timeframe instances to reduce 429 bursts
   {
     const id = String(config.instanceId || '');
     let h = 0;
     for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-    const staggerMs = (h % 9) * 1200;
+    const staggerMs = (h % 3) * 1200;
     if (staggerMs > 0) {
       logger.info('[telegram] 启动通知错峰', { staggerMs, instanceId: id });
       await sleepUntilShutdown(staggerMs);
@@ -1195,7 +1235,9 @@ async function scheduler() {
     `实例: ${config.instanceId}\n` +
     `模式: ${config.dryRun ? 'DRY_RUN' : 'LIVE'}\n` +
     `结算: <b>${escapeHtml(settleSourceLabel())}</b> (${escapeHtml(config.settleSource)})\n` +
-    `马丁: $${config.tradeBudgetUsd} ×${config.martingaleMultiplier} / 连亏${config.martingaleMaxLosses}`
+    `马丁: 默认$${config.tradeBudgetUsd} ×${config.martingaleMultiplier} / 连亏${config.martingaleMaxLosses}\n` +
+    formatBankrollTelegramLines() +
+    (startupBalance != null ? `启动余额: $${Number(startupBalance).toFixed(2)}\n` : '')
   );
 
   initChainlinkSettler({

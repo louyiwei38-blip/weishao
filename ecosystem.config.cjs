@@ -1,18 +1,15 @@
 /**
- * PM2 — BTC + ETH × (5m + 15m + 1h) 六实例并行（同一钱包 / .env 凭证）
+ * PM2 — multi-symbol × multi-timeframe from .env
+ *
+ * Only edit .env:
+ *   TRADING_SYMBOLS=BTC,ETH
+ *   CANDLE_TIMEFRAMES=5m,15m,1h
  *
  * 模拟盘: npm run pm2:dry
  * 实盘:   npm run pm2:start
- * 单标的: npm run pm2:btc:start / pm2:eth:start
- * 日志:   pm2 logs
- * 停止:   npm run pm2:stop
  *
- * 这里只注入「多实例身份」相关变量。
- * TRADE_BUDGET / MARTINGALE / ORDER_TYPE / SETTLE_SOURCE / OHLCV 等一律读 .env
- *（见 src/config.js：.env override，再恢复下方 PM2 键）。
- *
- * Telegram 论坛话题：在 .env 配置 TELEGRAM_THREAD_BTC_5M 等，
- * 启动时映射为每进程 TELEGRAM_MESSAGE_THREAD_ID（见 scripts/setup-telegram-topics.js）。
+ * Identity vars are injected per process; budget/bankroll/martingale/order
+ * settings always come from .env (see src/config.js).
  */
 const path = require('path');
 try {
@@ -20,6 +17,11 @@ try {
 } catch {
   // dotenv optional at PM2 config load time
 }
+
+const {
+  parseTradingSymbolBases,
+  parseCandleTimeframes,
+} = require('./scripts/lib/tradingUniverse.cjs');
 
 const shared = {
   script: 'src/index.js',
@@ -41,7 +43,7 @@ function threadIdFor(instanceId) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-/** @param {'BTC'|'ETH'} base @param {'5m'|'15m'|'1h'} tf @param {number} minutes */
+/** @param {string} base @param {string} tf @param {number} minutes */
 function app(base, tf, minutes) {
   const id = `${base.toLowerCase()}-${tf}`;
   const threadId = threadIdFor(id);
@@ -70,13 +72,8 @@ function app(base, tf, minutes) {
   };
 }
 
-const TIMEFRAMES = [
-  ['5m', 5],
-  ['15m', 15],
-  ['1h', 60],
-];
-
-const SYMBOLS = ['BTC', 'ETH'];
+const SYMBOLS = parseTradingSymbolBases(process.env);
+const TIMEFRAMES = parseCandleTimeframes(process.env);
 
 module.exports = {
   apps: SYMBOLS.flatMap((base) =>

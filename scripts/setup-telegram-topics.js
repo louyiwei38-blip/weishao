@@ -16,7 +16,11 @@
 import { existsSync, appendFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 import dotenv from 'dotenv';
+
+const require = createRequire(import.meta.url);
+const { buildInstances } = require('./lib/tradingUniverse.cjs');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
@@ -31,14 +35,11 @@ const dry = process.argv.includes('--dry');
 const writeEnv = process.argv.includes('--write-env');
 const checkOnly = process.argv.includes('--check');
 
-const INSTANCES = [
-  { id: 'btc-5m', name: 'BTC 5m' },
-  { id: 'btc-15m', name: 'BTC 15m' },
-  { id: 'btc-1h', name: 'BTC 1h' },
-  { id: 'eth-5m', name: 'ETH 5m' },
-  { id: 'eth-15m', name: 'ETH 15m' },
-  { id: 'eth-1h', name: 'ETH 1h' },
-];
+const INSTANCES = buildInstances(process.env);
+console.log(
+  'instances from .env:',
+  INSTANCES.map((i) => i.id).join(', ') || '(none)',
+);
 
 function envKey(id) {
   return `TELEGRAM_THREAD_${id.replace(/-/g, '_').toUpperCase()}`;

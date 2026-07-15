@@ -259,7 +259,8 @@ won = (bet signal == winningOutcome)
 | `src/trader/fillSync.js` | 成交解析与短时轮询 |
 | `src/trader/restingFillWatcher.js` | GTC 周期内补偿轮询 |
 | `src/trader/chainlinkSettle.js` | 结算调度、交叉校验 helper |
-| `src/martingale/manager.js` | 马丁状态机（同向 ×3；5 连亏立即重置） |
+| `src/martingale/manager.js` | 连亏计数 / halt；每枪仓位交给 bankroll |
+| `src/martingale/bankroll.js` | 共享本金 P + 净胜负 N；动态首注（默认/追赶） |
 | `src/utils/websocket.js` | RTDS WebSocket（native / ws 包） |
 
 ---

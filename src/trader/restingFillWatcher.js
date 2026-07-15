@@ -8,7 +8,7 @@ import logger from '../utils/logger.js';
 import { sleep } from '../utils/retry.js';
 import { formatBeijingTime } from '../utils/datetime.js';
 import { getClobClient, clobHasL2Creds } from './executor.js';
-import { fetchFillFromOrder, formatFillNote } from './fillSync.js';
+import { fetchFillFromOrder } from './fillSync.js';
 
 /** @type {Map<string, { abort: boolean }>} */
 const active = new Map();
@@ -23,6 +23,10 @@ export function initRestingFillWatcher(handler) {
 async function pollUntilFilledOrCycleEnd(entry) {
   const { orderId, cycleEndMs, ctx } = entry;
   const pollMs = config.fillSyncPollMs;
+  const companionIds = Array.isArray(ctx.companionOrderIds)
+    ? ctx.companionOrderIds.filter(Boolean)
+    : (ctx.topUpOrderId ? [ctx.topUpOrderId] : []);
+  const allIds = [orderId, ...companionIds].filter(Boolean);
 
   const client = await getClobClient();
   if (!clobHasL2Creds(client)) {
@@ -32,27 +36,48 @@ async function pollUntilFilledOrCycleEnd(entry) {
 
   logger.info(
     `[fillWatch] 监视挂单至 ${formatBeijingTime(cycleEndMs)} ` +
-    `orderId=${orderId}`
+    `orderIds=${allIds.join(',')}`
   );
 
   while (Date.now() < cycleEndMs) {
     if (entry.abort) return;
 
     try {
-      const fill = await fetchFillFromOrder(client, orderId);
-      if (fill.usdcSpent > 0) {
-        const tag = fill.resting ? '部分成交' : '已成交';
-        logger.info(
-          `[fillWatch] ${tag} | ${formatFillNote(fill)} | orderId=${orderId}`
-        );
-        if (onOrderFilled) {
-          await onOrderFilled({
-            ...ctx,
-            actualBet: fill.usdcSpent,
-            fill,
-          });
+      let totalSpent = 0;
+      let lastFill = null;
+      let anyFill = false;
+      for (const id of allIds) {
+        const fill = await fetchFillFromOrder(client, id);
+        if (fill.usdcSpent > 0) {
+          anyFill = true;
+          totalSpent += fill.usdcSpent;
+          lastFill = fill;
         }
-        return;
+      }
+      if (anyFill && totalSpent > 0) {
+        // Wait until primary has fill, or no companions, before registering
+        const primaryFill = await fetchFillFromOrder(client, orderId);
+        if (primaryFill.usdcSpent > 0 || companionIds.length === 0) {
+          let spent = primaryFill.usdcSpent || 0;
+          for (const id of companionIds) {
+            const f = await fetchFillFromOrder(client, id);
+            spent += f.usdcSpent || 0;
+          }
+          logger.info(
+            `[fillWatch] 已成交合计 $${spent.toFixed(2)} | orderIds=${allIds.join(',')}`
+          );
+          if (onOrderFilled) {
+            await onOrderFilled({
+              ...ctx,
+              actualBet: spent,
+              fill: {
+                ...(lastFill || primaryFill),
+                usdcSpent: spent,
+              },
+            });
+          }
+          return;
+        }
       }
     } catch (err) {
       logger.warn(`[fillWatch] getOrder 失败: ${err?.message}`);

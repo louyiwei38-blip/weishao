@@ -1,8 +1,8 @@
 # Polymarket Vegas Channel Bot
 
-OKX USDT 永续 K 线 · EMA144/EMA169 维加斯通道穿越入场 · 同向马丁 **$3 ×3 / 连亏 5** · **BTC + ETH × 5m/15m/1h 六实例并行** · CLOB V2 · OKX/Chainlink 结算 · GTC 限价
+OKX USDT 永续 K 线 · EMA144/EMA169 维加斯通道穿越入场 · **多标的（`.env` 的 `TRADING_SYMBOLS`）** × 5m/15m/1h · 动态首注（默认 $10 / 追赶 T≤$20 / 单笔≤$30）· 共用本金 P 与净胜负 N · CLOB V2 · OKX/Chainlink 结算 · GTC 限价
 
-Polymarket **BTC / ETH** 的 **5 分钟 / 15 分钟 / 1 小时**涨跌盘口可同时运行：各拉对应周期 OKX 永续 K 线，按维加斯通道穿越产生信号；CLOB 限价/市价下单；默认 **Chainlink** 结算；同向马丁管理仓位。状态文件按实例隔离，互不覆盖。
+Polymarket 涨跌盘口可按 `.env` 配置多标的并行：例如 `TRADING_SYMBOLS=BTC,ETH` → 各周期独立进程；CLOB 限价/市价下单；默认 **Chainlink** 结算；同向马丁管理仓位。状态文件按实例隔离，互不覆盖。
 
 > 架构细节见 **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)** · 部署见 **[DEPLOY.md](./DEPLOY.md)**
 
@@ -22,7 +22,7 @@ Polymarket **BTC / ETH** 的 **5 分钟 / 15 分钟 / 1 小时**涨跌盘口可�
 
 1. `need_outside` — 等待至少一根已收盘 K **实体完全在通道外**，才进入 `armed`
 2. `armed` — 检测穿越入场；有信号则锁定方向进入 `in_chain` 并下首注
-3. `in_chain` — **不做新信号检测**；每周期同向续下（马丁 ×3）
+3. `in_chain` — **不做新信号检测**；每周期同向续下（马丁 ×1）
 4. 赢 → 停止并回 `need_outside`；连亏 5 次 → 止损重置并回 `need_outside`
 
 **安全闸门（下单前）：**
@@ -54,9 +54,10 @@ npm install
 cp .env.example .env          # 模拟盘可 DRY_RUN=true
 node scripts/check-env.js
 
-# 推荐：PM2 同时跑 BTC+ETH × 5m/15m/1h
-npm run pm2:dry               # 模拟盘六开
-npm run pm2:start             # 实盘六开
+# 推荐：改 .env 的 TRADING_SYMBOLS 后 PM2 一键开齐
+# TRADING_SYMBOLS=BTC,ETH
+npm run pm2:dry               # 模拟盘（标的×周期）
+npm run pm2:start             # 实盘
 pm2 logs
 
 # 或单实例
@@ -67,7 +68,27 @@ npm run start:eth:1h
 
 ---
 
-## 多实例 → PM2 现为 BTC/ETH 六开（× 5m/15m/1h）
+## 多标的：只改 `.env`
+
+```env
+TRADING_SYMBOLS=BTC,ETH          # 或 BTC/USDT,ETH/USDT,SOL
+CANDLE_TIMEFRAMES=5m,15m,1h      # 可选；默认三周期
+```
+
+然后：
+
+```bash
+pm2 delete all
+npm run pm2:start                # 或 pm2:dry
+# Telegram 话题（若用论坛群）：
+npm run setup:tg-topics -- --write-env
+```
+
+Chainlink 已支持：`BTC / ETH / SOL / BNB / XRP / DOGE`（需 Polymarket 有对应 Up/Down 盘口）。
+
+---
+
+## 多实例 → PM2（由 `TRADING_SYMBOLS` × `CANDLE_TIMEFRAMES` 生成）
 
 | PM2 进程 | 周期 | 盘口 slug 示例 |
 |----------|------|----------------|
@@ -144,8 +165,10 @@ docs/
 |------|------|------|
 | `OHLCV_EXCHANGE` | okx | K 线主交易所 |
 | `OHLCV_MARKET_TYPE` | swap | `swap`=USDT 永续；`spot`=现货 |
-| `TRADING_SYMBOL` | BTC/USDT | Polymarket slug + 结算标的 |
-| `CANDLE_TIMEFRAME` | 1h | 单进程默认；PM2 双开时由 ecosystem 覆盖 |
+| `TRADING_SYMBOLS` | BTC | **PM2 多标的列表**（`BTC,ETH` 或 `BTC/USDT,ETH/USDT`） |
+| `CANDLE_TIMEFRAMES` | 5m,15m,1h | **PM2 周期列表** |
+| `TRADING_SYMBOL` | BTC/USDT | 单进程 slug；PM2 时由 ecosystem 按标的注入 |
+| `CANDLE_TIMEFRAME` | 1h | 单进程默认；PM2 时由 ecosystem 覆盖 |
 | `MARKET_CYCLE_MINUTES` | 随 timeframe | 可省略，由 `CANDLE_TIMEFRAME` 推导 |
 | `BOT_INSTANCE` | = timeframe | 状态文件后缀 |
 | `CANDLE_FETCH_LIMIT` | 200 | EMA169 需 ≥170 |
@@ -155,15 +178,18 @@ docs/
 | `SIGNAL_DATA_RETRY_MS` | 800 | K 未新鲜 / EMA 未对齐时周期内重试间隔 |
 | `SIGNAL_DATA_MAX_WAIT_MS` | 60000 | 周期内等待数据就绪上限（仍预留下单窗口） |
 
-### 马丁 / 风控
+### 马丁 / 动态首注 / 风控
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `TRADE_BUDGET_USD` | 3 | 首注 |
-| `MARTINGALE_MULTIPLIER` | 3 | 连亏倍数 |
+| `TRADE_BUDGET_USD` | 10 | 跟上目标线时的默认投入 |
+| `MAX_BET_USD` | 30 | 单笔硬上限 |
+| `BANKROLL_STEP_USD` | 10 | 目标线步进（目标=本金+净胜负×step） |
+| `BANKROLL_CATCHUP_T_CAP` | 20 | 落后时目标净利 T 上限 |
+| `BANKROLL_STAKE_MAX_USD` | 30 | 动态仓位单笔上限 |
+| `MARTINGALE_MULTIPLIER` | 1 | 连亏倍数（仓位由动态首注重算） |
 | `MARTINGALE_MAX_LOSSES` | 5 | 连亏止损次数 |
 | `MAX_DAILY_LOSS_USD` | 10000 | 日亏损上限（**每实例**） |
-| `MAX_BET_USD` | 10000 | 单笔上限 |
 | `ORDER_PRICE_CAP` | 0.95 | YES/NO 限价封顶；`0`=不限制 |
 | `ORDER_TYPE` | GTC | `GTC` 限价 / `FOK` 市价 |
 | `DRY_RUN` | false | `true`=模拟下单 |
@@ -198,12 +224,12 @@ docs/
 
 | 命令 | 说明 |
 |------|------|
-| `npm run pm2:start` | 实盘六开 **BTC+ETH × 5m/15m/1h** |
-| `npm run pm2:dry` | 模拟盘六开 |
+| `npm run pm2:start` | 实盘：按 `.env` 的 `TRADING_SYMBOLS` × `CANDLE_TIMEFRAMES` 开齐 |
+| `npm run pm2:dry` | 模拟盘同上 |
 | `npm run pm2:restart` | 重启全部实例 |
 | `npm run pm2:stop` | 停止全部实例 |
 | `npm run pm2:logs` | 查看日志 |
-| `npm run pm2:btc:start` / `pm2:eth:start` | 只开某一标的三周期 |
+| `npm run pm2:btc:start` / `pm2:eth:start` | 只开某一标的三周期（需该标的在 SYMBOLS 内） |
 | `npm run start:btc:5m` / `start:eth:5m` 等 | 单进程实盘 |
 | `npm run dry:5m` / `dry:15m` / `dry:1h` | 单进程空跑 |
 | `npm run encrypt-key` | 加密私钥 |
@@ -216,7 +242,7 @@ docs/
 ## 回测
 
 ```bash
-# 与实盘同规则：首注 $3、×3、连亏 5、入场价 0.50、含手续费
+# 与实盘同规则：动态首注默认 $10、T≤$20、单笔≤$30、连亏 5、入场价 0.50、含手续费
 node scripts/backtest-vegas-1h.js --timeframe=15m --from=2020-01-01
 node scripts/backtest-vegas-1h.js --timeframe=5m --from=2020-01-01
 node scripts/backtest-vegas-1h.js --timeframe=1h --from=2020-01-01

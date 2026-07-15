@@ -97,7 +97,45 @@ const config = {
   },
 
   // Polymarket / Chainlink slug (not the OHLCV fetch symbol when OHLCV_MARKET_TYPE=swap)
+  // PM2 multi-symbol: set TRADING_SYMBOLS=BTC,ETH in .env; ecosystem injects TRADING_SYMBOL per process
   symbol: optional('TRADING_SYMBOL', 'BTC/USDT'),
+  /**
+   * Bases for PM2 universe (informational). Live process uses `symbol` only.
+   * Parsed from TRADING_SYMBOLS, else TRADING_SYMBOL.
+   */
+  tradingSymbolBases: (() => {
+    const multi = optional('TRADING_SYMBOLS', '');
+    const raw = multi && String(multi).trim()
+      ? multi
+      : optional('TRADING_SYMBOL', 'BTC/USDT');
+    const bases = [];
+    const seen = new Set();
+    for (const tok of String(raw).split(/[,;\s]+/)) {
+      const t = tok.trim();
+      if (!t) continue;
+      const base = (t.includes('/') ? t.split('/')[0] : t)
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '');
+      if (!base || seen.has(base)) continue;
+      seen.add(base);
+      bases.push(base);
+    }
+    return bases.length ? bases : ['BTC'];
+  })(),
+  /** Timeframes for PM2 universe (informational). Live process uses `timeframe`. */
+  candleTimeframes: (() => {
+    const raw = optional('CANDLE_TIMEFRAMES', '5m,15m,1h');
+    const allowed = new Set(['1m', '5m', '15m', '30m', '1h', '4h']);
+    const out = [];
+    const seen = new Set();
+    for (const tok of String(raw).split(/[,;\s]+/)) {
+      const tf = tok.trim().toLowerCase();
+      if (!allowed.has(tf) || seen.has(tf)) continue;
+      seen.add(tf);
+      out.push(tf);
+    }
+    return out.length ? out : ['5m', '15m', '1h'];
+  })(),
   timeframe,
   candleLimit: num('CANDLE_FETCH_LIMIT', 200),
   /** New-signal delay after UTC boundary; timeframe-aware default (5m→3s, 15m→4s, 1h→5s). */
@@ -126,11 +164,24 @@ const config = {
 
   // Bot — MARKET_CYCLE_MINUTES defaults from CANDLE_TIMEFRAME (5m→5, 1h→60)
   cycleMinutes: num('MARKET_CYCLE_MINUTES', derivedCycleMinutes),
-  tradeBudgetUsd: num('TRADE_BUDGET_USD', 3),
+  /** Default stake when bankroll is on/ahead of target line */
+  tradeBudgetUsd: num('TRADE_BUDGET_USD', 10),
   maxDailyLossUsd: num('MAX_DAILY_LOSS_USD', 10000),
   minBalanceUsd: num('MIN_BALANCE_USD', 0),
-  maxBetUsd: num('MAX_BET_USD', 10000),
-  orderType: optional('ORDER_TYPE', 'FOK'),
+  maxBetUsd: num('MAX_BET_USD', 30),
+  /**
+   * Shared dynamic bankroll (P/N) across all PM2 instances (all symbols × TFs) of this wallet.
+   * See src/martingale/bankroll.js
+   */
+  bankroll: {
+    /** Equity step per net win (also used in target = P + N * step) */
+    stepUsd: num('BANKROLL_STEP_USD', 10),
+    /** Cap on catch-up target profit T */
+    catchUpProfitCapUsd: num('BANKROLL_CATCHUP_T_CAP', 20),
+    /** Cap on computed stake per order */
+    stakeMaxUsd: num('BANKROLL_STAKE_MAX_USD', 30),
+  },
+  orderType: optional('ORDER_TYPE', 'GTC'),
   orderFillAttempts: num('ORDER_FILL_ATTEMPTS', 8),
   /** FOK retry gap — keep short so failed eats retry quickly inside the window. */
   orderRetryDelayMs: num('ORDER_RETRY_DELAY_MS', 1000),
@@ -151,7 +202,7 @@ const config = {
   logLevel: optional('LOG_LEVEL', 'INFO'),
 
   // Martingale
-  martingaleMultiplier: num('MARTINGALE_MULTIPLIER', 3),
+  martingaleMultiplier: num('MARTINGALE_MULTIPLIER', 1),
   martingaleMaxLosses: num('MARTINGALE_MAX_LOSSES', 5),
 
   // Telegram notifications (one forum group + per-instance topic thread)

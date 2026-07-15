@@ -15,6 +15,7 @@ import { fileURLToPath } from 'url';
 
 import config from '../config.js';
 import logger from '../utils/logger.js';
+import { computeCatchUpTopUp } from '../martingale/bankroll.js';
 import { appendJsonl } from '../utils/jsonl.js';
 import { withRetry, sleep } from '../utils/retry.js';
 import { resolveActualFill, formatFillNote } from './fillSync.js';
@@ -172,7 +173,7 @@ async function resolveOrderOptions(client, tokenID) {
 }
 
 /** Best ask + tick offset — same price used for limit orders. */
-async function resolveExpectedEntryPrice(client, tokenID) {
+export async function resolveExpectedEntryPrice(client, tokenID) {
   const { tickSize } = await resolveOrderOptions(client, tokenID);
   let book;
   try {
@@ -379,6 +380,12 @@ async function createClientInstance() {
   return client;
 }
 
+/** Peek book best-ask for dynamic sizing before placeOrder. */
+export async function peekExpectedEntryPrice(tokenID) {
+  const client = await getClobClient();
+  return resolveExpectedEntryPrice(client, tokenID);
+}
+
 export async function getClobClient() {
   if (clobClient) return clobClient;
 
@@ -570,6 +577,8 @@ async function submitMarketOrder(client, params, exec) {
 async function submitLimitOrder(client, params, exec) {
   const {
     tokenID, actualBet, logBase, dedupKey, forceLimitPrice, maxLimitPrice,
+    sizing = null,
+    availableBalance = Infinity,
   } = params;
 
   const effectiveMaxPrice = maxLimitPrice
@@ -607,83 +616,211 @@ async function submitLimitOrder(client, params, exec) {
       price = capped;
     }
   }
+
   const minSize = quote.minOrderSize || 0;
-  let size = roundToTick(actualBet / price, tickSize, false);
-  let estCost = price * size;
+  const originalStake = Number(actualBet) || 0;
 
-  if (minSize > 0 && size < minSize) {
-    const minCost = minSize * price;
-    if (minCost > config.maxBetUsd) {
-      logger.warn(
-        `[executor] 下注 $${actualBet} 低于最小份额 ${minSize} ` +
-        `@ $${price.toFixed(2)}（需约 $${minCost.toFixed(2)}）`
-      );
-      return { orderId: null, skipped: true, skipReason: 'below_min_size' };
+  const postOne = async (stakeUsd, label) => {
+    let size = roundToTick(stakeUsd / price, tickSize, false);
+    let estCost = price * size;
+
+    if (minSize > 0 && size < minSize) {
+      const minCost = minSize * price;
+      if (minCost > config.maxBetUsd) {
+        return {
+          ok: false,
+          skipped: true,
+          skipReason: 'below_min_size',
+          size: 0,
+          estCost: 0,
+          stakeUsd,
+        };
+      }
+      logger.info(`[executor] ${label}提升至最小份额 ${minSize} 份（约 $${minCost.toFixed(2)}）`);
+      size = minSize;
+      estCost = minCost;
     }
-    logger.info(`[executor] 提升至最小份额 ${minSize} 份（约 $${minCost.toFixed(2)}）`);
-    size = minSize;
-    estCost = minCost;
-  }
 
-  logger.info(
-    `[executor] 提交限价 ${exec.label} @$${price.toFixed(2)} × ${size} 份（约 $${estCost.toFixed(2)}）`
-  );
+    if (!(size > 0) || !(estCost > 0)) {
+      return {
+        ok: false,
+        skipped: true,
+        skipReason: 'zero_size',
+        size: 0,
+        estCost: 0,
+        stakeUsd,
+      };
+    }
 
-  let orderResp;
-  try {
-    orderResp = await withRetry(
-      () => client.createAndPostOrder(
-        { tokenID, price, size, side: Side.BUY },
-        orderOpts,
-        exec.orderType
-      ),
-      { label: 'placeLimitOrder', maxAttempts: 2, baseDelayMs: 1000 }
+    logger.info(
+      `[executor] 提交限价 ${exec.label} ${label}@$${price.toFixed(2)} × ${size} 份（约 $${estCost.toFixed(2)}）`
     );
-  } catch (err) {
-    logger.error('[executor] 限价单异常', { error: err?.message });
-    return { orderId: null, skipped: true, skipReason: `exception:${err?.message}` };
-  }
 
-  const parsed = parseOrderResponse(orderResp, { isLimit: true });
-  logger.info('[executor] 限价单响应', {
-    ...parsed, raw: JSON.stringify(orderResp)?.slice(0, 600), ...logBase,
-  });
+    let orderResp;
+    try {
+      orderResp = await withRetry(
+        () => client.createAndPostOrder(
+          { tokenID, price, size, side: Side.BUY },
+          orderOpts,
+          exec.orderType
+        ),
+        { label: `placeLimitOrder:${label}`, maxAttempts: 2, baseDelayMs: 1000 }
+      );
+    } catch (err) {
+      logger.error(`[executor] 限价单异常 (${label})`, { error: err?.message });
+      return {
+        ok: false,
+        skipped: true,
+        skipReason: `exception:${err?.message}`,
+        size,
+        estCost,
+        stakeUsd,
+      };
+    }
 
-  if (!parsed.ok) {
+    const parsed = parseOrderResponse(orderResp, { isLimit: true });
+    logger.info(`[executor] 限价单响应 (${label})`, {
+      ...parsed, raw: JSON.stringify(orderResp)?.slice(0, 600), ...logBase,
+    });
+
+    if (!parsed.ok) {
+      return {
+        ok: false,
+        skipped: true,
+        skipReason: parsed.reason ?? 'limit_rejected',
+        orderId: parsed.orderId,
+        size,
+        estCost,
+        stakeUsd,
+        parsed,
+      };
+    }
+
+    const actualFill = await resolveActualFill(client, parsed, {
+      orderId: parsed.orderId,
+      estUsd: estCost,
+      limitPrice: price,
+    });
+
+    return {
+      ok: true,
+      skipped: false,
+      orderId: parsed.orderId,
+      size,
+      estCost,
+      stakeUsd,
+      parsed,
+      actualFill,
+      resting: Boolean(parsed.resting && !(actualFill?.usdcSpent > 0)),
+      usdcSpent: Math.max(0, parseFloat(actualFill?.usdcSpent) || 0) || (
+        parsed.resting ? 0 : estCost
+      ),
+    };
+  };
+
+  // 1) Always place original sizing stake first
+  const primary = await postOne(originalStake, '主单');
+  if (!primary.ok) {
     writeTradelog({
-      ...logBase, orderId: parsed.orderId, status: 'failed',
-      orderKind: 'limit', reason: parsed.reason, limitPrice: price, size,
+      ...logBase, orderId: primary.orderId ?? null, status: 'failed',
+      orderKind: 'limit', reason: primary.skipReason, limitPrice: price,
+      size: primary.size, stakeUsd: originalStake,
     });
     orderedThisCycle.add(dedupKey);
     return {
-      orderId: parsed.orderId,
+      orderId: primary.orderId ?? null,
       skipped: true,
-      skipReason: parsed.reason ?? 'limit_rejected',
+      skipReason: primary.skipReason,
     };
   }
 
-  const actualFill = await resolveActualFill(client, parsed, {
-    orderId: parsed.orderId,
-    estUsd: estCost,
-    limitPrice: price,
+  // 2) Case 1 only: recompute needed stake at final price, top up the difference
+  const topPlan = computeCatchUpTopUp({
+    mode: sizing?.mode,
+    targetProfitUsd: sizing?.targetProfitUsd,
+    sizingPrice: sizing?.entryPrice,
+    finalPrice: price,
+    originalStakeUsd: originalStake,
+    balance: availableBalance,
   });
 
-  const result = buildOrderResult(parsed, actualFill, {
+  let topUp = null;
+  if (topPlan.needTopUp) {
+    // Prefer delta vs what was actually committed on the primary leg
+    const primaryCommitted = primary.usdcSpent > 0 ? primary.usdcSpent : primary.estCost;
+    let topUpUsd = Math.round((topPlan.neededStakeUsd - primaryCommitted) * 100) / 100;
+    const balLeft = Number.isFinite(Number(availableBalance))
+      ? Math.max(0, Number(availableBalance) - primaryCommitted)
+      : topUpUsd;
+    topUpUsd = Math.min(Math.max(0, topUpUsd), balLeft);
+
+    if (topUpUsd >= 0.01) {
+      logger.info('[executor] 追赶单情况一：原算仓已下 — 只补差价', {
+        sizingPrice: topPlan.sizingPrice,
+        finalPrice: topPlan.finalPrice,
+        targetProfitUsd: topPlan.targetProfitUsd,
+        originalStake,
+        primaryCommitted,
+        neededStakeUsd: topPlan.neededStakeUsd,
+        topUpUsd,
+      });
+      topUp = await postOne(topUpUsd, '补差');
+      if (!topUp.ok) {
+        logger.warn('[executor] 补差单失败 — 保留主单', {
+          skipReason: topUp.skipReason,
+          topUpUsd,
+        });
+        topUp = { ...topUp, failed: true };
+      }
+    }
+  } else if (topPlan.reason === 'case2_no_op') {
+    logger.info('[executor] 追赶单情况二：算仓价未偏低 — 不补差', {
+      sizingPrice: sizing?.entryPrice,
+      finalPrice: price,
+    });
+  }
+
+  const topUpOk = topUp && topUp.ok && !topUp.failed;
+  const totalUsdcSpent =
+    (primary.usdcSpent || 0) + (topUpOk ? (topUp.usdcSpent || 0) : 0);
+  const totalEstCost =
+    (primary.estCost || 0) + (topUpOk ? (topUp.estCost || 0) : 0);
+  const totalSize =
+    (primary.size || 0) + (topUpOk ? (topUp.size || 0) : 0);
+  const resting = primary.resting || Boolean(topUpOk && topUp.resting);
+
+  const result = buildOrderResult(primary.parsed, primary.actualFill, {
     orderKind: 'limit',
     orderType: exec.label,
     limitPrice: price,
-    size,
-    estCost,
+    size: totalSize,
+    estCost: totalEstCost,
+    stakeUsd: originalStake + (topUpOk ? topUp.stakeUsd : 0),
+    bankrollAdjust: topPlan.needTopUp ? topPlan.reason : topPlan.reason,
+    topUpUsd: topUpOk ? topUp.stakeUsd : 0,
+    topUpOrderId: topUpOk ? topUp.orderId : null,
+    // Override spent with combined legs
+    usdcSpent: totalUsdcSpent > 0 ? totalUsdcSpent : (resting ? 0 : totalEstCost),
+    resting,
   });
+
+  // buildOrderResult overwrites usdcSpent from fill — force combined
+  result.usdcSpent = totalUsdcSpent > 0 ? totalUsdcSpent : (resting ? 0 : totalEstCost);
+  result.resting = resting;
+  result.size = totalSize;
+  result.estCost = totalEstCost;
+  result.topUpOrderId = topUpOk ? topUp.orderId : null;
+  result.topUpUsd = topUpOk ? topUp.stakeUsd : 0;
+  result.companionOrderIds = topUpOk && topUp.orderId ? [topUp.orderId] : [];
 
   const fillTag = result.resting ? '挂单中（等待成交）' : '已成交';
   logger.info(`[executor] 限价单${fillTag}`, {
-    ...result, fillNote: formatFillNote(actualFill), ...logBase,
+    ...result, fillNote: formatFillNote(primary.actualFill), ...logBase,
   });
 
   writeTradelog({
     ...logBase,
-    orderId: parsed.orderId,
+    orderId: primary.orderId,
     status: result.resting ? 'resting' : 'filled',
     ...result,
   });
@@ -702,6 +839,8 @@ export async function placeOrder(params) {
     maxLimitPrice, priceCapped, originalYesPrice,
     deadlineMs,
     volatility,
+    sizing = null,
+    availableBalance = Infinity,
   } = params;
 
   const dedupKey = `${conditionId}:${cycleStartTs}`;
@@ -789,6 +928,8 @@ export async function placeOrder(params) {
     yesPrice, noPrice, baseBet, consecutiveLosses, deadlineMs, logBase, dedupKey,
     maxLimitPrice: effectiveMaxPrice,
     forceLimitPrice: finalPriceCapped ? effectiveMaxPrice : null,
+    sizing,
+    availableBalance,
   };
 
   if (useLimitOrder) {

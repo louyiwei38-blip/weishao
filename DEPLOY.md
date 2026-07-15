@@ -120,7 +120,14 @@ DRY_RUN=true node scripts/test-cycle.js
 
 ---
 
-## 五、PM2 常驻（BTC + ETH × 5m/15m/1h 六开）
+## 五、PM2 常驻（多标的 × 多周期，由 `.env` 决定）
+
+在 `.env` 配置：
+
+```env
+TRADING_SYMBOLS=BTC,ETH          # 只要改这一行即可扩标的
+CANDLE_TIMEFRAMES=5m,15m,1h      # 可选
+```
 
 ```bash
 sudo npm install -g pm2
@@ -135,16 +142,16 @@ pm2 save && pm2 startup
 
 切换实盘：`.env` 配好私钥后 `npm run pm2:start`。
 
-> **`.env` 优先级：** 预算 / 马丁 / 结算 / OHLCV / Telegram 等以 `.env` 为准。  
+> **`.env` 优先级：** 预算 / 马丁 / 结算 / OHLCV / Telegram / **TRADING_SYMBOLS** 等以 `.env` 为准。  
 > PM2 仅覆盖：`BOT_INSTANCE`、`CANDLE_TIMEFRAME`、`MARKET_CYCLE_MINUTES`、`TRADING_SYMBOL`、`DRY_RUN`、`TELEGRAM_MESSAGE_THREAD_ID`。  
-> 改完 `.env` 后需 `pm2 delete …` 再 `npm run pm2:start`（或 `pm2 restart … --update-env`），旧进程 env 不会自动刷新。
+> 改完 `TRADING_SYMBOLS` 后必须 `pm2 delete all` 再 `npm run pm2:start`（进程列表会变，不能只 restart）。
 
-### Telegram 论坛话题（推荐：一个群拆开六路消息）
+### Telegram 论坛话题（推荐：一个群按实例拆话题）
 
 1. 新建 Telegram **群组** → 开启 **Topics（话题）**  
 2. 把 Bot 拉进群并设为管理员（需能管理话题）  
 3. `.env` 填好 `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`（群 ID，多为 `-100…`）  
-4. 生成 BTC/ETH × 三周期共六个话题并写入 thread id：
+4. 按当前 `TRADING_SYMBOLS` × `CANDLE_TIMEFRAMES` 生成话题并写入 thread id：
 
 ```bash
 npm run setup:tg-topics -- --write-env
