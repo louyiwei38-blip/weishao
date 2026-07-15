@@ -409,23 +409,83 @@ export function clobHasL2Creds(client) {
   return Boolean(client?.creds);
 }
 
-export async function getBalance() {
+const DATA_API = 'https://data-api.polymarket.com';
+
+/**
+ * Data API: total mark-to-market of open positions (UI “positions” slice of Portfolio).
+ * @param {string} user funder / proxy address
+ */
+async function fetchPositionsValue(user) {
+  if (!user) return 0;
+  const url = `${DATA_API}/value?user=${encodeURIComponent(user)}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(12_000) });
+  if (!res.ok) {
+    throw new Error(`data-api /value HTTP ${res.status}`);
+  }
+  const data = await res.json();
+  const row = Array.isArray(data) ? data[0] : data;
+  const v = Number(row?.value);
+  return Number.isFinite(v) ? v : 0;
+}
+
+/** CLOB collateral (pUSD Cash) — spendable for new orders. */
+export async function getCashBalance({ refresh = true } = {}) {
   if (config.dryRun) return 9999;
 
   const client = await getClobClient();
+  if (refresh) {
+    try {
+      await client.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+    } catch (err) {
+      logger.debug('[executor] updateBalanceAllowance skipped', { error: err?.message });
+    }
+  }
+
   const resp = await withRetry(
     () => client.getBalanceAllowance({ asset_type: AssetType.COLLATERAL }),
-    { label: 'getBalance' }
+    { label: 'getCashBalance' },
   );
+  return parseRawBalance(resp);
+}
 
-  const balance = parseRawBalance(resp);
-  logger.debug('[executor] 余额', {
-    balance,
-    raw: resp?.balance,
-    funder: walletMeta?.funderAddress,
+/**
+ * Portfolio equity ≈ Cash + positions value (matches Polymarket UI “Portfolio”).
+ * Used for bankroll sizing / principal; order spend still clamped to Cash.
+ */
+export async function getBalanceBreakdown() {
+  if (config.dryRun) {
+    return { portfolio: 9999, cash: 9999, positionsValue: 0 };
+  }
+
+  await getClobClient();
+  const funder = walletMeta?.funderAddress || config.poly.funderAddress || '';
+
+  const [cash, positionsValue] = await Promise.all([
+    getCashBalance({ refresh: true }),
+    withRetry(() => fetchPositionsValue(funder), { label: 'getPositionsValue' }).catch((err) => {
+      logger.warn('[executor] Data API /value 失败 — Portfolio 暂用 Cash', {
+        error: err?.message,
+        funder,
+      });
+      return 0;
+    }),
+  ]);
+
+  const portfolio = Math.round((cash + positionsValue) * 100) / 100;
+  logger.info('[executor] Portfolio 余额', {
+    portfolio,
+    cash,
+    positionsValue,
+    funder,
     signatureType: walletMeta?.signatureLabel,
   });
-  return balance;
+  return { portfolio, cash, positionsValue };
+}
+
+/** @returns {Promise<number>} Portfolio (Cash + positions value) */
+export async function getBalance() {
+  const { portfolio } = await getBalanceBreakdown();
+  return portfolio;
 }
 
 const orderedThisCycle = new Set();

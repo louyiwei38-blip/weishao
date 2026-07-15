@@ -72,23 +72,29 @@ export function init() {
 
 /**
  * Dynamic stake every shot (entry + MG_CONT). Martingale only tracks loss streak / halt.
- * @param {number} availableBalance
+ * @param {number} equityBalance Portfolio (Cash + positions) — drives bankroll target line
  * @param {number|null|undefined} entryPrice token price in (0,1)
+ * @param {number|null|undefined} cashBalance Spendable Cash; defaults to equityBalance
  * @returns {{ actualBet: number, skipReason: string|null, sizing: object|null }}
  */
-export function prepareOrder(availableBalance, entryPrice = null) {
+export function prepareOrder(equityBalance, entryPrice = null, cashBalance = null) {
   const s = state[MARTINGALE_KEY];
-  bankroll.ensurePrincipal(availableBalance);
+  bankroll.ensurePrincipal(equityBalance);
 
   const sizing = bankroll.computeStake({
-    balance: availableBalance,
+    balance: equityBalance,
     entryPrice,
   });
+
+  const spendable =
+    cashBalance != null && Number.isFinite(Number(cashBalance))
+      ? Number(cashBalance)
+      : equityBalance;
 
   const actualBet = Math.min(
     sizing.stakeUsd,
     config.maxBetUsd,
-    availableBalance,
+    Math.max(0, spendable),
   );
 
   // Keep currentBet in sync for Telegram / logs (size comes from bankroll, not mult path)
@@ -103,6 +109,8 @@ export function prepareOrder(availableBalance, entryPrice = null) {
     key: MARTINGALE_KEY,
     mode: sizing.mode,
     actualBet,
+    equityBalance,
+    cashBalance: spendable,
     entryPrice: sizing.entryPrice,
     targetProfitUsd: sizing.targetProfitUsd,
     shares: sizing.shares,

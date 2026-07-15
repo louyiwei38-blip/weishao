@@ -39,7 +39,7 @@ import * as vegasState from './strategy/vegasState.js';
 import { MIN_SIGNAL_CANDLES } from './strategy/vegasChannel.js';
 import { findCurrentCycleMarket, resolveOrderPricePolicy } from './market/polymarket.js';
 import {
-  getBalance,
+  getBalanceBreakdown,
   getClobClient,
   placeOrder,
   peekExpectedEntryPrice,
@@ -171,11 +171,33 @@ function savePending() {
 // Telegram helpers
 // ─────────────────────────────────────────
 
-/** @param {number} [balance] – if omitted, fetches live balance */
+/**
+ * @param {number|{ portfolio?: number, cash?: number, positionsValue?: number }} [balance]
+ *   Portfolio number or breakdown; omitted → live fetch
+ */
 async function formatBalanceTelegramLine(balance) {
   try {
-    const value = balance ?? await getBalance();
-    return `余额: <b>$${value.toFixed(2)}</b>\n`;
+    let portfolio;
+    let cash;
+    let positionsValue;
+    if (balance != null && typeof balance === 'object') {
+      portfolio = Number(balance.portfolio);
+      cash = Number(balance.cash);
+      positionsValue = Number(balance.positionsValue);
+    } else if (typeof balance === 'number') {
+      portfolio = balance;
+    } else {
+      const b = await getBalanceBreakdown();
+      portfolio = b.portfolio;
+      cash = b.cash;
+      positionsValue = b.positionsValue;
+    }
+    if (!(portfolio >= 0)) return '余额: <b>—</b>\n';
+    let line = `Portfolio: <b>$${portfolio.toFixed(2)}</b>`;
+    if (Number.isFinite(cash) && Number.isFinite(positionsValue)) {
+      line += `（Cash $${cash.toFixed(2)} + 持仓 $${positionsValue.toFixed(2)}）`;
+    }
+    return `${line}\n`;
   } catch {
     return '余额: <b>—</b>\n';
   }
@@ -286,11 +308,12 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
       cycleEndMs - Math.min(5_000, config.minTradeRemainingMs / 2),
     );
 
-    // Parallel: Gamma market + balance
-    const [market, balance] = await Promise.all([
+    // Parallel: Gamma market + Portfolio (Cash + positions)
+    const [market, bal] = await Promise.all([
       findCurrentCycleMarket(cycleStartTs, tradeDeadline),
-      getBalance(),
+      getBalanceBreakdown(),
     ]);
+    const { portfolio: balance, cash: cashBalance } = bal;
 
     if (!market) {
       logger.warn('[main] 未找到 Polymarket 市场 — 跳过下单', {
@@ -321,8 +344,10 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
     }
 
     if (balance < config.minBalanceUsd) {
-      logger.warn('[main] pUSD 余额低于下限', {
-        balance,
+      logger.warn('[main] Portfolio 低于下限', {
+        portfolio: balance,
+        cash: cashBalance,
+        positionsValue: bal.positionsValue,
         min: config.minBalanceUsd,
         signal: signalObj.signal,
         signalId: signalObj.signalId,
@@ -347,7 +372,11 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
     }
 
     const mgState = martingale.getState();
-    const { actualBet, skipReason, sizing } = martingale.prepareOrder(balance, sizingPrice);
+    const { actualBet, skipReason, sizing } = martingale.prepareOrder(
+      balance,
+      sizingPrice,
+      cashBalance,
+    );
     if (skipReason) {
       logger.info('[main] 马丁格尔策略跳过下单', {
         skipReason,
@@ -355,6 +384,8 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
         signalId: signalObj.signalId,
         source,
         sizing,
+        portfolio: balance,
+        cash: cashBalance,
         ...stats.formatLogFields(),
       });
       return { status: `martingale_${skipReason}`, signal: signalObj.signal, signalId: signalObj.signalId };
@@ -377,7 +408,8 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
       originalYesPrice: pricePolicy.originalYesPrice,
       deadlineMs: tradeDeadline,
       sizing,
-      availableBalance: balance,
+      // Top-up / spend clamp must use Cash, not mark-to-market Portfolio
+      availableBalance: cashBalance,
     });
 
     if (orderResult.skipped) {
@@ -433,7 +465,7 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
           (fillNote ? `成交明细: ${escapeHtml(fillNote)}\n` : '') +
           formatChainTelegramLines(mgState, sizing) +
           `类型: ${orderResult.orderType ?? config.orderType}\n` +
-          await formatBalanceTelegramLine(balance) +
+          await formatBalanceTelegramLine(bal) +
           `盘口: ${market.slug}\n` +
           `时间: ${formatBeijingTime(cycleStartTs)}\n` +
           formatStatsTelegramBlock()
@@ -487,7 +519,7 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
           capNote +
           priceOdds +
           formatChainTelegramLines(mgState, sizing) +
-          await formatBalanceTelegramLine(balance) +
+          await formatBalanceTelegramLine(bal) +
           `盘口: ${market.slug}\n` +
           `周期内自动监视成交\n` +
           formatStatsTelegramBlock()
@@ -1156,11 +1188,13 @@ async function scheduler() {
   warnOrderPolicyMismatch();
 
   let startupBalance = null;
+  let startupBal = null;
   try {
-    startupBalance = await getBalance();
+    startupBal = await getBalanceBreakdown();
+    startupBalance = startupBal.portfolio;
     martingale.bankroll.ensurePrincipal(startupBalance);
   } catch (err) {
-    logger.warn('[main] 启动时读取余额失败 — 本金将在首单前锁定', {
+    logger.warn('[main] 启动时读取 Portfolio 失败 — 本金将在首单前锁定', {
       error: err?.message ?? String(err),
     });
   }
@@ -1237,7 +1271,13 @@ async function scheduler() {
     `结算: <b>${escapeHtml(settleSourceLabel())}</b> (${escapeHtml(config.settleSource)})\n` +
     `马丁: 默认$${config.tradeBudgetUsd} ×${config.martingaleMultiplier} / 连亏${config.martingaleMaxLosses}\n` +
     formatBankrollTelegramLines() +
-    (startupBalance != null ? `启动余额: $${Number(startupBalance).toFixed(2)}\n` : '')
+    (startupBalance != null
+      ? `启动 Portfolio: $${Number(startupBalance).toFixed(2)}` +
+        (startupBal
+          ? `（Cash $${Number(startupBal.cash).toFixed(2)} + 持仓 $${Number(startupBal.positionsValue).toFixed(2)}）`
+          : '') +
+        `\n`
+      : '')
   );
 
   initChainlinkSettler({
@@ -1342,7 +1382,7 @@ async function scheduler() {
       });
       await Promise.allSettled([
         findCurrentCycleMarket(boundary, prewarmDeadline),
-        getBalance(),
+        getBalanceBreakdown(),
         getClobClient(),
       ]);
 
