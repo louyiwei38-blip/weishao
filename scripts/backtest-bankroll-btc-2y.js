@@ -1,7 +1,7 @@
 /**
  * Backtest current live rules on BTC (last ~2 years):
  * - Vegas win/loss sequence from existing trade CSVs
- * - Dynamic bankroll: default $10 / catch-up T<=$20 / stake<=$30
+ * - Dynamic bankroll: default $10 / multi-step catch-up by gap / stake<=$30
  * - Shared P/N across 5m+15m+1h (merged by settle time)
  * - Stops when balance cannot fund min stake
  *
@@ -33,9 +33,17 @@ const DEFAULT_BET = argNum('base', 10);
 const STEP = argNum('step', 10);
 const T_CAP = argNum('tCap', 20);
 const STAKE_MAX = argNum('stakeMax', 30);
+const GAP_FULL = argNum('gapFull', 5);
+const GAP_HALF = argNum('gapHalf', 15);
 const ENTRY = argNum('entry', 0.5);
 const MIN_STAKE = argNum('minStake', 1);
 const USE_FEE = true;
+
+function resolveCatchUpFraction(gap) {
+  if (!(gap > 0) || gap <= GAP_FULL) return 1;
+  if (gap <= GAP_HALF) return 0.5;
+  return 1 / 3;
+}
 
 const TFS = ['5m', '15m', '1h'];
 const fromMs = Date.parse(`${FROM}T00:00:00.000Z`);
@@ -92,8 +100,8 @@ function computeStake({ balance, principal, netCount, entryPrice, flat = false }
     };
   }
 
-  let T = P + (N + 1) * STEP - bal;
-  if (!(T > 0)) {
+  const gap = targetBalance - bal;
+  if (!(gap > 0)) {
     return {
       stakeUsd: clamp(DEFAULT_BET),
       mode: 'fallback_default',
@@ -101,6 +109,7 @@ function computeStake({ balance, principal, netCount, entryPrice, flat = false }
       targetBalance,
     };
   }
+  let T = gap * resolveCatchUpFraction(gap);
   T = Math.min(T, T_CAP);
   T = Math.round(T * 100) / 100;
 
@@ -118,6 +127,7 @@ function computeStake({ balance, principal, netCount, entryPrice, flat = false }
     mode: 'catch_up',
     targetProfitUsd: T,
     targetBalance,
+    gapUsd: Math.round(gap * 100) / 100,
   };
 }
 

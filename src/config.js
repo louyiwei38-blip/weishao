@@ -176,10 +176,19 @@ const config = {
   bankroll: {
     /** Equity step per net win (also used in target = P + N * step) */
     stepUsd: num('BANKROLL_STEP_USD', 10),
-    /** Cap on catch-up target profit T */
+    /** Hard cap on catch-up target profit T (safety; tier fractions usually bind first) */
     catchUpProfitCapUsd: num('BANKROLL_CATCHUP_T_CAP', 20),
     /** Cap on computed stake per order */
     stakeMaxUsd: num('BANKROLL_STAKE_MAX_USD', 30),
+    /**
+     * Multi-step catch-up by gap = target − Portfolio:
+     *   gap ≤ fullUsd → recover 100% of gap next shot
+     *   gap ≤ halfUsd → recover 50%
+     *   else          → recover ~33% (thirdUsd is documentation threshold; same fraction above)
+     */
+    catchUpGapFullUsd: num('BANKROLL_CATCHUP_GAP_FULL', 5),
+    catchUpGapHalfUsd: num('BANKROLL_CATCHUP_GAP_HALF', 15),
+    catchUpGapThirdUsd: num('BANKROLL_CATCHUP_GAP_THIRD', 30),
   },
   orderType: optional('ORDER_TYPE', 'GTC'),
   orderFillAttempts: num('ORDER_FILL_ATTEMPTS', 8),

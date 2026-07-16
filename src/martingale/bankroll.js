@@ -6,8 +6,11 @@
  *
  * Sizing (every shot, including MG_CONT):
  *   Bal >= P + N*step  -> stake = defaultBet (TRADE_BUDGET_USD)
- *   else               -> T = min(P+(N+1)*step - Bal, catchUpCap)
- *                        stake = T * p / (1-p)   // no fee in reverse
+ *   else gap = target − Bal; multi-step catch-up:
+ *     gap ≤ 5   -> T = gap       (一次补齐)
+ *     gap ≤ 15  -> T = gap / 2   (补一半)
+ *     gap > 15  -> T = gap / 3   (补 1/3；含 >30 继续分批)
+ *     then T = min(T, catchUpCap), stake = T * p / (1-p)
  *   then stake = min(stake, stakeMax, availableBalance)
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, closeSync, unlinkSync } from 'fs';
@@ -139,8 +142,32 @@ export function getState() {
     defaultBetUsd: config.tradeBudgetUsd,
     catchUpProfitCapUsd: config.bankroll.catchUpProfitCapUsd,
     stakeMaxUsd: config.bankroll.stakeMaxUsd,
+    catchUpGapFullUsd: config.bankroll.catchUpGapFullUsd,
+    catchUpGapHalfUsd: config.bankroll.catchUpGapHalfUsd,
+    catchUpGapThirdUsd: config.bankroll.catchUpGapThirdUsd,
     updatedAt: cache.updatedAt,
   };
+}
+
+/**
+ * Map gap = target − Portfolio → catch-up fraction of that gap.
+ * Defaults: ≤5 → 1; ≤15 → 1/2; else → 1/3.
+ * @param {number} gapUsd
+ * @returns {{ fraction: number, label: string, tier: 'full'|'half'|'third' }}
+ */
+export function resolveCatchUpFraction(gapUsd) {
+  const gap = Number(gapUsd);
+  const fullAt = Number(config.bankroll.catchUpGapFullUsd) || 5;
+  const halfAt = Number(config.bankroll.catchUpGapHalfUsd) || 15;
+  // gap ≤ thirdUsd and gap > thirdUsd both use 1/3 (分批回补)
+
+  if (!(gap > 0) || gap <= fullAt) {
+    return { fraction: 1, label: '一次补齐', tier: 'full' };
+  }
+  if (gap <= halfAt) {
+    return { fraction: 0.5, label: '补一半', tier: 'half' };
+  }
+  return { fraction: 1 / 3, label: '补1/3', tier: 'third' };
 }
 
 /**
@@ -178,6 +205,8 @@ export function computeStake({ balance, entryPrice }) {
       targetProfitUsd: null,
       targetBalance: null,
       gapUsd: null,
+      catchUpFraction: null,
+      catchUpTier: null,
       entryPrice: Number.isFinite(p) ? p : null,
     };
   }
@@ -195,11 +224,34 @@ export function computeStake({ balance, entryPrice }) {
       targetProfitUsd: null,
       targetBalance,
       gapUsd: Math.round((bal - targetBalance) * 100) / 100,
+      catchUpFraction: null,
+      catchUpTier: null,
       entryPrice: Number.isFinite(p) ? p : null,
     };
   }
 
-  let T = P + (N + 1) * step - bal;
+  // Multi-step: recover a fraction of current gap (not full jump to next target)
+  const gap = Math.round(gapUsd * 100) / 100;
+  if (!(gap > 0)) {
+    const stakeUsd = clampStake(defaultBet);
+    return {
+      stakeUsd,
+      shares: sharesOf(stakeUsd, p),
+      mode: 'fallback_default',
+      targetProfitUsd: null,
+      targetBalance,
+      gapUsd: gap,
+      catchUpFraction: null,
+      catchUpTier: null,
+      entryPrice: Number.isFinite(p) ? p : null,
+    };
+  }
+
+  const plan = resolveCatchUpFraction(gap);
+  let T = gap * plan.fraction;
+  T = Math.min(T, tCap);
+  T = Math.round(T * 100) / 100;
+
   if (!(T > 0)) {
     const stakeUsd = clampStake(defaultBet);
     return {
@@ -208,13 +260,12 @@ export function computeStake({ balance, entryPrice }) {
       mode: 'fallback_default',
       targetProfitUsd: null,
       targetBalance,
-      gapUsd: Math.round(gapUsd * 100) / 100,
+      gapUsd: gap,
+      catchUpFraction: plan.fraction,
+      catchUpTier: plan.tier,
       entryPrice: Number.isFinite(p) ? p : null,
     };
   }
-
-  T = Math.min(T, tCap);
-  T = Math.round(T * 100) / 100;
 
   if (!(p > 0 && p < 1)) {
     const stakeUsd = clampStake(defaultBet);
@@ -224,7 +275,9 @@ export function computeStake({ balance, entryPrice }) {
       mode: 'fallback_default',
       targetProfitUsd: T,
       targetBalance,
-      gapUsd: Math.round(gapUsd * 100) / 100,
+      gapUsd: gap,
+      catchUpFraction: plan.fraction,
+      catchUpTier: plan.tier,
       entryPrice: null,
     };
   }
@@ -237,7 +290,10 @@ export function computeStake({ balance, entryPrice }) {
     mode: 'catch_up',
     targetProfitUsd: T,
     targetBalance,
-    gapUsd: Math.round(gapUsd * 100) / 100,
+    gapUsd: gap,
+    catchUpFraction: plan.fraction,
+    catchUpTier: plan.tier,
+    catchUpLabel: plan.label,
     entryPrice: p,
   };
 }
@@ -396,8 +452,14 @@ export function formatBankrollTelegramLines(sizing = null) {
     (target != null ? ` · 目标 $${target.toFixed(2)}` : '') +
     `\n`;
   if (sizing?.mode === 'catch_up') {
+    const frac =
+      sizing.catchUpFraction != null
+        ? ` · ${sizing.catchUpLabel || '回补'}${
+            sizing.gapUsd != null ? ` gap$${Number(sizing.gapUsd).toFixed(2)}` : ''
+          }`
+        : '';
     line +=
-      `动态首注: 追赶 T=$${Number(sizing.targetProfitUsd).toFixed(2)}` +
+      `动态首注: 追赶 T=$${Number(sizing.targetProfitUsd).toFixed(2)}${frac}` +
       ` → 投 $${Number(sizing.stakeUsd).toFixed(2)}` +
       (sizing.shares != null ? ` · ~${sizing.shares.toFixed(2)} shares` : '') +
       `\n`;
