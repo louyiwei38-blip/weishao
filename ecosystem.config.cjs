@@ -4,12 +4,13 @@
  * Only edit .env:
  *   TRADING_SYMBOLS=BTC,ETH
  *   CANDLE_TIMEFRAMES=5m,15m,1h
+ *   PM2_NAME_PREFIX=V3          # 第二钱包同机部署时用 W2（见 ecosystem.wallet2.config.cjs）
  *
  * 模拟盘: npm run pm2:dry
  * 实盘:   npm run pm2:start
  *
- * Identity vars are injected per process; budget/bankroll/martingale/order
- * settings always come from .env (see src/config.js).
+ * 第二钱包（独立目录 + 新私钥）:
+ *   npm run pm2:w2:dry / pm2:w2:start
  */
 const path = require('path');
 try {
@@ -18,65 +19,11 @@ try {
   // dotenv optional at PM2 config load time
 }
 
-const {
-  parseTradingSymbolBases,
-  parseCandleTimeframes,
-} = require('./scripts/lib/tradingUniverse.cjs');
+const { buildEcosystemApps } = require('./scripts/lib/buildEcosystemApps.cjs');
 
-const shared = {
-  script: 'src/index.js',
+const { apps } = buildEcosystemApps(process.env, {
   cwd: __dirname,
-  instances: 1,
-  autorestart: true,
-  watch: false,
-  max_memory_restart: '500M',
-  merge_logs: true,
-  time: true,
-};
+  prefix: process.env.PM2_NAME_PREFIX || 'V3',
+});
 
-/** BOT_INSTANCE id → TELEGRAM_THREAD_BTC_5M env key */
-function threadIdFor(instanceId) {
-  const key = `TELEGRAM_THREAD_${String(instanceId).replace(/-/g, '_').toUpperCase()}`;
-  const raw = process.env[key];
-  if (raw === undefined || String(raw).trim() === '') return null;
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : null;
-}
-
-/** @param {string} base @param {string} tf @param {number} minutes */
-function app(base, tf, minutes) {
-  const id = `${base.toLowerCase()}-${tf}`;
-  const threadId = threadIdFor(id);
-  const env = {
-    BOT_INSTANCE: id,
-    CANDLE_TIMEFRAME: tf,
-    MARKET_CYCLE_MINUTES: String(minutes),
-    TRADING_SYMBOL: `${base}/USDT`,
-    ...(threadId != null ? { TELEGRAM_MESSAGE_THREAD_ID: String(threadId) } : {}),
-  };
-  return {
-    ...shared,
-    name: `V3-${id}`,
-    error_file: `logs/pm2-${id}-error.log`,
-    out_file: `logs/pm2-${id}-out.log`,
-    env_dry: {
-      NODE_ENV: 'production',
-      DRY_RUN: 'true',
-      ...env,
-    },
-    env_live: {
-      NODE_ENV: 'production',
-      DRY_RUN: 'false',
-      ...env,
-    },
-  };
-}
-
-const SYMBOLS = parseTradingSymbolBases(process.env);
-const TIMEFRAMES = parseCandleTimeframes(process.env);
-
-module.exports = {
-  apps: SYMBOLS.flatMap((base) =>
-    TIMEFRAMES.map(([tf, minutes]) => app(base, tf, minutes)),
-  ),
-};
+module.exports = { apps };

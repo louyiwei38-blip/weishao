@@ -34,7 +34,15 @@
     "pm2:btc:dry": "pm2 start ecosystem.config.cjs --only V3-btc-5m,V3-btc-15m,V3-btc-1h --env dry",
     "pm2:eth:start": "pm2 start ecosystem.config.cjs --only V3-eth-5m,V3-eth-15m,V3-eth-1h --env live",
     "pm2:eth:dry": "pm2 start ecosystem.config.cjs --only V3-eth-5m,V3-eth-15m,V3-eth-1h --env dry",
-    "pm2:logs": "pm2 logs"
+    "pm2:logs": "pm2 logs",
+    "pm2:w2:start": "pm2 start ecosystem.wallet2.config.cjs --env live",
+    "pm2:w2:dry": "pm2 start ecosystem.wallet2.config.cjs --env dry",
+    "pm2:w2:restart": "pm2 restart ecosystem.wallet2.config.cjs",
+    "pm2:w2:stop": "pm2 stop ecosystem.wallet2.config.cjs",
+    "pm2:w2:delete": "pm2 delete ecosystem.wallet2.config.cjs",
+    "pm2:w2:btc:start": "pm2 start ecosystem.wallet2.config.cjs --only W2-btc-5m,W2-btc-15m,W2-btc-1h --env live",
+    "pm2:w2:btc:dry": "pm2 start ecosystem.wallet2.config.cjs --only W2-btc-5m,W2-btc-15m,W2-btc-1h --env dry",
+    "pm2:w2:logs": "pm2 logs W2-btc-5m W2-btc-15m W2-btc-1h"
   },
   "engines": {
     "node": ">=18.0.0"

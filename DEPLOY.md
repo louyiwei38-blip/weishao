@@ -166,6 +166,42 @@ node scripts/test-telegram.js --instance=btc-5m
 
 6. 重启 PM2：`pm2 delete all && npm run pm2:start`
 
+### 第二钱包（同机独立目录 + BTC）
+
+与第一套钱包**不能**共用 `.env`、`logs/`、`bankroll-state.json`。推荐单独 clone 一份代码：
+
+```bash
+cd ~
+git clone <你的仓库> polymarket-bot-w2
+cd polymarket-bot-w2
+git checkout XWvgas
+npm install --production
+mkdir -p logs
+cp .env.example .env   # 填入**新钱包** POLY_* 私钥
+```
+
+`.env` 示例（只跑 BTC）：
+
+```env
+TRADING_SYMBOLS=BTC
+CANDLE_TIMEFRAMES=5m,15m,1h
+DRY_RUN=true
+# PM2_NAME_PREFIX=W2   # 可选；用 npm run pm2:w2:* 时会自动 W2-
+```
+
+```bash
+export POLY_KEY_PASSWORD="新钱包解密密码"
+node scripts/run-instance.js 5m --symbol=BTC/USDT --dry   # 可选验证
+
+npm run pm2:w2:dry       # 进程名 W2-btc-5m / W2-btc-15m / W2-btc-1h
+pm2 list
+# 确认无误后 .env 改 DRY_RUN=false
+npm run pm2:w2:delete && npm run pm2:w2:start
+pm2 save
+```
+
+第一套钱包继续用 `npm run pm2:start`（`V3-*`），两套可同时运行，互不覆盖。
+
 ---
 
 ## 六、日志与状态文件
