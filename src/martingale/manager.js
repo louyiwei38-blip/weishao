@@ -127,24 +127,28 @@ export function prepareOrder(equityBalance, entryPrice = null, cashBalance = nul
 /**
  * @param {boolean} won
  * @param {number} [pnlUsd=0]
+ * @param {number|null|undefined} [equityBalance=null] Portfolio at halt — re-locks bankroll P
  * @returns {{ halted: boolean, chainPnlUsd: number, bankroll: object }}
  */
-export function onSettled(won, pnlUsd = 0) {
+export function onSettled(won, pnlUsd = 0, equityBalance = null) {
   const s = state[MARTINGALE_KEY];
   let halted = false;
 
   s.chainPnlUsd = (Number(s.chainPnlUsd) || 0) + (Number(pnlUsd) || 0);
   const chainPnlUsd = s.chainPnlUsd;
 
-  const br = bankroll.onSettled(won);
+  /** @type {object} */
+  let br;
 
   if (won) {
+    br = bankroll.onSettled(true);
     resetToBaseBet();
     logger.info('[martingale] win — reset streak', {
       key: MARTINGALE_KEY,
       baseBet: s.baseBet,
       chainPnlUsd,
       netCount: br.netCount,
+      principal: br.principal,
     });
   } else {
     s.consecutiveLosses += 1;
@@ -152,13 +156,18 @@ export function onSettled(won, pnlUsd = 0) {
     if (s.consecutiveLosses >= config.martingaleMaxLosses) {
       resetToBaseBet();
       halted = true;
-      logger.warn('[martingale] max losses — halt and reset streak', {
+      // Epoch restart: re-lock P from Portfolio, N → 0 (no ±1 for this settle)
+      br = bankroll.resetOnMaxLossHalt(equityBalance);
+      logger.warn('[martingale] max losses — halt, reset streak + bankroll P/N', {
         key: MARTINGALE_KEY,
         baseBet: s.baseBet,
         chainPnlUsd,
         netCount: br.netCount,
+        principal: br.principal,
+        principalUpdated: br.principalUpdated,
       });
     } else {
+      br = bankroll.onSettled(false);
       // Multiplier kept for compatibility; live size is recomputed each shot via bankroll
       s.currentBet = s.currentBet * config.martingaleMultiplier;
       logger.info('[martingale] loss — streak++', {

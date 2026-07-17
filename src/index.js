@@ -1040,7 +1040,25 @@ async function applySettlement(pending, { candles } = {}) {
   const price = entryPrice ?? limitPrice ?? null;
 
   const pnlUsd = stats.computeSettlementPnl(won, actualBet, price);
-  const { halted, chainPnlUsd } = martingale.onSettled(won, pnlUsd);
+
+  // Max-loss halt re-locks shared bankroll P from live Portfolio and resets N → 0
+  const mgBefore = martingale.getState();
+  const willHalt =
+    !won &&
+    mgBefore.consecutiveLosses + 1 >= config.martingaleMaxLosses;
+  let haltPortfolio = null;
+  if (willHalt) {
+    try {
+      const bd = await getBalanceBreakdown();
+      haltPortfolio = bd.portfolio;
+    } catch (err) {
+      logger.warn('[settle] 连亏止损 — 拉取 Portfolio 失败，本金 P 可能未更新', {
+        error: err?.message,
+      });
+    }
+  }
+
+  const { halted, chainPnlUsd } = martingale.onSettled(won, pnlUsd, haltPortfolio);
   vegasState.onSettled(won, halted);
 
   if (!won) recordLoss(actualBet);
@@ -1117,8 +1135,12 @@ async function applySettlement(pending, { candles } = {}) {
     ? `\n⚠️ 交易所 K 线: ${escapeHtml(cross.exchangeDirection)} ≠ Chainlink ${escapeHtml(cross.chainlinkOutcome)}`
     : '';
 
+  const brAfter = mg.bankroll;
   const haltNote = halted
-    ? `\n⚠️ <b>马丁连亏止损</b> — 等待通道外实体后再检测；首注已重置为 $${mg.baseBet}`
+    ? `\n⚠️ <b>马丁连亏止损</b> — 等待通道外实体后再检测；首注已重置为 $${mg.baseBet}` +
+      `\n↺ 本金已重置` +
+      (brAfter?.principal != null ? ` P=$${Number(brAfter.principal).toFixed(2)}` : '') +
+      ` · N=0`
     : won
       ? `\n⏹ <b>链路结束</b> — 等待通道外实体后再检测`
       : '';

@@ -24,7 +24,7 @@ EMA 由 **OKX Indicators API** 拉取（`src/collector/okxIndicators.js`），OH
 1. `need_outside` — 等待至少一根已收盘 K **实体完全在通道外**，才进入 `armed`
 2. `armed` — 检测穿越入场；有信号则锁定方向进入 `in_chain` 并下首注
 3. `in_chain` — **不做新信号检测**；每周期同向续下（马丁 ×1）
-4. 赢 → 停止并回 `need_outside`；连亏 5 次 → 止损重置并回 `need_outside`
+4. 赢 → 停止并回 `need_outside`；连亏 5 次 → 止损重置并回 `need_outside`（同时重置本金 P＝当时 Portfolio、净胜负 N＝0）
 
 **安全闸门（下单前）：**
 
@@ -43,8 +43,8 @@ EMA 由 **OKX Indicators API** 拉取（`src/collector/okxIndicators.js`），OH
 
 | 符号 | 含义 |
 |------|------|
-| **P** | 本金，首次从 Portfolio 锁定后不再改 |
-| **N** | 净胜负次数（仅确认结算后 ±1） |
+| **P** | 本金，首次从 Portfolio 锁定；**连亏止损时按当时 Portfolio 重新锁定** |
+| **N** | 净胜负次数（仅确认结算后 ±1）；**连亏止损时重置为 0** |
 | 目标线 | `P + N × BANKROLL_STEP_USD` |
 
 **仓位（每枪，含 MG_CONT）：**
@@ -253,7 +253,7 @@ docs/
 
 - **无信号 / 风控拦截**：不下单；`in_chain` 时方向锁定保持  
 - **赢**：马丁重置 → `need_outside`；N +1  
-- **连亏 5**：止损重置 → `need_outside`（须再等通道外实体；**不会**走快路径续单）  
+- **连亏 5**：止损重置 → `need_outside`；**重新拉取 Portfolio 锁定本金 P，N 重置为 0**（须再等通道外实体；**不会**走快路径续单）  
 - **结算输且连亏 &lt; 5**：结算完成后立即同向续下一窗（`MG_CONT_FAST_PATH`）；N −1  
 - GTC 未成交不计入马丁 / 不改 N  
 

@@ -1,8 +1,8 @@
 /**
  * Shared bankroll (P / N) across all symbol × timeframe instances of the same wallet.
  *
- * P = principal, set once from balance when missing
- * N = net wins-losses, start 0; +1 win / -1 loss on confirmed settlement only
+ * P = principal, locked from Portfolio when missing; re-locked from live Portfolio on max-loss halt
+ * N = net wins-losses, start 0; +1 win / -1 loss on confirmed settlement only; reset to 0 on max-loss halt
  *
  * Sizing (every shot, including MG_CONT):
  *   Bal >= P + N*step  -> stake = defaultBet (TRADE_BUDGET_USD)
@@ -439,6 +439,53 @@ export function onSettled(won) {
           : cache.principal + cache.netCount * config.bankroll.stepUsd,
     });
     return { netCount: cache.netCount, principal: cache.principal };
+  });
+}
+
+/**
+ * Max-loss halt: re-lock P from current Portfolio and reset N to 0.
+ * Skips the usual ±1 netCount for this settlement (epoch restart).
+ * @param {number|null|undefined} balance Portfolio (Cash + positions)
+ * @returns {{ netCount: number, principal: number|null, reset: true, principalUpdated: boolean }}
+ */
+export function resetOnMaxLossHalt(balance) {
+  return withLock(() => {
+    reload();
+    const prev = { principal: cache.principal, netCount: cache.netCount };
+    const bal = Number(balance);
+    let principalUpdated = false;
+
+    if (Number.isFinite(bal) && bal >= 0) {
+      cache.principal = Math.round(bal * 1e6) / 1e6;
+      principalUpdated = true;
+    } else {
+      logger.warn('[bankroll] max-loss halt: invalid Portfolio — principal unchanged', {
+        balance,
+        prevPrincipal: prev.principal,
+        prevNetCount: prev.netCount,
+      });
+    }
+
+    cache.netCount = 0;
+    writeDisk(cache);
+    logger.warn('[bankroll] max-loss halt — reset principal + netCount', {
+      prevPrincipal: prev.principal,
+      prevNetCount: prev.netCount,
+      principal: cache.principal,
+      netCount: cache.netCount,
+      principalUpdated,
+      fromBalance: principalUpdated ? bal : null,
+      target:
+        cache.principal == null
+          ? null
+          : cache.principal + cache.netCount * config.bankroll.stepUsd,
+    });
+    return {
+      netCount: cache.netCount,
+      principal: cache.principal,
+      reset: true,
+      principalUpdated,
+    };
   });
 }
 
