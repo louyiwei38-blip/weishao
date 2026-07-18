@@ -123,7 +123,7 @@ function computeStake({ balance, principal, netCount, entryPrice, flat = false }
   }
 
   return {
-    stakeUsd: clamp(T * (p / (1 - p))),
+    stakeUsd: clamp(DEFAULT_BET + T * (p / (1 - p))),
     mode: 'catch_up',
     targetProfitUsd: T,
     targetBalance,

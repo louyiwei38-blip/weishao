@@ -185,6 +185,7 @@ const config = {
      *   gap ≤ fullUsd → recover 100% of gap next shot
      *   gap ≤ halfUsd → recover 50%
      *   else          → recover ~33% (thirdUsd is documentation threshold; same fraction above)
+     * Live stake = TRADE_BUDGET_USD + T*p/(1-p) (default + catch-up).
      */
     catchUpGapFullUsd: num('BANKROLL_CATCHUP_GAP_FULL', 5),
     catchUpGapHalfUsd: num('BANKROLL_CATCHUP_GAP_HALF', 15),

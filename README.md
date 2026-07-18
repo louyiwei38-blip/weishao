@@ -52,7 +52,7 @@ EMA 由 **OKX Indicators API** 拉取（`src/collector/okxIndicators.js`），OH
 | 条件 | 注码 |
 |------|------|
 | Portfolio ≥ 目标线 | `TRADE_BUDGET_USD`（默认 $10） |
-| 落后目标线 | 按 `gap = 目标 − Portfolio` **分档多次回补**：`gap≤5` → T=gap；`gap≤15` → T=gap/2；否则 T=gap/3；再 `T≤CATCHUP_T_CAP`，`stake = T × p/(1−p)` |
+| 落后目标线 | 按 `gap = 目标 − Portfolio` **分档多次回补**：`gap≤5` → T=gap；`gap≤15` → T=gap/2；否则 T=gap/3；再 `T≤CATCHUP_T_CAP`，`stake = TRADE_BUDGET_USD + T × p/(1−p)`（默认首注 + 追赶仓） |
 | 硬上限 | `min(BANKROLL_STAKE_MAX_USD, MAX_BET_USD, Cash)` |
 
 - **Portfolio**（Cash + 持仓市值）→ 判断是否跟上目标线、算追赶注码  

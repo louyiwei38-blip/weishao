@@ -10,7 +10,8 @@
  *     gap ≤ 5   -> T = gap       (一次补齐)
  *     gap ≤ 15  -> T = gap / 2   (补一半)
  *     gap > 15  -> T = gap / 3   (补 1/3；含 >30 继续分批)
- *     then T = min(T, catchUpCap), stake = T * p / (1-p)
+ *     then T = min(T, catchUpCap)
+ *     stake = defaultBet + T * p / (1-p)   // 默认首注 + 追赶仓，不得只下追赶差额
  *   then stake = min(stake, stakeMax, availableBalance)
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, closeSync, unlinkSync } from 'fs';
@@ -282,7 +283,10 @@ export function computeStake({ balance, entryPrice }) {
     };
   }
 
-  const rawStake = T * (p / (1 - p));
+  // Catch-up stake is ADDITIVE to the default bet (not a replacement).
+  // Winning recovers ~defaultBet*(1-p)/p toward the next step PLUS T of the gap.
+  const catchUpStake = T * (p / (1 - p));
+  const rawStake = defaultBet + catchUpStake;
   const stakeUsd = clampStake(rawStake);
   return {
     stakeUsd,
@@ -294,6 +298,8 @@ export function computeStake({ balance, entryPrice }) {
     catchUpFraction: plan.fraction,
     catchUpTier: plan.tier,
     catchUpLabel: plan.label,
+    catchUpStakeUsd: Math.round(catchUpStake * 100) / 100,
+    defaultBetUsd: defaultBet,
     entryPrice: p,
   };
 }
@@ -301,19 +307,21 @@ export function computeStake({ balance, entryPrice }) {
 /**
  * Recompute catch-up stake at a final book price (no fee).
  * Used when sizing price was lower than the GTC submit price (case 1).
+ * Matches computeStake catch_up: defaultBet + T * p / (1-p).
  * @param {{ targetProfitUsd: number, entryPrice: number, balance?: number }} args
  */
 export function stakeFromTargetProfit({ targetProfitUsd, entryPrice, balance = Infinity }) {
   const T = Number(targetProfitUsd);
   const p = Number(entryPrice);
   const bal = Number(balance);
+  const defaultBet = config.tradeBudgetUsd;
   const stakeMax = Math.min(config.bankroll.stakeMaxUsd, config.maxBetUsd);
 
   if (!(T > 0) || !(p > 0 && p < 1)) {
     return { stakeUsd: 0, shares: null, targetProfitUsd: T || null };
   }
 
-  let stakeUsd = T * (p / (1 - p));
+  let stakeUsd = defaultBet + T * (p / (1 - p));
   stakeUsd = Math.min(stakeUsd, stakeMax);
   if (Number.isFinite(bal) && bal >= 0) stakeUsd = Math.min(stakeUsd, bal);
   stakeUsd = Math.round(stakeUsd * 100) / 100;
@@ -505,9 +513,18 @@ export function formatBankrollTelegramLines(sizing = null) {
             sizing.gapUsd != null ? ` gap$${Number(sizing.gapUsd).toFixed(2)}` : ''
           }`
         : '';
+    const basePart =
+      sizing.defaultBetUsd != null
+        ? `默认$${Number(sizing.defaultBetUsd).toFixed(2)}`
+        : `默认$${Number(config.tradeBudgetUsd).toFixed(2)}`;
+    const catchPart =
+      sizing.catchUpStakeUsd != null
+        ? `+追赶$${Number(sizing.catchUpStakeUsd).toFixed(2)}`
+        : '';
     line +=
       `动态首注: 追赶 T=$${Number(sizing.targetProfitUsd).toFixed(2)}${frac}` +
-      ` → 投 $${Number(sizing.stakeUsd).toFixed(2)}` +
+      ` → ${basePart}${catchPart}` +
+      ` = $${Number(sizing.stakeUsd).toFixed(2)}` +
       (sizing.shares != null ? ` · ~${sizing.shares.toFixed(2)} shares` : '') +
       `\n`;
   } else if (sizing) {
