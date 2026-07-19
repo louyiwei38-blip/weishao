@@ -1,8 +1,8 @@
 /**
  * Shared trading-universe parser for PM2 ecosystem + tooling.
  * Configure via .env only:
- *   TRADING_SYMBOLS=BTC,ETH          (or BTC/USDT,ETH/USDT)
- *   CANDLE_TIMEFRAMES=5m,15m,1h
+ *   TRADING_SYMBOLS=BTC              (single-symbol default; comma-list still supported)
+ *   CANDLE_TIMEFRAMES=5m             (single-timeframe default)
  *
  * Fallback: TRADING_SYMBOL (single) when TRADING_SYMBOLS is empty.
  */
@@ -57,7 +57,7 @@ function parseTradingSymbolBases(env = process.env) {
  * @returns {Array<[string, number]>} e.g. [['5m',5],['15m',15],['1h',60]]
  */
 function parseCandleTimeframes(env = process.env) {
-  const raw = env.CANDLE_TIMEFRAMES || '5m,15m,1h';
+  const raw = env.CANDLE_TIMEFRAMES || '5m';
   const out = [];
   const seen = new Set();
   for (const tok of splitList(raw)) {
@@ -67,7 +67,7 @@ function parseCandleTimeframes(env = process.env) {
     seen.add(tf);
     out.push([tf, minutes]);
   }
-  return out.length ? out : [['5m', 5], ['15m', 15], ['1h', 60]];
+  return out.length ? out : [['5m', 5]];
 }
 
 /** @returns {{ id: string, name: string, base: string, tf: string, minutes: number }[]} */

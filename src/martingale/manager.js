@@ -48,7 +48,7 @@ function loadState() {
     s.baseBet = config.tradeBudgetUsd;
     if (s.consecutiveLosses === 0) s.currentBet = s.baseBet;
     if (!Number.isFinite(s.chainPnlUsd)) s.chainPnlUsd = 0;
-    delete s.isHalted;
+    delete s.isHalted; // legacy field; halt is returned from onSettled()
   }
 }
 
@@ -113,8 +113,9 @@ export function prepareOrder(equityBalance, entryPrice = null, cashBalance = nul
     cashBalance: spendable,
     entryPrice: sizing.entryPrice,
     gapUsd: sizing.gapUsd,
-    catchUpTier: sizing.catchUpTier,
-    catchUpFraction: sizing.catchUpFraction,
+    layerUsd: sizing.layerUsd,
+    layerIndex: sizing.layerIndex,
+    catchUpQueue: sizing.catchUpQueue,
     targetProfitUsd: sizing.targetProfitUsd,
     shares: sizing.shares,
     consecutiveLosses: s.consecutiveLosses,
@@ -127,7 +128,7 @@ export function prepareOrder(equityBalance, entryPrice = null, cashBalance = nul
 /**
  * @param {boolean} won
  * @param {number} [pnlUsd=0]
- * @param {number|null|undefined} [equityBalance=null] Portfolio at halt — re-locks bankroll P
+ * @param {number|null|undefined} [equityBalance=null] Portfolio after settle — updates catch-up queue
  * @returns {{ halted: boolean, chainPnlUsd: number, bankroll: object }}
  */
 export function onSettled(won, pnlUsd = 0, equityBalance = null) {
@@ -137,11 +138,10 @@ export function onSettled(won, pnlUsd = 0, equityBalance = null) {
   s.chainPnlUsd = (Number(s.chainPnlUsd) || 0) + (Number(pnlUsd) || 0);
   const chainPnlUsd = s.chainPnlUsd;
 
-  /** @type {object} */
-  let br;
+  /** Always update N + catch-up queue; max-loss halt does NOT reset P/N. */
+  const br = bankroll.onSettled(won, equityBalance);
 
   if (won) {
-    br = bankroll.onSettled(true);
     resetToBaseBet();
     logger.info('[martingale] win — reset streak', {
       key: MARTINGALE_KEY,
@@ -149,27 +149,25 @@ export function onSettled(won, pnlUsd = 0, equityBalance = null) {
       chainPnlUsd,
       netCount: br.netCount,
       principal: br.principal,
+      catchUpQueue: br.catchUpQueue,
     });
   } else {
     s.consecutiveLosses += 1;
+    s.currentBet = s.currentBet * config.martingaleMultiplier;
 
     if (s.consecutiveLosses >= config.martingaleMaxLosses) {
       resetToBaseBet();
       halted = true;
-      // Epoch restart: re-lock P from Portfolio, N → 0 (no ±1 for this settle)
-      br = bankroll.resetOnMaxLossHalt(equityBalance);
-      logger.warn('[martingale] max losses — halt, reset streak + bankroll P/N', {
+      logger.warn('[martingale] max losses — halt streak only (P/N kept)', {
         key: MARTINGALE_KEY,
         baseBet: s.baseBet,
         chainPnlUsd,
         netCount: br.netCount,
         principal: br.principal,
-        principalUpdated: br.principalUpdated,
+        catchUpQueue: br.catchUpQueue,
+        equityBalance: Number.isFinite(Number(equityBalance)) ? Number(equityBalance) : null,
       });
     } else {
-      br = bankroll.onSettled(false);
-      // Multiplier kept for compatibility; live size is recomputed each shot via bankroll
-      s.currentBet = s.currentBet * config.martingaleMultiplier;
       logger.info('[martingale] loss — streak++', {
         key: MARTINGALE_KEY,
         consecutiveLosses: s.consecutiveLosses,
@@ -177,6 +175,7 @@ export function onSettled(won, pnlUsd = 0, equityBalance = null) {
         nextBetHint: s.currentBet,
         chainPnlUsd,
         netCount: br.netCount,
+        catchUpQueue: br.catchUpQueue,
       });
     }
   }
@@ -193,7 +192,6 @@ export function getState() {
     baseBet: s.baseBet,
     currentBet: s.currentBet,
     chainPnlUsd: Number(s.chainPnlUsd) || 0,
-    isHalted: false,
     bankroll: br,
   };
 }

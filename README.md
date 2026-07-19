@@ -1,8 +1,8 @@
 # Polymarket Vegas Channel Bot
 
-OKX USDT 永续 K 线 · **OKX 指标 API** EMA144/EMA169 维加斯通道穿越入场 · **多标的（`.env` 的 `TRADING_SYMBOLS`）** × 5m/15m/1h · **全实例共用本金 P / 净胜负 N** · 动态首注（默认 $10 / 追赶 T≤$20 / 单笔≤$30）· 仓位按 **Polymarket Portfolio（Cash + 持仓市值）** 计算 · CLOB V2 · Chainlink/OKX 结算 · GTC 限价
+OKX USDT 永续 K 线 · **OKX 指标 API** EMA144/EMA169 维加斯通道穿越入场 · **默认单标的 × 单周期**（`.env`：`TRADING_SYMBOLS` + `CANDLE_TIMEFRAMES`）· **本金 P / 净胜负 N + 补队列** · 动态首注（默认 $10 / 补层 T=L+step / 单笔≤$30）· 仓位按 **Polymarket Portfolio（Cash + 持仓市值）** 计算 · CLOB V2 · Chainlink/OKX 结算 · GTC 限价
 
-Polymarket 涨跌盘口可按 `.env` 配置多标的并行：例如 `TRADING_SYMBOLS=BTC,ETH` → 各周期独立进程；CLOB 限价/市价下单；默认 **Chainlink** 结算；同向马丁管理链路。状态文件按实例隔离；本金状态全钱包共享。
+默认 `TRADING_SYMBOLS=BTC`、`CANDLE_TIMEFRAMES=5m`；CLOB 限价/市价下单；默认 **Chainlink** 结算；同向马丁管理链路。状态文件按实例隔离；本金状态全钱包共享。
 
 > 架构细节见 **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)** · 部署见 **[DEPLOY.md](./DEPLOY.md)**
 
@@ -24,7 +24,7 @@ EMA 由 **OKX Indicators API** 拉取（`src/collector/okxIndicators.js`），OH
 1. `need_outside` — 等待至少一根已收盘 K **实体完全在通道外**，才进入 `armed`
 2. `armed` — 检测穿越入场；有信号则锁定方向进入 `in_chain` 并下首注
 3. `in_chain` — **不做新信号检测**；每周期同向续下（马丁 ×1）
-4. 赢 → 停止并回 `need_outside`；连亏 5 次 → 止损重置并回 `need_outside`（同时重置本金 P＝当时 Portfolio、净胜负 N＝0）
+4. 赢 → 停止并回 `need_outside`；连亏 5 次 → 止损并回 `need_outside`（**不重置**本金 P / 净胜负 N；补队列照常按结算更新）
 
 **安全闸门（下单前）：**
 
@@ -37,25 +37,33 @@ EMA 由 **OKX Indicators API** 拉取（`src/collector/okxIndicators.js`），OH
 
 ---
 
-## 共用本金与动态首注
+## 共用本金与动态首注（补队列）
 
-所有 PM2 实例（标的 × 周期）共享同一钱包的本金状态：`logs/bankroll-state.json`。
+本金状态：`logs/bankroll-state.json`（P / N / 补队列）。
 
 | 符号 | 含义 |
 |------|------|
-| **P** | 本金，首次从 Portfolio 锁定；**连亏止损时按当时 Portfolio 重新锁定** |
-| **N** | 净胜负次数（仅确认结算后 ±1）；**连亏止损时重置为 0** |
+| **P** | 本金，首次从 Portfolio 锁定；**连亏止损不重置** |
+| **N** | 净胜负次数（确认结算后 ±1）；**连亏止损不重置** |
 | 目标线 | `P + N × BANKROLL_STEP_USD` |
+| **gap** | `max(0, 目标 − Portfolio)`（含手续费/买价后的真实余额） |
+| **补队列** | 未清除层 `[补1, 补2, …]`；`补N = 当前gap − Σ未清除层` |
 
 **仓位（每枪，含 MG_CONT）：**
 
 | 条件 | 注码 |
 |------|------|
-| Portfolio ≥ 目标线 | `TRADE_BUDGET_USD`（默认 $10） |
-| 落后目标线 | 按 `gap = 目标 − Portfolio` **分档多次回补**：`gap≤5` → T=gap；`gap≤15` → T=gap/2；否则 T=gap/3；再 `T≤CATCHUP_T_CAP`，`stake = TRADE_BUDGET_USD + T × p/(1−p)`（默认首注 + 追赶仓） |
+| gap≈0 且队列空 | `TRADE_BUDGET_USD`（默认 $10） |
+| 队列非空（或刚出现 gap） | 打最前未清除层 **L**；胜后目标利润 `T = L + step`；`stake = T × p/(1−p)`（再 `T≤CATCHUP_T_CAP`） |
 | 硬上限 | `min(BANKROLL_STAKE_MAX_USD, MAX_BET_USD, Cash)` |
 
-- **Portfolio**（Cash + 持仓市值）→ 判断是否跟上目标线、算追赶注码  
+**补队列纪律：**
+
+- 输：出手层不变，只登记新层 `补N = gap − Σ未清除`
+- 赢：清除当前层；有下一层则下一把打下一层；队列空且 gap≈0 → 回默认 $10；空但仍有 gap → 新开补1
+- 长期靠胜率 >50% 消化队列
+
+- **Portfolio**（Cash + 持仓市值）→ 判断目标线 / gap / 补层登记  
 - **Cash** → 实际可花金额与补仓上限（避免用浮盈超花）
 
 ---
@@ -92,11 +100,20 @@ npm run start:eth:1h
 
 ---
 
-## 多标的：只改 `.env`
+## 标的 / 周期：只改 `.env`
+
+默认单标的 × 单周期：
 
 ```env
-TRADING_SYMBOLS=BTC,ETH          # 或 BTC/USDT,ETH/USDT,SOL
-CANDLE_TIMEFRAMES=5m,15m,1h      # 可选；默认三周期
+TRADING_SYMBOLS=BTC
+CANDLE_TIMEFRAMES=5m
+```
+
+如需多开（可选）：
+
+```env
+TRADING_SYMBOLS=BTC,ETH
+CANDLE_TIMEFRAMES=5m,15m,1h
 ```
 
 然后：
@@ -112,18 +129,13 @@ Chainlink 已支持：`BTC / ETH / SOL / BNB / XRP / DOGE`（需 Polymarket 有�
 
 ---
 
-## 多实例 → PM2（由 `TRADING_SYMBOLS` × `CANDLE_TIMEFRAMES` 生成）
+## PM2（由 `TRADING_SYMBOLS` × `CANDLE_TIMEFRAMES` 生成）
 
-| PM2 进程 | 周期 | 盘口 slug 示例 |
-|----------|------|----------------|
-| `V3-btc-5m` 等 | 5 分钟 | `btc-updown-5m-<unix>` |
-| `V3-btc-15m` 等 | 15 分钟 | `btc-updown-15m-<unix>` |
-| `V3-eth-1h` 等 | 1 小时 | `ethereum` / `btc` 等 1h ET slug |
+默认进程：`V3-btc-5m`（盘口 slug 例：`btc-updown-5m-<unix>`）。
 
-- 共用同一 `.env` 钱包 / CLOB 凭证 / **本金 P·N**
-- `BOT_INSTANCE`（如 `btc-15m`）+ `CANDLE_TIMEFRAME` 隔离状态与日志
-- Telegram 消息带 `[BTC·15m]` / `[ETH·5m]` 前缀；可用**一个论坛群 + Topics**按实例分话题（见 [DEPLOY.md](./DEPLOY.md)）
-- `MAX_DAILY_LOSS_USD` **按实例分别累计**（多路合计可能超过单路上限）
+- 共用同一 `.env` 钱包 / CLOB 凭证 / **本金 P·N·补队列**
+- `BOT_INSTANCE`（如 `btc-5m`）+ `CANDLE_TIMEFRAME` 隔离状态与日志
+- Telegram 可用**一个论坛群 + Topics**（见 [DEPLOY.md](./DEPLOY.md)）
 - `MARKET_CYCLE_MINUTES` 可省略：由 `CANDLE_TIMEFRAME` 自动推导（`5m→5`，`15m→15`，`1h→60`）
 
 ---
@@ -151,8 +163,8 @@ src/
 │   └── chainlinkSettle.js           # OKX / Chainlink 结算
 ├── martingale/
 │   ├── manager.js                   # 同向马丁（按实例隔离）
-│   ├── bankroll.js                  # 共用 P/N + 动态首注
-│   └── dynamicBaseBet.js            # 动态首注辅助
+│   └── bankroll.js                  # 共用 P/N + 补队列动态首注
+├── session/                         # 仅离线回测用（实盘不用）
 └── utils/
     ├── instancePaths.js             # pending-bet-{id}.json 等
     ├── logger.js / telegram.js …
@@ -172,7 +184,7 @@ docs/
 
 | 文件 | 说明 |
 |------|------|
-| `logs/bankroll-state.json` | 共用本金 P、净胜负 N |
+| `logs/bankroll-state.json` | 共用本金 P、净胜负 N、补队列 |
 
 **按实例后缀**（`BOT_INSTANCE`，如 `btc-15m` / `eth-5m`）：
 
@@ -200,10 +212,10 @@ docs/
 |------|------|------|
 | `OHLCV_EXCHANGE` | okx | K 线主交易所 |
 | `OHLCV_MARKET_TYPE` | swap | `swap`=USDT 永续；`spot`=现货 |
-| `TRADING_SYMBOLS` | BTC | **PM2 多标的列表**（`BTC,ETH` 或 `BTC/USDT,ETH/USDT`） |
-| `CANDLE_TIMEFRAMES` | 5m,15m,1h | **PM2 周期列表** |
+| `TRADING_SYMBOLS` | BTC | **PM2 标的列表**（默认单标的；可 `BTC,ETH`） |
+| `CANDLE_TIMEFRAMES` | 5m | **PM2 周期列表**（默认单周期） |
 | `TRADING_SYMBOL` | BTC/USDT | 单进程 slug；PM2 时由 ecosystem 按标的注入 |
-| `CANDLE_TIMEFRAME` | 1h | 单进程默认；PM2 时由 ecosystem 覆盖 |
+| `CANDLE_TIMEFRAME` | 5m | 单进程默认；PM2 时由 ecosystem 覆盖 |
 | `MARKET_CYCLE_MINUTES` | 随 timeframe | 可省略，由 `CANDLE_TIMEFRAME` 推导 |
 | `BOT_INSTANCE` | = timeframe | 状态文件后缀（PM2 为 `{base}-{tf}`，如 `btc-5m`） |
 | `CANDLE_FETCH_LIMIT` | 200 | OHLCV 根数；通道 EMA 由 OKX 指标接口提供 |
@@ -220,14 +232,11 @@ docs/
 |------|------|------|
 | `TRADE_BUDGET_USD` | 10 | 跟上目标线时的默认投入 |
 | `MAX_BET_USD` | 30 | 单笔硬上限 |
-| `BANKROLL_STEP_USD` | 10 | 目标线步进（目标=本金+净胜负×step） |
-| `BANKROLL_CATCHUP_T_CAP` | 20 | 落后时目标净利 T 硬上限 |
-| `BANKROLL_CATCHUP_GAP_FULL` | 5 | gap≤此值 → 一次补齐 |
-| `BANKROLL_CATCHUP_GAP_HALF` | 15 | gap≤此值 → 补一半 |
-| `BANKROLL_CATCHUP_GAP_THIRD` | 30 | 文档阈值；gap>半档 → 补 1/3 |
+| `BANKROLL_STEP_USD` | 10 | 目标线步进（目标=本金+净胜负×step）；补层 T=L+step |
+| `BANKROLL_CATCHUP_T_CAP` | 20 | 补层目标净利 T 硬上限 |
 | `BANKROLL_STAKE_MAX_USD` | 30 | 动态仓位单笔上限 |
 | `MARTINGALE_MULTIPLIER` | 1 | 连亏倍数（仓位由动态首注重算） |
-| `MARTINGALE_MAX_LOSSES` | 5 | 连亏止损次数 |
+| `MARTINGALE_MAX_LOSSES` | 5 | 连亏止损次数（只停链路，不重置 P/N） |
 | `MAX_DAILY_LOSS_USD` | 10000 | 日亏损上限（**每实例**） |
 | `ORDER_PRICE_CAP` | 0.95 | YES/NO 限价封顶；`.env.example` 推荐 `0.60`；`0`=不限制 |
 | `ORDER_TYPE` | GTC | `GTC` 限价 / `FOK` 市价 |
@@ -253,7 +262,7 @@ docs/
 
 - **无信号 / 风控拦截**：不下单；`in_chain` 时方向锁定保持  
 - **赢**：马丁重置 → `need_outside`；N +1  
-- **连亏 5**：止损重置 → `need_outside`；**重新拉取 Portfolio 锁定本金 P，N 重置为 0**（须再等通道外实体；**不会**走快路径续单）  
+- **连亏 5**：止损 → `need_outside`（须再等通道外实体；**不会**走快路径续单）；**本金 P / 净胜负 N 不重置**，补队列继续按结算更新  
 - **结算输且连亏 &lt; 5**：结算完成后立即同向续下一窗（`MG_CONT_FAST_PATH`）；N −1  
 - GTC 未成交不计入马丁 / 不改 N  
 
@@ -263,7 +272,7 @@ docs/
 
 | 命令 | 说明 |
 |------|------|
-| `npm run pm2:start` | 实盘：按 `.env` 的 `TRADING_SYMBOLS` × `CANDLE_TIMEFRAMES` 开齐 |
+| `npm run pm2:start` | 实盘：按 `.env` 的 `TRADING_SYMBOLS` × `CANDLE_TIMEFRAMES` 开齐（默认 BTC×5m） |
 | `npm run pm2:dry` | 模拟盘同上 |
 | `npm run pm2:restart` | 重启全部实例 |
 | `npm run pm2:stop` | 停止全部实例 |

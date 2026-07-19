@@ -66,8 +66,8 @@ function timeframeToMinutes(tf) {
   return m[2].toLowerCase() === 'h' ? n * 60 : n;
 }
 
-const timeframe = optional('CANDLE_TIMEFRAME', '1h');
-const derivedCycleMinutes = timeframeToMinutes(timeframe) ?? 60;
+const timeframe = optional('CANDLE_TIMEFRAME', '5m');
+const derivedCycleMinutes = timeframeToMinutes(timeframe) ?? 5;
 
 const config = {
   // Polymarket
@@ -124,7 +124,8 @@ const config = {
   })(),
   /** Timeframes for PM2 universe (informational). Live process uses `timeframe`. */
   candleTimeframes: (() => {
-    const raw = optional('CANDLE_TIMEFRAMES', '5m,15m,1h');
+    // Default: single timeframe (project runs one symbol × one TF)
+    const raw = optional('CANDLE_TIMEFRAMES', '5m');
     const allowed = new Set(['1m', '5m', '15m', '30m', '1h', '4h']);
     const out = [];
     const seen = new Set();
@@ -134,7 +135,7 @@ const config = {
       seen.add(tf);
       out.push(tf);
     }
-    return out.length ? out : ['5m', '15m', '1h'];
+    return out.length ? out : ['5m'];
   })(),
   timeframe,
   candleLimit: num('CANDLE_FETCH_LIMIT', 200),
@@ -170,26 +171,17 @@ const config = {
   minBalanceUsd: num('MIN_BALANCE_USD', 0),
   maxBetUsd: num('MAX_BET_USD', 30),
   /**
-   * Shared dynamic bankroll (P/N) across all PM2 instances (all symbols × TFs) of this wallet.
+   * Shared dynamic bankroll (P/N + catch-up queue).
+   * Catch-up: play front layer L with win profit T = L + step; stake = T×p/(1−p).
    * See src/martingale/bankroll.js
    */
   bankroll: {
     /** Equity step per net win (also used in target = P + N * step) */
     stepUsd: num('BANKROLL_STEP_USD', 10),
-    /** Hard cap on catch-up target profit T (safety; tier fractions usually bind first) */
+    /** Hard cap on catch-up target profit T = layer + step */
     catchUpProfitCapUsd: num('BANKROLL_CATCHUP_T_CAP', 20),
     /** Cap on computed stake per order */
     stakeMaxUsd: num('BANKROLL_STAKE_MAX_USD', 30),
-    /**
-     * Multi-step catch-up by gap = target − Portfolio:
-     *   gap ≤ fullUsd → recover 100% of gap next shot
-     *   gap ≤ halfUsd → recover 50%
-     *   else          → recover ~33% (thirdUsd is documentation threshold; same fraction above)
-     * Live stake = TRADE_BUDGET_USD + T*p/(1-p) (default + catch-up).
-     */
-    catchUpGapFullUsd: num('BANKROLL_CATCHUP_GAP_FULL', 5),
-    catchUpGapHalfUsd: num('BANKROLL_CATCHUP_GAP_HALF', 15),
-    catchUpGapThirdUsd: num('BANKROLL_CATCHUP_GAP_THIRD', 30),
   },
   orderType: optional('ORDER_TYPE', 'GTC'),
   orderFillAttempts: num('ORDER_FILL_ATTEMPTS', 8),

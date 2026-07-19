@@ -1,18 +1,16 @@
 /**
- * Shared bankroll (P / N) across all symbol × timeframe instances of the same wallet.
+ * Shared bankroll (P / N / catch-up queue) for the wallet.
  *
- * P = principal, locked from Portfolio when missing; re-locked from live Portfolio on max-loss halt
- * N = net wins-losses, start 0; +1 win / -1 loss on confirmed settlement only; reset to 0 on max-loss halt
+ * P = principal, locked from Portfolio on first use (never re-locked on max-loss halt)
+ * N = net wins−losses; +1 win / −1 loss on confirmed settlement (kept across max-loss halt)
+ * target = P + N × step
+ * gap = max(0, target − Portfolio)
  *
- * Sizing (every shot, including MG_CONT):
- *   Bal >= P + N*step  -> stake = defaultBet (TRADE_BUDGET_USD)
- *   else gap = target − Bal; multi-step catch-up:
- *     gap ≤ 5   -> T = gap       (一次补齐)
- *     gap ≤ 15  -> T = gap / 2   (补一半)
- *     gap > 15  -> T = gap / 3   (补 1/3；含 >30 继续分批)
- *     then T = min(T, catchUpCap)
- *     stake = defaultBet + T * p / (1-p)   // 默认首注 + 追赶仓，不得只下追赶差额
- *   then stake = min(stake, stakeMax, availableBalance)
+ * Catch-up queue (补1, 补2, …):
+ *   - No gap & empty queue → stake = defaultBet (TRADE_BUDGET_USD)
+ *   - Else play front layer L; win profit T = L + step; stake = T × p/(1−p)
+ *   - Loss: keep playing same layer; append 补N = gap − Σ(uncleared)
+ *   - Win on layer: clear that layer; advance to next; empty+gap→ new 补1; empty+no gap→ default
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, closeSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
@@ -25,10 +23,18 @@ const LOGS_DIR = join(__dirname, '..', '..', 'logs');
 const STATE_FILE = join(LOGS_DIR, 'bankroll-state.json');
 const LOCK_FILE = `${STATE_FILE}.lock`;
 
-/** @type {{ principal: number|null, netCount: number, updatedAt: string|null }} */
+/** Ignore dust below one cent when comparing / registering layers */
+const GAP_EPS = 0.01;
+
+/**
+ * @typedef {{ id: number, usd: number }} CatchUpLayer
+ * @type {{ principal: number|null, netCount: number, catchUpQueue: CatchUpLayer[], nextLayerId: number, updatedAt: string|null }}
+ */
 let cache = {
   principal: null,
   netCount: 0,
+  catchUpQueue: [],
+  nextLayerId: 1,
   updatedAt: null,
 };
 
@@ -67,28 +73,66 @@ function withLock(fn) {
   throw new Error('bankroll lock timeout');
 }
 
+function round2(n) {
+  return Math.round(Number(n) * 100) / 100;
+}
+
+/** @returns {CatchUpLayer[]} */
+function normalizeQueue(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const x of raw) {
+    if (x != null && typeof x === 'object') {
+      const usd = round2(x.usd ?? x.amount);
+      const id = Math.trunc(Number(x.id));
+      if (Number.isFinite(usd) && usd >= GAP_EPS && Number.isFinite(id) && id > 0) {
+        out.push({ id, usd });
+      }
+      continue;
+    }
+    // Legacy: bare numbers → assign temporary ids 1..n (upgraded on write)
+    const usd = round2(x);
+    if (Number.isFinite(usd) && usd >= GAP_EPS) {
+      out.push({ id: out.length + 1, usd });
+    }
+  }
+  return out;
+}
+
+function nextIdFromQueue(queue, hint) {
+  const maxId = (queue || []).reduce((m, layer) => Math.max(m, Number(layer.id) || 0), 0);
+  const fromHint = Number.isFinite(Number(hint)) ? Math.trunc(Number(hint)) : 1;
+  return Math.max(1, maxId + 1, fromHint);
+}
+
 function readDisk() {
   if (!existsSync(STATE_FILE)) {
-    return { principal: null, netCount: 0, updatedAt: null };
+    return { principal: null, netCount: 0, catchUpQueue: [], nextLayerId: 1, updatedAt: null };
   }
   try {
     const raw = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
+    const catchUpQueue = normalizeQueue(raw.catchUpQueue);
     return {
       principal: Number.isFinite(Number(raw.principal)) ? Number(raw.principal) : null,
       netCount: Number.isFinite(Number(raw.netCount)) ? Math.trunc(Number(raw.netCount)) : 0,
+      catchUpQueue,
+      nextLayerId: nextIdFromQueue(catchUpQueue, raw.nextLayerId),
       updatedAt: raw.updatedAt ?? null,
     };
   } catch {
     logger.warn('[bankroll] state parse failed, reset');
-    return { principal: null, netCount: 0, updatedAt: null };
+    return { principal: null, netCount: 0, catchUpQueue: [], nextLayerId: 1, updatedAt: null };
   }
 }
 
 function writeDisk(state) {
   if (!existsSync(LOGS_DIR)) mkdirSync(LOGS_DIR, { recursive: true });
+  const catchUpQueue = normalizeQueue(state.catchUpQueue);
   const payload = {
     principal: state.principal,
     netCount: state.netCount,
+    catchUpQueue,
+    nextLayerId: nextIdFromQueue(catchUpQueue, state.nextLayerId),
     updatedAt: new Date().toISOString(),
   };
   writeFileSync(STATE_FILE, JSON.stringify(payload, null, 2), 'utf8');
@@ -98,6 +142,28 @@ function writeDisk(state) {
 function reload() {
   cache = readDisk();
   return cache;
+}
+
+function queueSum(queue) {
+  return round2((queue || []).reduce((a, layer) => a + Number(layer?.usd || 0), 0));
+}
+
+/** @returns {{ layer: CatchUpLayer, nextLayerId: number }} */
+function makeLayer(usd, nextLayerId) {
+  const id = Math.max(1, Math.trunc(Number(nextLayerId) || 1));
+  return { layer: { id, usd: round2(usd) }, nextLayerId: id + 1 };
+}
+
+function targetOf(P, N) {
+  if (P == null) return null;
+  return P + N * config.bankroll.stepUsd;
+}
+
+function gapOf(P, N, balance) {
+  const target = targetOf(P, N);
+  const bal = Number(balance);
+  if (target == null || !Number.isFinite(bal)) return 0;
+  return Math.max(0, round2(target - bal));
 }
 
 export function init() {
@@ -134,41 +200,60 @@ export function getState() {
   const step = config.bankroll.stepUsd;
   const P = cache.principal;
   const N = cache.netCount;
+  const queue = normalizeQueue(cache.catchUpQueue);
+  const front = queue[0] ?? null;
   return {
     principal: P,
     netCount: N,
+    catchUpQueue: queue,
+    catchUpLayerUsd: front?.usd ?? null,
+    catchUpLayerIndex: front?.id ?? null,
     stepUsd: step,
     targetBalance: P == null ? null : P + N * step,
-    nextTargetBalance: P == null ? null : P + (N + 1) * step,
-    defaultBetUsd: config.tradeBudgetUsd,
-    catchUpProfitCapUsd: config.bankroll.catchUpProfitCapUsd,
-    stakeMaxUsd: config.bankroll.stakeMaxUsd,
-    catchUpGapFullUsd: config.bankroll.catchUpGapFullUsd,
-    catchUpGapHalfUsd: config.bankroll.catchUpGapHalfUsd,
-    catchUpGapThirdUsd: config.bankroll.catchUpGapThirdUsd,
     updatedAt: cache.updatedAt,
   };
 }
 
 /**
- * Map gap = target − Portfolio → catch-up fraction of that gap.
- * Defaults: ≤5 → 1; ≤15 → 1/2; else → 1/3.
- * @param {number} gapUsd
- * @returns {{ fraction: number, label: string, tier: 'full'|'half'|'third' }}
+ * Sync queue with live gap before sizing:
+ * - gap≈0 → clear queue (debt already gone)
+ * - gap>0 & empty queue → open 补1 = gap
+ * @param {number} balance
  */
-export function resolveCatchUpFraction(gapUsd) {
-  const gap = Number(gapUsd);
-  const fullAt = Number(config.bankroll.catchUpGapFullUsd) || 5;
-  const halfAt = Number(config.bankroll.catchUpGapHalfUsd) || 15;
-  // gap ≤ thirdUsd and gap > thirdUsd both use 1/3 (分批回补)
+function syncCatchUpQueue(balance) {
+  return withLock(() => {
+    reload();
+    const gap = gapOf(cache.principal, cache.netCount, balance);
+    let queue = normalizeQueue(cache.catchUpQueue);
+    let nextLayerId = nextIdFromQueue(queue, cache.nextLayerId);
+    let changed = false;
 
-  if (!(gap > 0) || gap <= fullAt) {
-    return { fraction: 1, label: '一次补齐', tier: 'full' };
-  }
-  if (gap <= halfAt) {
-    return { fraction: 0.5, label: '补一半', tier: 'half' };
-  }
-  return { fraction: 1 / 3, label: '补1/3', tier: 'third' };
+    if (gap < GAP_EPS) {
+      if (queue.length) {
+        queue = [];
+        nextLayerId = 1;
+        changed = true;
+      }
+    } else if (queue.length === 0) {
+      const made = makeLayer(gap, nextLayerId);
+      queue = [made.layer];
+      nextLayerId = made.nextLayerId;
+      changed = true;
+    }
+
+    if (changed) {
+      cache.catchUpQueue = queue;
+      cache.nextLayerId = nextLayerId;
+      writeDisk(cache);
+      logger.info('[bankroll] catch-up queue synced', {
+        gapUsd: gap,
+        catchUpQueue: queue,
+        netCount: cache.netCount,
+        principal: cache.principal,
+      });
+    }
+    return getState();
+  });
 }
 
 /**
@@ -182,14 +267,18 @@ export function computeStake({ balance, entryPrice }) {
   const bal = Number(balance);
   const p = Number(entryPrice);
 
+  // Open / clear queue against live Portfolio before sizing
+  if (Number.isFinite(bal)) syncCatchUpQueue(bal);
+
   const st = getState();
   const P = st.principal;
+  const queue = st.catchUpQueue;
 
   const clampStake = (raw) => {
     let s = Math.max(0, Number(raw) || 0);
     s = Math.min(s, stakeMax);
     if (Number.isFinite(bal) && bal >= 0) s = Math.min(s, bal);
-    return Math.round(s * 100) / 100;
+    return round2(s);
   };
 
   const sharesOf = (stake, price) => {
@@ -204,127 +293,96 @@ export function computeStake({ balance, entryPrice }) {
       shares: sharesOf(stakeUsd, p),
       mode: 'fallback_default',
       targetProfitUsd: null,
+      layerUsd: null,
+      layerIndex: null,
+      catchUpQueue: [],
       targetBalance: null,
       gapUsd: null,
-      catchUpFraction: null,
-      catchUpTier: null,
       entryPrice: Number.isFinite(p) ? p : null,
     };
   }
 
   const N = st.netCount;
   const targetBalance = P + N * step;
-  const gapUsd = targetBalance - bal;
+  const gapUsd = round2(targetBalance - bal);
+  const gap = Math.max(0, gapUsd);
 
-  if (bal >= targetBalance) {
+  if (queue.length === 0 || gap < GAP_EPS) {
     const stakeUsd = clampStake(defaultBet);
     return {
       stakeUsd,
       shares: sharesOf(stakeUsd, p),
       mode: 'default',
       targetProfitUsd: null,
+      layerUsd: null,
+      layerIndex: null,
+      catchUpQueue: [],
       targetBalance,
-      gapUsd: Math.round((bal - targetBalance) * 100) / 100,
-      catchUpFraction: null,
-      catchUpTier: null,
+      gapUsd: round2(bal - targetBalance),
       entryPrice: Number.isFinite(p) ? p : null,
     };
   }
 
-  // Multi-step: recover a fraction of current gap (not full jump to next target)
-  const gap = Math.round(gapUsd * 100) / 100;
-  if (!(gap > 0)) {
+  const front = queue[0];
+  const layerUsd = round2(front.usd);
+  const layerIndex = front.id;
+  let T = round2(layerUsd + step);
+  if (Number.isFinite(tCap) && tCap > 0) T = Math.min(T, tCap);
+  T = round2(T);
+
+  if (!(T > 0) || !(p > 0 && p < 1)) {
     const stakeUsd = clampStake(defaultBet);
     return {
       stakeUsd,
       shares: sharesOf(stakeUsd, p),
       mode: 'fallback_default',
-      targetProfitUsd: null,
+      targetProfitUsd: T > 0 ? T : null,
+      layerUsd,
+      layerIndex,
+      catchUpQueue: queue,
       targetBalance,
       gapUsd: gap,
-      catchUpFraction: null,
-      catchUpTier: null,
+      catchUpLabel: `补${layerIndex}`,
       entryPrice: Number.isFinite(p) ? p : null,
     };
   }
 
-  const plan = resolveCatchUpFraction(gap);
-  let T = gap * plan.fraction;
-  T = Math.min(T, tCap);
-  T = Math.round(T * 100) / 100;
-
-  if (!(T > 0)) {
-    const stakeUsd = clampStake(defaultBet);
-    return {
-      stakeUsd,
-      shares: sharesOf(stakeUsd, p),
-      mode: 'fallback_default',
-      targetProfitUsd: null,
-      targetBalance,
-      gapUsd: gap,
-      catchUpFraction: plan.fraction,
-      catchUpTier: plan.tier,
-      entryPrice: Number.isFinite(p) ? p : null,
-    };
-  }
-
-  if (!(p > 0 && p < 1)) {
-    const stakeUsd = clampStake(defaultBet);
-    return {
-      stakeUsd,
-      shares: sharesOf(stakeUsd, p),
-      mode: 'fallback_default',
-      targetProfitUsd: T,
-      targetBalance,
-      gapUsd: gap,
-      catchUpFraction: plan.fraction,
-      catchUpTier: plan.tier,
-      entryPrice: null,
-    };
-  }
-
-  // Catch-up stake is ADDITIVE to the default bet (not a replacement).
-  // Winning recovers ~defaultBet*(1-p)/p toward the next step PLUS T of the gap.
-  const catchUpStake = T * (p / (1 - p));
-  const rawStake = defaultBet + catchUpStake;
+  const rawStake = T * (p / (1 - p));
   const stakeUsd = clampStake(rawStake);
   return {
     stakeUsd,
     shares: sharesOf(stakeUsd, p),
     mode: 'catch_up',
     targetProfitUsd: T,
+    layerUsd,
+    layerIndex,
+    catchUpQueue: queue,
+    catchUpLabel: `补${layerIndex}`,
     targetBalance,
     gapUsd: gap,
-    catchUpFraction: plan.fraction,
-    catchUpTier: plan.tier,
-    catchUpLabel: plan.label,
-    catchUpStakeUsd: Math.round(catchUpStake * 100) / 100,
-    defaultBetUsd: defaultBet,
     entryPrice: p,
   };
 }
 
 /**
- * Recompute catch-up stake at a final book price (no fee).
- * Used when sizing price was lower than the GTC submit price (case 1).
- * Matches computeStake catch_up: defaultBet + T * p / (1-p).
+ * Recompute stake for full target profit T at a final book price.
+ * Catch-up: stake = T × p/(1−p) where T = layer + step.
  * @param {{ targetProfitUsd: number, entryPrice: number, balance?: number }} args
  */
-export function stakeFromTargetProfit({ targetProfitUsd, entryPrice, balance = Infinity }) {
+function stakeFromTargetProfit({ targetProfitUsd, entryPrice, balance = Infinity }) {
   const T = Number(targetProfitUsd);
   const p = Number(entryPrice);
   const bal = Number(balance);
-  const defaultBet = config.tradeBudgetUsd;
   const stakeMax = Math.min(config.bankroll.stakeMaxUsd, config.maxBetUsd);
 
   if (!(T > 0) || !(p > 0 && p < 1)) {
     return { stakeUsd: 0, shares: null, targetProfitUsd: T || null };
   }
 
-  let stakeUsd = defaultBet + T * (p / (1 - p));
+  let stakeUsd = T * (p / (1 - p));
   stakeUsd = Math.min(stakeUsd, stakeMax);
   if (Number.isFinite(bal) && bal >= 0) stakeUsd = Math.min(stakeUsd, bal);
-  stakeUsd = Math.round(stakeUsd * 100) / 100;
+  stakeUsd = round2(stakeUsd);
   const shares = Math.round((stakeUsd / p) * 1e6) / 1e6;
   return { stakeUsd, shares, targetProfitUsd: T };
 }
@@ -332,17 +390,6 @@ export function stakeFromTargetProfit({ targetProfitUsd, entryPrice, balance = I
 /**
  * Case 1 (sizingPrice < finalPrice): need top-up = recomputedStake − originalStake.
  * Case 2 (sizingPrice >= finalPrice): no top-up.
- *
- * @returns {{
- *   needTopUp: boolean,
- *   topUpUsd: number,
- *   neededStakeUsd: number,
- *   originalStakeUsd: number,
- *   reason: string,
- *   sizingPrice?: number,
- *   finalPrice?: number,
- *   targetProfitUsd?: number,
- * }}
  */
 export function computeCatchUpTopUp({
   mode,
@@ -375,7 +422,6 @@ export function computeCatchUpTopUp({
     };
   }
 
-  // Case 2: sizing price not lower than final — leave as-is
   if (p0 >= p1) {
     return {
       needTopUp: false,
@@ -386,7 +432,6 @@ export function computeCatchUpTopUp({
     };
   }
 
-  // Case 1: place original first, then top up difference at final price
   const balLeft = Number.isFinite(Number(balance))
     ? Math.max(0, Number(balance) - original)
     : Infinity;
@@ -396,12 +441,12 @@ export function computeCatchUpTopUp({
     balance: Number.isFinite(Number(balance)) ? Number(balance) : Infinity,
   });
   const neededStakeUsd = recomputed.stakeUsd;
-  let topUpUsd = Math.round((neededStakeUsd - original) * 100) / 100;
+  let topUpUsd = round2(neededStakeUsd - original);
   if (Number.isFinite(balLeft)) topUpUsd = Math.min(topUpUsd, balLeft);
   topUpUsd = Math.max(0, topUpUsd);
 
   return {
-    needTopUp: topUpUsd >= 0.01,
+    needTopUp: topUpUsd >= GAP_EPS,
     topUpUsd,
     neededStakeUsd,
     originalStakeUsd: original,
@@ -412,87 +457,76 @@ export function computeCatchUpTopUp({
   };
 }
 
-/** @deprecated use computeCatchUpTopUp — kept for callers expecting old shape */
-export function adjustStakeForFinalPrice(args) {
-  const t = computeCatchUpTopUp(args);
-  return {
-    stakeUsd: t.needTopUp ? t.neededStakeUsd : t.originalStakeUsd,
-    sharesHint: null,
-    adjusted: t.needTopUp,
-    reason: t.reason,
-    sizingPrice: t.sizingPrice,
-    finalPrice: t.finalPrice,
-    targetProfitUsd: t.targetProfitUsd,
-    topUpUsd: t.topUpUsd,
-    neededStakeUsd: t.neededStakeUsd,
-    originalStakeUsd: t.originalStakeUsd,
-  };
-}
-
 /**
+ * Apply settlement to N and the catch-up queue.
  * @param {boolean} won
+ * @param {number|null|undefined} [equityBalance] Portfolio after settlement
  */
-export function onSettled(won) {
+export function onSettled(won, equityBalance = null) {
   return withLock(() => {
     reload();
     cache.netCount += won ? 1 : -1;
+
+    let queue = normalizeQueue(cache.catchUpQueue);
+    let nextLayerId = nextIdFromQueue(queue, cache.nextLayerId);
+    const balOk = Number.isFinite(Number(equityBalance));
+    let gap = null;
+
+    if (!balOk) {
+      logger.warn('[bankroll] settled without Portfolio — N updated, catch-up queue unchanged', {
+        won,
+        netCount: cache.netCount,
+        catchUpQueue: queue,
+      });
+    } else {
+      gap = gapOf(cache.principal, cache.netCount, equityBalance);
+
+      if (won) {
+        if (queue.length > 0) queue = queue.slice(1);
+        if (gap < GAP_EPS) {
+          queue = [];
+          nextLayerId = 1;
+        } else if (queue.length === 0) {
+          const made = makeLayer(gap, 1);
+          queue = [made.layer];
+          nextLayerId = made.nextLayerId;
+        }
+      } else if (queue.length === 0) {
+        if (gap >= GAP_EPS) {
+          const made = makeLayer(gap, 1);
+          queue = [made.layer];
+          nextLayerId = made.nextLayerId;
+        }
+      } else {
+        const next = round2(gap - queueSum(queue));
+        if (next >= GAP_EPS) {
+          const made = makeLayer(next, nextLayerId);
+          queue = [...queue, made.layer];
+          nextLayerId = made.nextLayerId;
+        }
+      }
+    }
+
+    cache.catchUpQueue = queue;
+    cache.nextLayerId = nextLayerId;
     writeDisk(cache);
-    logger.info('[bankroll] netCount updated', {
+
+    const target = targetOf(cache.principal, cache.netCount);
+    logger.info('[bankroll] settled', {
       won,
       netCount: cache.netCount,
       principal: cache.principal,
-      target:
-        cache.principal == null
-          ? null
-          : cache.principal + cache.netCount * config.bankroll.stepUsd,
-    });
-    return { netCount: cache.netCount, principal: cache.principal };
-  });
-}
-
-/**
- * Max-loss halt: re-lock P from current Portfolio and reset N to 0.
- * Skips the usual ±1 netCount for this settlement (epoch restart).
- * @param {number|null|undefined} balance Portfolio (Cash + positions)
- * @returns {{ netCount: number, principal: number|null, reset: true, principalUpdated: boolean }}
- */
-export function resetOnMaxLossHalt(balance) {
-  return withLock(() => {
-    reload();
-    const prev = { principal: cache.principal, netCount: cache.netCount };
-    const bal = Number(balance);
-    let principalUpdated = false;
-
-    if (Number.isFinite(bal) && bal >= 0) {
-      cache.principal = Math.round(bal * 1e6) / 1e6;
-      principalUpdated = true;
-    } else {
-      logger.warn('[bankroll] max-loss halt: invalid Portfolio — principal unchanged', {
-        balance,
-        prevPrincipal: prev.principal,
-        prevNetCount: prev.netCount,
-      });
-    }
-
-    cache.netCount = 0;
-    writeDisk(cache);
-    logger.warn('[bankroll] max-loss halt — reset principal + netCount', {
-      prevPrincipal: prev.principal,
-      prevNetCount: prev.netCount,
-      principal: cache.principal,
-      netCount: cache.netCount,
-      principalUpdated,
-      fromBalance: principalUpdated ? bal : null,
-      target:
-        cache.principal == null
-          ? null
-          : cache.principal + cache.netCount * config.bankroll.stepUsd,
+      target,
+      gapUsd: gap,
+      equityBalance: balOk ? Number(equityBalance) : null,
+      catchUpQueue: queue,
     });
     return {
       netCount: cache.netCount,
       principal: cache.principal,
-      reset: true,
-      principalUpdated,
+      catchUpQueue: queue,
+      gapUsd: gap,
+      targetBalance: target,
     };
   });
 }
@@ -502,29 +536,22 @@ export function formatBankrollTelegramLines(sizing = null) {
   const P = st.principal;
   const N = st.netCount;
   const target = st.targetBalance;
+  const q = st.catchUpQueue || [];
+  const qText = q.length
+    ? ` · 补队列[${q.map((x) => `补${x.id}=$${Number(x.usd).toFixed(2)}`).join(', ')}]`
+    : '';
   let line =
     `资金: 本金 $${P != null ? P.toFixed(2) : '—'} · 净胜负 ${N}` +
     (target != null ? ` · 目标 $${target.toFixed(2)}` : '') +
+    qText +
     `\n`;
   if (sizing?.mode === 'catch_up') {
-    const frac =
-      sizing.catchUpFraction != null
-        ? ` · ${sizing.catchUpLabel || '回补'}${
-            sizing.gapUsd != null ? ` gap$${Number(sizing.gapUsd).toFixed(2)}` : ''
-          }`
-        : '';
-    const basePart =
-      sizing.defaultBetUsd != null
-        ? `默认$${Number(sizing.defaultBetUsd).toFixed(2)}`
-        : `默认$${Number(config.tradeBudgetUsd).toFixed(2)}`;
-    const catchPart =
-      sizing.catchUpStakeUsd != null
-        ? `+追赶$${Number(sizing.catchUpStakeUsd).toFixed(2)}`
-        : '';
+    const label = sizing.catchUpLabel || `补${sizing.layerIndex || 1}`;
     line +=
-      `动态首注: 追赶 T=$${Number(sizing.targetProfitUsd).toFixed(2)}${frac}` +
-      ` → ${basePart}${catchPart}` +
-      ` = $${Number(sizing.stakeUsd).toFixed(2)}` +
+      `动态首注: ${label}=$${Number(sizing.layerUsd).toFixed(2)}` +
+      ` → T=$${Number(sizing.targetProfitUsd).toFixed(2)}` +
+      (sizing.gapUsd != null ? ` (gap$${Number(sizing.gapUsd).toFixed(2)})` : '') +
+      ` → $${Number(sizing.stakeUsd).toFixed(2)}` +
       (sizing.shares != null ? ` · ~${sizing.shares.toFixed(2)} shares` : '') +
       `\n`;
   } else if (sizing) {

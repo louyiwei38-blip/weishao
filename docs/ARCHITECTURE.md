@@ -100,7 +100,7 @@
 | `armed` | 评估穿越；命中则锁定方向 → `in_chain` 并下首注 |
 | `in_chain` | 忽略新穿越；每小时同向 `MG_CONT` 续单 |
 
-赢或连亏 5 次止损 → `need_outside`（须再等通道外实体后才能新开链路）。连亏止损时共用 bankroll：**P 按当时 Portfolio 重新锁定，N → 0**。
+赢或连亏 5 次止损 → `need_outside`（须再等通道外实体后才能新开链路）。连亏止损**不重置**本金 P / 净胜负 N；补队列仍按结算更新。
 
 ---
 
@@ -260,7 +260,7 @@ won = (bet signal == winningOutcome)
 | `src/trader/restingFillWatcher.js` | GTC 周期内补偿轮询 |
 | `src/trader/chainlinkSettle.js` | 结算调度、交叉校验 helper |
 | `src/martingale/manager.js` | 连亏计数 / halt；每枪仓位交给 bankroll |
-| `src/martingale/bankroll.js` | 共享本金 P + 净胜负 N；动态首注；连亏 halt 时重置 P/N |
+| `src/martingale/bankroll.js` | 共享本金 P + 净胜负 N + 补队列；动态首注；连亏 halt 不重置 P/N |
 | `src/utils/websocket.js` | RTDS WebSocket（native / ws 包） |
 
 ---

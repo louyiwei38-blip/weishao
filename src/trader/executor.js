@@ -894,11 +894,9 @@ export async function placeOrder(params) {
     yesTokenId, noTokenId,
     conditionId, cycleStartTs,
     actualBet, baseBet, martingaleBet, consecutiveLosses,
-    activityTier, activityHits, dynamicBaseBet,
     yesPrice, noPrice,
     maxLimitPrice, priceCapped, originalYesPrice,
     deadlineMs,
-    volatility,
     sizing = null,
     availableBalance = Infinity,
   } = params;
@@ -926,10 +924,7 @@ export async function placeOrder(params) {
       yesPrice, noPrice, dryRun: config.dryRun,
       orderKind: useLimitOrder ? 'limit' : 'market',
       orderType: useLimitOrder ? effectiveExec.label : marketExec.label,
-      ...(activityTier != null ? { activityTier, activityHits } : {}),
-      ...(dynamicBaseBet != null ? { dynamicBaseBet } : {}),
       ...(priceCapped ? { priceCapped, originalYesPrice, maxLimitPrice } : {}),
-      ...(volatility ? { volatility } : {}),
     };
     const dryId = `dry-${Date.now()}`;
     logger.info('[executor] 空跑 — 模拟下单', { ...logBase, orderId: dryId });
@@ -971,8 +966,6 @@ export async function placeOrder(params) {
     yesPrice, noPrice, dryRun: config.dryRun,
     orderKind: useLimitOrder ? 'limit' : 'market',
     orderType: effectiveExec.label,
-    ...(activityTier != null ? { activityTier, activityHits } : {}),
-    ...(dynamicBaseBet != null ? { dynamicBaseBet } : {}),
     ...(finalPriceCapped ? {
       priceCapped: true,
       originalYesPrice,
@@ -980,7 +973,6 @@ export async function placeOrder(params) {
       bookBestAsk: bookCap.bookBestAsk,
       gammaPriceCapped: priceCapped,
     } : {}),
-    ...(volatility ? { volatility } : {}),
   };
 
   const shared = {

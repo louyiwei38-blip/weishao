@@ -901,7 +901,11 @@ async function runCycle(cycleStartTs) {
       martingale: {
         consecutiveLosses: mg.consecutiveLosses,
         currentBet: mg.currentBet,
-        isHalted: mg.isHalted,
+        bankroll: {
+          netCount: mg.bankroll?.netCount ?? null,
+          targetBalance: mg.bankroll?.targetBalance ?? null,
+          catchUpQueue: mg.bankroll?.catchUpQueue ?? [],
+        },
       },
       vegas: vegasState.getState(),
       dailyLossUsd: getDailyLossUsd(),
@@ -1041,24 +1045,18 @@ async function applySettlement(pending, { candles } = {}) {
 
   const pnlUsd = stats.computeSettlementPnl(won, actualBet, price);
 
-  // Max-loss halt re-locks shared bankroll P from live Portfolio and resets N → 0
-  const mgBefore = martingale.getState();
-  const willHalt =
-    !won &&
-    mgBefore.consecutiveLosses + 1 >= config.martingaleMaxLosses;
-  let haltPortfolio = null;
-  if (willHalt) {
-    try {
-      const bd = await getBalanceBreakdown();
-      haltPortfolio = bd.portfolio;
-    } catch (err) {
-      logger.warn('[settle] 连亏止损 — 拉取 Portfolio 失败，本金 P 可能未更新', {
-        error: err?.message,
-      });
-    }
+  // Portfolio needed every settle to update catch-up queue vs live gap (P/N never reset on halt)
+  let settlePortfolio = null;
+  try {
+    const bd = await getBalanceBreakdown();
+    settlePortfolio = bd.portfolio;
+  } catch (err) {
+    logger.warn('[settle] 拉取 Portfolio 失败 — 补队列可能无法按真实 gap 更新', {
+      error: err?.message,
+    });
   }
 
-  const { halted, chainPnlUsd } = martingale.onSettled(won, pnlUsd, haltPortfolio);
+  const { halted, chainPnlUsd } = martingale.onSettled(won, pnlUsd, settlePortfolio);
   vegasState.onSettled(won, halted);
 
   if (!won) recordLoss(actualBet);
@@ -1137,10 +1135,10 @@ async function applySettlement(pending, { candles } = {}) {
 
   const brAfter = mg.bankroll;
   const haltNote = halted
-    ? `\n⚠️ <b>马丁连亏止损</b> — 等待通道外实体后再检测；首注已重置为 $${mg.baseBet}` +
-      `\n↺ 本金已重置` +
+    ? `\n⚠️ <b>马丁连亏止损</b> — 等待通道外实体后再检测；连败计数已清零` +
+      `\n本金/净胜负保持` +
       (brAfter?.principal != null ? ` P=$${Number(brAfter.principal).toFixed(2)}` : '') +
-      ` · N=0`
+      (brAfter?.netCount != null ? ` · N=${brAfter.netCount}` : '')
     : won
       ? `\n⏹ <b>链路结束</b> — 等待通道外实体后再检测`
       : '';
