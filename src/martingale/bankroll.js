@@ -218,6 +218,8 @@ export function getState() {
  * Sync queue with live gap before sizing:
  * - gap≈0 → clear queue (debt already gone)
  * - gap>0 & empty queue → open 补1 = gap
+ * - gap>0 & queue claims more than live gap → rebuild 补1 = gap
+ *   (Portfolio may recover while a stale layer remains; never oversize vs live gap)
  * @param {number} balance
  */
 function syncCatchUpQueue(balance) {
@@ -227,18 +229,32 @@ function syncCatchUpQueue(balance) {
     let queue = normalizeQueue(cache.catchUpQueue);
     let nextLayerId = nextIdFromQueue(queue, cache.nextLayerId);
     let changed = false;
+    let reason = null;
 
     if (gap < GAP_EPS) {
       if (queue.length) {
         queue = [];
         nextLayerId = 1;
         changed = true;
+        reason = 'gap_cleared';
       }
     } else if (queue.length === 0) {
-      const made = makeLayer(gap, nextLayerId);
+      const made = makeLayer(gap, 1);
       queue = [made.layer];
       nextLayerId = made.nextLayerId;
       changed = true;
+      reason = 'open_补1';
+    } else {
+      const sum = queueSum(queue);
+      const front = queue[0].usd;
+      // Stale layers (e.g. 补1=$20 while live gap=$0.15) must not drive sizing
+      if (sum - gap > GAP_EPS || front - gap > GAP_EPS) {
+        const made = makeLayer(gap, 1);
+        queue = [made.layer];
+        nextLayerId = made.nextLayerId;
+        changed = true;
+        reason = 'shrink_to_live_gap';
+      }
     }
 
     if (changed) {
@@ -246,6 +262,7 @@ function syncCatchUpQueue(balance) {
       cache.nextLayerId = nextLayerId;
       writeDisk(cache);
       logger.info('[bankroll] catch-up queue synced', {
+        reason,
         gapUsd: gap,
         catchUpQueue: queue,
         netCount: cache.netCount,
