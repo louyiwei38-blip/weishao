@@ -13,9 +13,9 @@ export function escapeHtml(text) {
 
 /**
  * @param {string} text
- * @param {{ parseMode?: string, messageThreadId?: number|null }} [opts]
+ * @param {{ parseMode?: string, messageThreadId?: number|null, replyMarkup?: object|null }} [opts]
  */
-async function postTelegram(text, { parseMode, messageThreadId } = {}) {
+async function postTelegram(text, { parseMode, messageThreadId, replyMarkup } = {}) {
   const { botToken, chatId } = config.telegram;
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
   const payload = {
@@ -24,6 +24,7 @@ async function postTelegram(text, { parseMode, messageThreadId } = {}) {
     disable_web_page_preview: true,
   };
   if (parseMode) payload.parse_mode = parseMode;
+  if (replyMarkup) payload.reply_markup = replyMarkup;
   const threadId = messageThreadId === undefined
     ? config.telegram.messageThreadId
     : messageThreadId;
@@ -62,24 +63,37 @@ function parseRetryAfterSec(status, bodyText) {
  * Retries on HTTP 429 using Telegram's retry_after (multi-instance startups).
  *
  * @param {string} text
+ * @param {{ replyMarkup?: object|null, withButtons?: boolean }} [opts]
  */
-export async function notifyTelegram(text) {
+export async function notifyTelegram(text, opts = {}) {
   const { botToken, chatId, messageThreadId } = config.telegram;
   if (!botToken || !chatId) {
     logger.debug('[telegram] 未配置 — 跳过通知');
     return;
   }
 
+  let replyMarkup = opts.replyMarkup ?? null;
+  if (opts.withButtons !== false && !replyMarkup) {
+    try {
+      const { buildInlineKeyboard } = await import('../telegram/inlineButtons.js');
+      replyMarkup = buildInlineKeyboard();
+    } catch (err) {
+      logger.debug('[telegram] inline buttons unavailable', { error: err?.message });
+    }
+  }
+
   const maxAttempts = 4;
   let threadId = messageThreadId;
   let parseMode = 'HTML';
   let payloadText = text;
+  let markup = replyMarkup;
 
   try {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const res = await postTelegram(payloadText, {
         parseMode,
         messageThreadId: threadId,
+        replyMarkup: markup,
       });
 
       if (res.ok) {
@@ -142,5 +156,35 @@ export async function notifyTelegram(text) {
     }
   } catch (err) {
     logger.warn('[telegram] 通知发送异常', { error: err?.message });
+  }
+}
+
+/**
+ * Acknowledge an inline button press (toast in Telegram client).
+ * @param {string} callbackQueryId
+ * @param {string} [text]
+ */
+export async function answerCallbackQuery(callbackQueryId, text = '') {
+  const { botToken } = config.telegram;
+  if (!botToken || !callbackQueryId) return;
+  try {
+    const url = `https://api.telegram.org/bot${botToken}/answerCallbackQuery`;
+    const payload = { callback_query_id: callbackQueryId };
+    if (text) payload.text = text.slice(0, 200);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      logger.warn('[telegram] answerCallbackQuery failed', {
+        status: res.status,
+        body: body.slice(0, 160),
+      });
+    }
+  } catch (err) {
+    logger.warn('[telegram] answerCallbackQuery error', { error: err?.message });
   }
 }

@@ -229,6 +229,15 @@ const config = {
       const key = `TELEGRAM_THREAD_${instanceId.replace(/-/g, '_').toUpperCase()}`;
       return pick(process.env[key]);
     })(),
+    /** Poll interval for callback_query (all PM2 processes share offset via lock). */
+    callbackPollMs: num('TELEGRAM_CALLBACK_POLL_MS', 2000),
+    /** Inline button validity window (callback_data expiry). */
+    buttonValidityMs: num('TELEGRAM_BUTTON_VALIDITY_MS', 3_600_000),
+    /** Only this BOT_INSTANCE may execute bankroll reset from TG button. */
+    resetInstanceId: (() => {
+      const raw = optional('TELEGRAM_RESET_INSTANCE', 'btc-5m');
+      return String(raw).replace(/[^a-zA-Z0-9_-]/g, '') || 'btc-5m';
+    })(),
   },
 
   // Risk — symmetric cap for YES/NO limit orders; 0 = no cap

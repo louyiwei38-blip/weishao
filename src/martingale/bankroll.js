@@ -548,6 +548,31 @@ export function onSettled(won, equityBalance = null) {
   });
 }
 
+/**
+ * Reset principal to live Portfolio and net count to 0; clear catch-up queue.
+ * @param {number} portfolioBalance
+ */
+export function resetPrincipalAndNet(portfolioBalance) {
+  const bal = Number(portfolioBalance);
+  if (!Number.isFinite(bal) || bal < 0) {
+    throw new Error('invalid portfolio for bankroll reset');
+  }
+  return withLock(() => {
+    reload();
+    cache.principal = Math.round(bal * 1e6) / 1e6;
+    cache.netCount = 0;
+    cache.catchUpQueue = [];
+    cache.nextLayerId = 1;
+    writeDisk(cache);
+    logger.info('[bankroll] manual reset P/N + cleared catch-up queue', {
+      principal: cache.principal,
+      netCount: cache.netCount,
+      portfolioBalance: bal,
+    });
+    return getState();
+  });
+}
+
 export function formatBankrollTelegramLines(sizing = null) {
   const st = getState();
   const P = st.principal;

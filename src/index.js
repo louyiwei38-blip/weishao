@@ -60,7 +60,9 @@ import {
 import * as martingale from './martingale/manager.js';
 import { formatBankrollTelegramLines } from './martingale/bankroll.js';
 import * as stats from './stats/manager.js';
+import * as buttonSequence from './button/sequence.js';
 import { notifyTelegram, escapeHtml } from './utils/telegram.js';
+import { startCallbackPoller, stopCallbackPoller, drainCommandQueue } from './telegram/callbackPoller.js';
 import { formatBeijingTime } from './utils/datetime.js';
 import { scopedLogPath } from './utils/instancePaths.js';
 import {
@@ -124,8 +126,19 @@ function formatChainTelegramLines(mgState = martingale.getState(), sizing = null
   return (
     `本链路盈亏: <b>${stats.formatPnlUsd(chainPnl)}</b>\n` +
     `马丁: 默认首注 $${config.tradeBudgetUsd} · 连败 ${mgState.consecutiveLosses} · 本单注 $${mgState.currentBet}\n` +
-    formatBankrollTelegramLines(sizing)
+    formatBankrollTelegramLines(sizing) +
+    buttonSequence.formatTelegramLines()
   );
+}
+
+function formatTradeSourceNote(source, sources = ['project']) {
+  if (source === 'mg_cont_fast') return `\n⚡ 快路径: 结算输后续单\n`;
+  if (source === 'button_seq_fast') return `\n⚡ 快路径: 按钮序列续单\n`;
+  if (source === 'button_seq') return `\n🔘 按钮序列开单\n`;
+  if (sources.includes('button') && sources.includes('project')) {
+    return `\n🔘 项目+按钮同向合并\n`;
+  }
+  return '';
 }
 
 function ensureLogs() {
@@ -253,6 +266,138 @@ async function withTradeLock(cycleStartTs, fn) {
   }
 }
 
+/**
+ * Attach active button sequence to a pending project order (same direction merge).
+ * @param {number} cycleStartTs
+ */
+function tryAttachButtonToPending(cycleStartTs) {
+  if (!pendingBet || pendingBet.cycleStartTs !== cycleStartTs) return;
+  const btn = buttonSequence.getState();
+  if (!btn.active || btn.cyclesElapsed >= btn.cyclesTotal) return;
+  if (pendingBet.sources?.includes('button')) return;
+  if (pendingBet.signal !== btn.direction) return;
+  pendingBet.sources = [...(pendingBet.sources || ['project']), 'button'];
+  buttonSequence.consumeSlot({ kind: 'merge' });
+  savePending();
+  logger.info('[main] 按钮序列并入待结算注单', {
+    cycle: formatBeijingTime(cycleStartTs),
+    signal: pendingBet.signal,
+    sources: pendingBet.sources,
+  });
+}
+
+/**
+ * Resolve project + button sequence for one cycle window.
+ * @returns {Promise<{ handled: boolean, result?: object }>}
+ */
+async function processCycleTradeDecision({ cycleStartTs, projectSignalObj, projectSource }) {
+  const btn = buttonSequence.getState();
+  const btnSlotActive = btn.active && btn.cyclesElapsed < btn.cyclesTotal;
+
+  if (btn.pendingStart && btnSlotActive) {
+    buttonSequence.clearPendingStart();
+  }
+
+  const projectDir = (projectSignalObj?.signal === 'UP' || projectSignalObj?.signal === 'DOWN')
+    ? projectSignalObj.signal
+    : null;
+  const btnDir = btnSlotActive ? btn.direction : null;
+
+  if (btnSlotActive && btnDir) {
+    if (projectDir && projectDir !== btnDir) {
+      buttonSequence.consumeSlot({ kind: 'skip' });
+      logger.info('[main] 按钮反向跳过 — 按项目信号', {
+        projectDir,
+        btnDir,
+        cycle: formatBeijingTime(cycleStartTs),
+      });
+      const result = await executeTrade({
+        cycleStartTs,
+        signalObj: projectSignalObj,
+        source: projectSource,
+        sources: ['project'],
+      });
+      return { handled: true, result };
+    }
+
+    if (projectDir && projectDir === btnDir) {
+      buttonSequence.consumeSlot({ kind: 'merge' });
+      const result = await executeTrade({
+        cycleStartTs,
+        signalObj: projectSignalObj,
+        source: projectSource,
+        sources: ['project', 'button'],
+      });
+      return { handled: true, result };
+    }
+
+    buttonSequence.consumeSlot({ kind: 'bet' });
+    const btnSignal = buttonSequence.buildButtonSignal(
+      btnDir,
+      `按钮序列第 ${btn.cyclesElapsed}/${btn.cyclesTotal} 周期`,
+    );
+    writeSignalLog(btnSignal);
+    logger.info('[main] 按钮序列开单', {
+      signal: btnDir,
+      cycle: formatBeijingTime(cycleStartTs),
+      slot: btn.cyclesElapsed,
+    });
+    const result = await executeTrade({
+      cycleStartTs,
+      signalObj: btnSignal,
+      source: 'button_seq',
+      sources: ['button'],
+    });
+    return { handled: true, result };
+  }
+
+  if (projectDir) {
+    const result = await executeTrade({
+      cycleStartTs,
+      signalObj: projectSignalObj,
+      source: projectSource,
+      sources: ['project'],
+    });
+    return { handled: true, result };
+  }
+
+  return { handled: false };
+}
+
+async function handleTelegramCommand(cmd) {
+  if (cmd.action === 'reset') {
+    if (config.instanceId !== config.telegram.resetInstanceId) return;
+    const bal = await getBalanceBreakdown();
+    const st = martingale.bankroll.resetPrincipalAndNet(bal.portfolio);
+    await notifyTelegram(
+      `${tgHead('🔄 <b>本金/净胜负已重置</b>')}\n` +
+      `本金 P: <b>$${Number(st.principal).toFixed(2)}</b>（当前 Portfolio）\n` +
+      `净胜负 N: <b>0</b>\n` +
+      `补队列: <b>已清空</b>\n` +
+      `目标线: <b>$${Number(st.targetBalance).toFixed(2)}</b>\n` +
+      await formatBalanceTelegramLine(bal) +
+      formatStatsTelegramBlock(),
+    );
+    return;
+  }
+
+  if (cmd.action === 'seq_up' || cmd.action === 'seq_down') {
+    const direction = cmd.direction === 'DOWN' ? 'DOWN' : 'UP';
+    buttonSequence.startSequence(direction);
+    const side = direction === 'UP' ? '📈 买涨' : '📉 买跌';
+    await notifyTelegram(
+      `${tgHead('🔘 <b>按钮序列已启动</b>')}\n` +
+      `方向: <b>${side}</b>\n` +
+      `周期: 固定 6 个周期窗口\n` +
+      `首注: 下一周期边界\n` +
+      `(覆盖此前未完成的按钮序列)\n` +
+      buttonSequence.formatTelegramLines() +
+      await formatBalanceTelegramLine() +
+      formatStatsTelegramBlock(),
+    );
+  }
+}
+
 function buildMgContSignal(lockedSignal, reason) {
   return {
     symbol: config.symbol,
@@ -278,7 +423,7 @@ function buildMgContSignal(lockedSignal, reason) {
  * Discover market + size + place order for a cycle window.
  * @returns {Promise<{ status: string, signal?: string, signalId?: string }>}
  */
-async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
+async function executeTrade({ cycleStartTs, signalObj, source = 'cycle', sources = ['project'] }) {
   if (signalObj?.signal !== 'UP' && signalObj?.signal !== 'DOWN') {
     return { status: 'no_signal' };
   }
@@ -436,6 +581,8 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
         orderId: orderResult.orderId,
         limitPrice: orderResult.limitPrice,
         fill: orderResult.fill,
+        sources,
+        signalId: signalObj.signalId,
       });
 
       const side = signalObj.signal === 'UP' ? '📈 买涨 UP' : '📉 买跌 DOWN';
@@ -451,7 +598,7 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
       const capNote = pricePolicy.priceCapped
         ? `\n💰 ${signalObj.signal === 'UP' ? 'YES' : 'NO'} 盘口 $${signalObj.signal === 'UP' ? pricePolicy.originalYesPrice : pricePolicy.originalNoPrice} 超阈值 — 按 $${pricePolicy.maxLimitPrice} 挂单\n`
         : '';
-      const sourceNote = source === 'mg_cont_fast' ? `\n⚡ 快路径: 结算输后续单\n` : '';
+      const sourceNote = formatTradeSourceNote(source, sources);
       // TG off critical path — do not hold tradeLock waiting on Telegram/balance.
       trackWork((async () => {
         await notifyTelegram(
@@ -508,7 +655,7 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
       const capNote = pricePolicy.priceCapped
         ? `\n💰 ${signalObj.signal === 'UP' ? 'YES' : 'NO'} 盘口 $${signalObj.signal === 'UP' ? pricePolicy.originalYesPrice : pricePolicy.originalNoPrice} 超阈值 — 按 $${pricePolicy.maxLimitPrice} 挂单\n`
         : '';
-      const sourceNote = source === 'mg_cont_fast' ? `\n⚡ 快路径: 结算输后续单\n` : '';
+      const sourceNote = formatTradeSourceNote(source, sources);
       trackWork((async () => {
         await notifyTelegram(
           `${tgHead('⏳ <b>限价挂单</b>')}\n` +
@@ -536,6 +683,72 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle' }) {
       source,
     });
     return { status: 'order_no_fill', signal: signalObj.signal, signalId: signalObj.signalId };
+  });
+}
+
+async function maybeButtonSeqFastPath(settledCycleStartTs) {
+  if (!buttonSequence.shouldButtonSeqFastPath()) {
+    return { status: 'not_eligible' };
+  }
+
+  const btn = buttonSequence.getState();
+  const vg = vegasState.getState();
+  const projectDir = vg.phase === 'in_chain' ? vg.lockedSignal : null;
+
+  if (projectDir && projectDir !== btn.direction) {
+    logger.info('[main] 按钮快路径 defer — 下周期与项目反向，交由常规调度跳过', {
+      projectDir,
+      btnDir: btn.direction,
+    });
+    return { status: 'defer_reverse' };
+  }
+
+  const nextCycle = nextCycleStartTs(settledCycleStartTs, CYCLE_MS);
+  if (!isWithinTradeWindow(Date.now(), nextCycle, CYCLE_MS, config.minTradeRemainingMs)) {
+    logger.info('[main] 按钮快路径 — 下一窗口剩余时间不足，交由常规调度', {
+      nextCycle: formatBeijingTime(nextCycle),
+    });
+    return { status: 'too_late' };
+  }
+
+  if (projectDir && projectDir === btn.direction) {
+    buttonSequence.consumeSlot({ kind: 'merge' });
+    const signalObj = buildMgContSignal(
+      projectDir,
+      `按钮+项目同向快路径（锁定 ${projectDir}）`,
+    );
+    writeSignalLog(signalObj);
+    logger.info('[main] 按钮快路径 — 与项目同向合并', {
+      settledCycle: formatBeijingTime(settledCycleStartTs),
+      nextCycle: formatBeijingTime(nextCycle),
+      direction: projectDir,
+    });
+    return executeTrade({
+      cycleStartTs: nextCycle,
+      signalObj,
+      source: 'button_seq_fast',
+      sources: ['project', 'button'],
+    });
+  }
+
+  buttonSequence.consumeSlot({ kind: 'bet' });
+  const signalObj = buttonSequence.buildButtonSignal(
+    btn.direction,
+    '按钮序列 — 结算后快路径续单',
+  );
+  writeSignalLog(signalObj);
+  logger.info('[main] 按钮快路径 — 结算后立即续单', {
+    settledCycle: formatBeijingTime(settledCycleStartTs),
+    nextCycle: formatBeijingTime(nextCycle),
+    direction: btn.direction,
+    cyclesElapsed: btn.cyclesElapsed,
+  });
+
+  return executeTrade({
+    cycleStartTs: nextCycle,
+    signalObj,
+    source: 'button_seq_fast',
+    sources: ['button'],
   });
 }
 
@@ -649,10 +862,12 @@ async function runCycle(cycleStartTs) {
 
     if (pendingBet) {
       if (pendingBet.cycleStartTs === cycleStartTs) {
+        tryAttachButtonToPending(cycleStartTs);
         cycleStatus = 'already_ordered';
         logger.info('[main] 本周期已有待结算注单（快路径）— 跳过重复下单', {
           cycle: formatBeijingTime(cycleStartTs),
           signal: pendingBet.signal,
+          sources: pendingBet.sources,
         });
         return;
       }
@@ -700,12 +915,14 @@ async function runCycle(cycleStartTs) {
         path: 'in_chain_fast',
       });
 
-      const result = await executeTrade({
+      const result = await processCycleTradeDecision({
         cycleStartTs,
-        signalObj,
-        source: 'in_chain',
+        projectSignalObj: signalObj,
+        projectSource: 'in_chain',
       });
-      cycleStatus = result.status === 'filled' || result.status === 'resting' ? 'ok' : result.status;
+      cycleStatus = result.result?.status === 'filled' || result.result?.status === 'resting'
+        ? 'ok'
+        : (result.result?.status ?? 'ok');
       return;
     }
 
@@ -863,6 +1080,17 @@ async function runCycle(cycleStartTs) {
     });
 
     if (signalObj.signal === 'NONE') {
+      const btnDecision = await processCycleTradeDecision({
+        cycleStartTs,
+        projectSignalObj: signalObj,
+        projectSource: 'vegas_entry',
+      });
+      if (btnDecision.handled) {
+        cycleStatus = btnDecision.result?.status === 'filled' || btnDecision.result?.status === 'resting'
+          ? 'ok'
+          : (btnDecision.result?.status ?? 'ok');
+        return;
+      }
       cycleStatus = 'no_signal';
       logger.info('[main] 无信号 — 跳过下单');
       await notifyTelegram(
@@ -877,11 +1105,12 @@ async function runCycle(cycleStartTs) {
       return;
     }
 
-    const result = await executeTrade({
+    const resultWrap = await processCycleTradeDecision({
       cycleStartTs,
-      signalObj,
-      source: 'vegas_entry',
+      projectSignalObj: signalObj,
+      projectSource: 'vegas_entry',
     });
+    const result = resultWrap.result ?? { status: 'no_trade' };
     cycleStatus = result.status === 'filled' || result.status === 'resting' ? 'ok' : result.status;
   } catch (err) {
     cycleStatus = 'error';
@@ -928,6 +1157,8 @@ function registerPendingBet({
   limitPrice,
   entryPrice,
   fill,
+  sources = ['project'],
+  signalId = null,
 }) {
   pendingBet = {
     cycleStartTs,
@@ -937,6 +1168,8 @@ function registerPendingBet({
     limitPrice,
     entryPrice: entryPrice ?? fill?.entryPrice ?? limitPrice ?? null,
     fill: fill ?? null,
+    sources,
+    signalId,
   };
   markCycleOrdered(cycleStartTs);
   savePending();
@@ -1045,6 +1278,10 @@ async function applySettlement(pending, { candles } = {}) {
 
   const pnlUsd = stats.computeSettlementPnl(won, actualBet, price);
 
+  const sources = pending.sources || ['project'];
+  const hadProject = sources.includes('project');
+  const hadButton = sources.includes('button');
+
   // Portfolio needed every settle to update catch-up queue vs live gap (P/N never reset on halt)
   let settlePortfolio = null;
   try {
@@ -1056,8 +1293,21 @@ async function applySettlement(pending, { candles } = {}) {
     });
   }
 
-  const { halted, chainPnlUsd } = martingale.onSettled(won, pnlUsd, settlePortfolio);
-  vegasState.onSettled(won, halted);
+  let halted = false;
+  let chainPnlUsd = 0;
+
+  if (hadProject) {
+    const mgResult = martingale.onSettled(won, pnlUsd, settlePortfolio);
+    halted = mgResult.halted;
+    chainPnlUsd = mgResult.chainPnlUsd;
+    vegasState.onSettled(won, halted);
+  } else {
+    martingale.bankroll.onSettled(won, settlePortfolio);
+  }
+
+  if (hadButton) {
+    buttonSequence.onSettled(won, pnlUsd);
+  }
 
   if (!won) recordLoss(actualBet);
   stats.recordSettlement({ won, pnlUsd });
@@ -1101,11 +1351,15 @@ async function applySettlement(pending, { candles } = {}) {
     crossMismatch: cross?.mismatch ?? false,
     martingaleHalted: halted,
     dryRun: config.dryRun,
+    sources,
+    hadButton,
   });
 
   const mg = martingale.getState();
 
   // Settlement-driven fast path FIRST — do not wait on Telegram/balance before re-entry.
+  const nextCycle = nextCycleStartTs(cycleStartTs, CYCLE_MS);
+
   if (shouldMgContFastPath({
     enabled: config.mgContFastPath,
     won,
@@ -1121,10 +1375,29 @@ async function applySettlement(pending, { candles } = {}) {
       }),
     );
     const fastResult = await fastPromise;
+    tryAttachButtonToPending(nextCycle);
     logger.info('[main] MG_CONT 快路径完成', {
       status: fastResult?.status,
       elapsedMs: Date.now() - t0,
     });
+  }
+
+  if (buttonSequence.shouldButtonSeqFastPath()) {
+    if (pendingBet) {
+      tryAttachButtonToPending(nextCycle);
+    } else {
+      const t0 = Date.now();
+      const btnFast = await trackWork(
+        maybeButtonSeqFastPath(cycleStartTs).catch((err) => {
+          logger.error('[main] 按钮快路径异常', { error: err?.message, stack: err?.stack });
+          return { status: 'error' };
+        }),
+      );
+      logger.info('[main] 按钮快路径完成', {
+        status: btnFast?.status,
+        elapsedMs: Date.now() - t0,
+      });
+    }
   }
 
   const resultEmoji = won ? '✅' : '❌';
@@ -1167,6 +1440,7 @@ async function applySettlement(pending, { candles } = {}) {
       mismatchNote + haltNote +
       `连败: ${mg.consecutiveLosses} · 默认首注 $${config.tradeBudgetUsd}\n` +
       formatBankrollTelegramLines() +
+      buttonSequence.formatTelegramLines() +
       `今日亏损: $${getDailyLossUsd().toFixed(2)} / $${config.maxDailyLossUsd}\n` +
       balanceLine +
       formatStatsTelegramBlock()
@@ -1203,9 +1477,11 @@ async function scheduler() {
   martingale.init();
   vegasState.init();
   stats.init();
+  buttonSequence.init();
   initDailyLoss();
   loadPending();
   warnOrderPolicyMismatch();
+  startCallbackPoller();
 
   let startupBalance = null;
   let startupBal = null;
@@ -1380,6 +1656,8 @@ async function scheduler() {
 
   // eslint-disable-next-line no-constant-condition
   while (!shutdownRequested) {
+    await drainCommandQueue(handleTelegramCommand);
+
     const boundary = nextCycleBoundary();
     const waitMs = boundary - Date.now();
     const prewarmMs = config.prewarmMs;
@@ -1474,6 +1752,7 @@ function setupGracefulShutdown() {
     stopChainlinkSettler();
     stopAllRestingFillWatchers();
     stopRtdsBuffer();
+    await stopCallbackPoller();
 
     await sleep(300);
     process.exit(0);
