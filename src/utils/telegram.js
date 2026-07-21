@@ -1,6 +1,7 @@
 import config from '../config.js';
 import logger from './logger.js';
 import { sleep } from './retry.js';
+import { buildInlineKeyboard } from '../telegram/inlineButtons.js';
 
 /** Escape dynamic text for Telegram HTML parse_mode (& < > must not appear raw). */
 export function escapeHtml(text) {
@@ -75,10 +76,9 @@ export async function notifyTelegram(text, opts = {}) {
   let replyMarkup = opts.replyMarkup ?? null;
   if (opts.withButtons !== false && !replyMarkup) {
     try {
-      const { buildInlineKeyboard } = await import('../telegram/inlineButtons.js');
       replyMarkup = buildInlineKeyboard();
     } catch (err) {
-      logger.debug('[telegram] inline buttons unavailable', { error: err?.message });
+      logger.warn('[telegram] inline buttons unavailable', { error: err?.message });
     }
   }
 
@@ -143,6 +143,20 @@ export async function notifyTelegram(text, opts = {}) {
         logger.warn('[telegram] HTML 解析失败 — 降级为纯文本重试');
         parseMode = undefined;
         payloadText = stripHtml(text);
+        continue;
+      }
+
+      if (
+        res.status === 400 &&
+        markup &&
+        (body.includes('BUTTON_DATA_INVALID') ||
+          body.includes('reply markup') ||
+          body.includes('REPLY_MARKUP'))
+      ) {
+        logger.warn('[telegram] inline 按钮无效 — 降级为无按钮重试', {
+          body: body.slice(0, 200),
+        });
+        markup = null;
         continue;
       }
 
