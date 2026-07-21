@@ -277,7 +277,8 @@ function tryAttachButtonToPending(cycleStartTs) {
   if (pendingBet.sources?.includes('button')) return;
   if (pendingBet.signal !== btn.direction) return;
   pendingBet.sources = [...(pendingBet.sources || ['project']), 'button'];
-  buttonSequence.consumeSlot({ kind: 'merge' });
+  const slot = buttonSequence.consumeSlot({ kind: 'merge' });
+  if (!slot.consumed) return;
   savePending();
   logger.info('[main] 按钮序列并入待结算注单', {
     cycle: formatBeijingTime(cycleStartTs),
@@ -305,7 +306,10 @@ async function processCycleTradeDecision({ cycleStartTs, projectSignalObj, proje
 
   if (btnSlotActive && btnDir) {
     if (projectDir && projectDir !== btnDir) {
-      buttonSequence.consumeSlot({ kind: 'skip' });
+      const slot = buttonSequence.consumeSlot({ kind: 'skip' });
+      if (!slot.consumed) {
+        return { handled: false };
+      }
       logger.info('[main] 按钮反向跳过 — 按项目信号', {
         projectDir,
         btnDir,
@@ -321,7 +325,10 @@ async function processCycleTradeDecision({ cycleStartTs, projectSignalObj, proje
     }
 
     if (projectDir && projectDir === btnDir) {
-      buttonSequence.consumeSlot({ kind: 'merge' });
+      const slot = buttonSequence.consumeSlot({ kind: 'merge' });
+      if (!slot.consumed) {
+        return { handled: false };
+      }
       const result = await executeTrade({
         cycleStartTs,
         signalObj: projectSignalObj,
@@ -331,16 +338,19 @@ async function processCycleTradeDecision({ cycleStartTs, projectSignalObj, proje
       return { handled: true, result };
     }
 
-    buttonSequence.consumeSlot({ kind: 'bet' });
+    const slot = buttonSequence.consumeSlot({ kind: 'bet' });
+    if (!slot.consumed) {
+      return { handled: false };
+    }
     const btnSignal = buttonSequence.buildButtonSignal(
       btnDir,
-      `按钮序列第 ${btn.cyclesElapsed}/${btn.cyclesTotal} 周期`,
+      `按钮序列第 ${slot.cyclesElapsed}/${slot.cyclesTotal} 周期`,
     );
     writeSignalLog(btnSignal);
     logger.info('[main] 按钮序列开单', {
       signal: btnDir,
       cycle: formatBeijingTime(cycleStartTs),
-      slot: btn.cyclesElapsed,
+      slot: slot.cyclesElapsed,
     });
     const result = await executeTrade({
       cycleStartTs,
@@ -712,7 +722,10 @@ async function maybeButtonSeqFastPath(settledCycleStartTs) {
   }
 
   if (projectDir && projectDir === btn.direction) {
-    buttonSequence.consumeSlot({ kind: 'merge' });
+    const slot = buttonSequence.consumeSlot({ kind: 'merge' });
+    if (!slot.consumed) {
+      return { status: 'sequence_done' };
+    }
     const signalObj = buildMgContSignal(
       projectDir,
       `按钮+项目同向快路径（锁定 ${projectDir}）`,
@@ -731,7 +744,14 @@ async function maybeButtonSeqFastPath(settledCycleStartTs) {
     });
   }
 
-  buttonSequence.consumeSlot({ kind: 'bet' });
+  const slot = buttonSequence.consumeSlot({ kind: 'bet' });
+  if (!slot.consumed) {
+    logger.info('[main] 按钮快路径 — 序列已结束，跳过续单', {
+      settledCycle: formatBeijingTime(settledCycleStartTs),
+      cyclesElapsed: slot.cyclesElapsed,
+    });
+    return { status: 'sequence_done' };
+  }
   const signalObj = buttonSequence.buildButtonSignal(
     btn.direction,
     '按钮序列 — 结算后快路径续单',
@@ -741,7 +761,7 @@ async function maybeButtonSeqFastPath(settledCycleStartTs) {
     settledCycle: formatBeijingTime(settledCycleStartTs),
     nextCycle: formatBeijingTime(nextCycle),
     direction: btn.direction,
-    cyclesElapsed: btn.cyclesElapsed,
+    cyclesElapsed: slot.cyclesElapsed,
   });
 
   return executeTrade({
@@ -1385,7 +1405,11 @@ async function applySettlement(pending, { candles } = {}) {
   if (buttonSequence.shouldButtonSeqFastPath()) {
     if (pendingBet) {
       tryAttachButtonToPending(nextCycle);
-    } else {
+    }
+    if (
+      buttonSequence.shouldButtonSeqFastPath() &&
+      !pendingBet?.sources?.includes('button')
+    ) {
       const t0 = Date.now();
       const btnFast = await trackWork(
         maybeButtonSeqFastPath(cycleStartTs).catch((err) => {

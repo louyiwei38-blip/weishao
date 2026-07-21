@@ -90,7 +90,7 @@ export function init() {
 }
 
 export function getState() {
-  if (!cache.updatedAt && existsSync(STATE_FILE)) reload();
+  reload();
   return { ...cache };
 }
 
@@ -135,9 +135,17 @@ export function startSequence(direction) {
 /**
  * Consume one cycle slot (bet, merge, or reverse skip).
  * @param {{ kind?: 'bet'|'skip'|'merge' }} [opts]
+ * @returns {{ consumed: boolean } & ReturnType<typeof getState>}
  */
 export function consumeSlot(opts = {}) {
-  if (!cache.active) return getState();
+  reload();
+  if (!cache.active) {
+    logger.info('[buttonSeq] slot skipped — sequence inactive', {
+      kind: opts.kind ?? null,
+      cyclesElapsed: cache.cyclesElapsed,
+    });
+    return { consumed: false, ...getState() };
+  }
   cache.pendingStart = false;
   cache.cyclesElapsed += 1;
   if (cache.cyclesElapsed >= cache.cyclesTotal) {
@@ -158,11 +166,12 @@ export function consumeSlot(opts = {}) {
     });
   }
   writeDisk(cache);
-  return getState();
+  return { consumed: true, ...getState() };
 }
 
 /** @param {boolean} won @param {number} pnlUsd */
 export function onSettled(won, pnlUsd = 0) {
+  reload();
   cache.chainPnlUsd = (Number(cache.chainPnlUsd) || 0) + (Number(pnlUsd) || 0);
   if (won) cache.wins += 1;
   else cache.losses += 1;
@@ -180,6 +189,7 @@ export function onSettled(won, pnlUsd = 0) {
 }
 
 export function clearPendingStart() {
+  reload();
   if (!cache.pendingStart) return getState();
   cache.pendingStart = false;
   writeDisk(cache);
