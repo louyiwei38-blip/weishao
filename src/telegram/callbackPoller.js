@@ -1,6 +1,6 @@
 /**
  * Poll Telegram callback_query updates; route commands to per-instance queues.
- * Uses a shared lock so PM2 multi-process does not duplicate handling.
+ * Only TELEGRAM_CALLBACK_LEADER (default btc-5m) calls getUpdates — Telegram allows one poller per bot token.
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, closeSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
@@ -169,27 +169,39 @@ async function handleCallbackQuery(query) {
 async function pollOnce() {
   if (!config.telegram.botToken) return;
 
-  const result = withPollLock(async () => {
-    let offset = readOffset();
-    const updates = await fetchUpdates(offset);
-    if (updates.length === 0) return;
+  let offset = readOffset();
+  const updates = await fetchUpdates(offset);
+  if (updates.length === 0) return;
 
-    for (const upd of updates) {
-      offset = Math.max(offset, upd.update_id + 1);
-      if (upd.callback_query) {
-        try {
-          await handleCallbackQuery(upd.callback_query);
-        } catch (err) {
-          logger.warn('[tgCallback] handle failed', { error: err?.message });
-        }
+  for (const upd of updates) {
+    offset = Math.max(offset, upd.update_id + 1);
+    if (upd.callback_query) {
+      try {
+        await handleCallbackQuery(upd.callback_query);
+      } catch (err) {
+        logger.warn('[tgCallback] handle failed', { error: err?.message });
       }
     }
-    writeOffset(offset);
-  });
-
-  if (result === null) {
-    // another process holds lock — skip
   }
+  writeOffset(offset);
+}
+
+async function ensureNoWebhook() {
+  const { botToken } = config.telegram;
+  if (!botToken) return;
+  try {
+    const url = `https://api.telegram.org/bot${botToken}/deleteWebhook?drop_pending_updates=false`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    if (res.ok) {
+      logger.info('[tgCallback] deleteWebhook OK — 使用 getUpdates 轮询');
+    }
+  } catch (err) {
+    logger.warn('[tgCallback] deleteWebhook 失败', { error: err?.message });
+  }
+}
+
+export function isCallbackLeader() {
+  return config.instanceId === config.telegram.callbackLeaderInstanceId;
 }
 
 export function startCallbackPoller() {
@@ -198,10 +210,20 @@ export function startCallbackPoller() {
     logger.debug('[tgCallback] 未配置 Telegram — 跳过 callback 轮询');
     return;
   }
+  const leader = config.telegram.callbackLeaderInstanceId;
+  if (!isCallbackLeader()) {
+    logger.info('[tgCallback] 非 callback leader — 仅消费本实例命令队列', {
+      instanceId: config.instanceId,
+      leader,
+    });
+    return;
+  }
   running = true;
   loopPromise = (async () => {
-    logger.info('[tgCallback] 轮询已启动', {
+    await ensureNoWebhook();
+    logger.info('[tgCallback] 轮询已启动（唯一 leader）', {
       instanceId: config.instanceId,
+      leader,
       pollMs: config.telegram.callbackPollMs,
     });
     while (running) {

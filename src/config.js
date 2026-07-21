@@ -229,13 +229,21 @@ const config = {
       const key = `TELEGRAM_THREAD_${instanceId.replace(/-/g, '_').toUpperCase()}`;
       return pick(process.env[key]);
     })(),
-    /** Poll interval for callback_query (all PM2 processes share offset via lock). */
+    /** Poll interval for callback_query (leader instance only). */
     callbackPollMs: num('TELEGRAM_CALLBACK_POLL_MS', 2000),
     /** Inline button validity window (callback_data expiry). */
     buttonValidityMs: num('TELEGRAM_BUTTON_VALIDITY_MS', 3_600_000),
     /** Only this BOT_INSTANCE may execute bankroll reset from TG button. */
     resetInstanceId: (() => {
       const raw = optional('TELEGRAM_RESET_INSTANCE', 'btc-5m');
+      return String(raw).replace(/[^a-zA-Z0-9_-]/g, '') || 'btc-5m';
+    })(),
+    /** Only this BOT_INSTANCE calls getUpdates (one poller per bot token). */
+    callbackLeaderInstanceId: (() => {
+      const raw = optional(
+        'TELEGRAM_CALLBACK_LEADER',
+        optional('TELEGRAM_RESET_INSTANCE', 'btc-5m'),
+      );
       return String(raw).replace(/[^a-zA-Z0-9_-]/g, '') || 'btc-5m';
     })(),
   },
