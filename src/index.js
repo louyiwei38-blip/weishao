@@ -69,6 +69,7 @@ import {
   shouldMgContFastPath,
   nextCycleStartTs,
   isWithinTradeWindow,
+  firstButtonCycleStartTs,
   resolveCycleSignalDelayMs,
 } from './utils/fastPath.js';
 import {
@@ -374,6 +375,32 @@ async function processCycleTradeDecision({ cycleStartTs, projectSignalObj, proje
   return { handled: false };
 }
 
+/**
+ * Place the first button-sequence bet as soon as the target cycle window is open.
+ * @returns {Promise<{ handled?: boolean, status?: string, targetCycle?: number, result?: object }>}
+ */
+async function tryButtonSequenceFirstTrade() {
+  const btn = buttonSequence.getState();
+  if (!btn.active || !btn.pendingStart) return { status: 'not_pending' };
+  if (pendingBet || hasActiveRestingFillWatch()) return { status: 'busy' };
+
+  const now = Date.now();
+  const targetCycle = firstButtonCycleStartTs(now, CYCLE_MS, config.minTradeRemainingMs);
+  if (now < targetCycle) {
+    return { status: 'wait_boundary', targetCycle };
+  }
+  if (!isWithinTradeWindow(now, targetCycle, CYCLE_MS, config.minTradeRemainingMs)) {
+    return { status: 'too_late', targetCycle };
+  }
+  if (isCycleOrdered(targetCycle)) return { status: 'already_ordered', targetCycle };
+
+  return processCycleTradeDecision({
+    cycleStartTs: targetCycle,
+    projectSignalObj: null,
+    projectSource: 'button_seq',
+  });
+}
+
 async function handleTelegramCommand(cmd) {
   if (cmd.action === 'reset') {
     if (config.instanceId !== config.telegram.resetInstanceId) return;
@@ -394,12 +421,17 @@ async function handleTelegramCommand(cmd) {
   if (cmd.action === 'seq_up' || cmd.action === 'seq_down') {
     const direction = cmd.direction === 'DOWN' ? 'DOWN' : 'UP';
     buttonSequence.startSequence(direction);
+    const targetCycle = firstButtonCycleStartTs(Date.now(), CYCLE_MS, config.minTradeRemainingMs);
+    const kick = await tryButtonSequenceFirstTrade();
     const side = direction === 'UP' ? '📈 买涨' : '📉 买跌';
+    const firstCycleNote = kick.handled
+      ? `首注: 已开 <b>${formatBeijingTime(targetCycle)}</b> 窗口`
+      : `首注: <b>${formatBeijingTime(targetCycle)}</b> 窗口（边界到达后立即开）`;
     await notifyTelegram(
       `${tgHead('🔘 <b>按钮序列已启动</b>')}\n` +
       `方向: <b>${side}</b>\n` +
       `周期: 固定 6 个周期窗口\n` +
-      `首注: 下一周期边界\n` +
+      `${firstCycleNote}\n` +
       `(覆盖此前未完成的按钮序列)\n` +
       buttonSequence.formatTelegramLines() +
       await formatBalanceTelegramLine() +
@@ -911,6 +943,25 @@ async function runCycle(cycleStartTs) {
         cycle: formatBeijingTime(cycleStartTs),
       });
       return;
+    }
+
+    const btnPendingStart = buttonSequence.getState();
+    if (btnPendingStart.active && btnPendingStart.pendingStart) {
+      const btnFirst = await processCycleTradeDecision({
+        cycleStartTs,
+        projectSignalObj: null,
+        projectSource: 'button_seq',
+      });
+      if (btnFirst.handled) {
+        cycleStatus = btnFirst.result?.status === 'filled' || btnFirst.result?.status === 'resting'
+          ? 'ok'
+          : (btnFirst.result?.status ?? 'ok');
+        logger.info('[main] 按钮序列首注（周期初快路径）', {
+          cycle: formatBeijingTime(cycleStartTs),
+          status: btnFirst.result?.status,
+        });
+        return;
+      }
     }
 
     const vgEarly = vegasState.getState();
@@ -1490,6 +1541,7 @@ async function sleepUntilShutdown(ms) {
   const step = 500;
   let remaining = ms;
   while (remaining > 0 && !shutdownRequested) {
+    await drainCommandQueue(handleTelegramCommand);
     await sleep(Math.min(step, remaining));
     remaining -= step;
   }
@@ -1714,24 +1766,32 @@ async function scheduler() {
     }
     if (shutdownRequested) break;
 
+    await drainCommandQueue(handleTelegramCommand);
+
     const vg = vegasState.getState();
-    const delayMs = resolveCycleSignalDelayMs({
-      phase: vg.phase,
-      lockedSignal: vg.lockedSignal,
-      hasPending: Boolean(pendingBet),
-      signalDelayMs: config.signalDelayMs,
-      inChainSignalDelayMs: config.inChainSignalDelayMs,
-      settleBufferMs: config.chainlink.settleBufferMs,
-    });
+    const btnForDelay = buttonSequence.getState();
+    const delayMs = btnForDelay.pendingStart
+      ? Math.min(config.signalDelayMs, config.inChainSignalDelayMs)
+      : resolveCycleSignalDelayMs({
+        phase: vg.phase,
+        lockedSignal: vg.lockedSignal,
+        hasPending: Boolean(pendingBet),
+        signalDelayMs: config.signalDelayMs,
+        inChainSignalDelayMs: config.inChainSignalDelayMs,
+        settleBufferMs: config.chainlink.settleBufferMs,
+      });
 
     logger.debug('[scheduler] 边界后信号延迟', {
       delayMs,
       phase: vg.phase,
       hasPending: Boolean(pendingBet),
+      buttonPendingStart: btnForDelay.pendingStart,
     });
 
     await sleepUntilShutdown(delayMs);
     if (shutdownRequested) break;
+
+    await drainCommandQueue(handleTelegramCommand);
 
     cycleInProgress = trackWork(
       runCycle(boundary)

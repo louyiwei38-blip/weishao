@@ -41,6 +41,26 @@ export function isWithinTradeWindow(nowMs, cycleStartTs, cycleMs, minRemainingMs
 }
 
 /**
+ * First cycle window for a button sequence started at nowMs.
+ * Click before the upcoming boundary → that boundary (e.g. 17:54 → 17:55).
+ * Click within the first 30s after a boundary → that same window.
+ * @param {number} nowMs
+ * @param {number} cycleMs
+ * @param {number} [minRemainingMs=15000]
+ */
+export function firstButtonCycleStartTs(nowMs, cycleMs, minRemainingMs = 15_000) {
+  const current = Math.floor(nowMs / cycleMs) * cycleMs;
+  const msIntoCycle = nowMs - current;
+  if (
+    msIntoCycle <= 30_000 &&
+    isWithinTradeWindow(nowMs, current, cycleMs, minRemainingMs)
+  ) {
+    return current;
+  }
+  return current + cycleMs;
+}
+
+/**
  * Delay after UTC boundary before runCycle.
  * - pending unsettled: wait at least settle buffer so wake aligns with oracle
  * - in_chain continuation: use short delay (candle/EMA not needed)
