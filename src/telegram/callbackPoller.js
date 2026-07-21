@@ -24,7 +24,9 @@ let loopPromise = null;
 
 function cmdQueuePath(instanceId) {
   const safe = String(instanceId).replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
-  return join(LOGS_DIR, `tg-cmd-${safe}.json`);
+  const dir = config.telegram.cmdLogsDir || LOGS_DIR;
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return join(dir, `tg-cmd-${safe}.json`);
 }
 
 function sleepSync(ms) {
@@ -89,7 +91,8 @@ function enqueueCommand(instanceId, cmd) {
  * @param {(cmd: object) => Promise<void>} handler
  */
 export async function drainCommandQueue(handler) {
-  const path = scopedLogPath(LOGS_DIR, 'tg-cmd.json');
+  const dir = config.telegram.cmdLogsDir || LOGS_DIR;
+  const path = scopedLogPath(dir, 'tg-cmd.json');
   if (!existsSync(path)) return;
   /** @type {object[]} */
   let queue;
@@ -137,14 +140,9 @@ async function handleCallbackQuery(query) {
   }
 
   const { action, instanceId } = parsed;
-  const resetInstance = config.telegram.resetInstanceId;
 
   if (action === 'reset') {
-    if (instanceId !== resetInstance) {
-      await answerCallbackQuery(queryId, '重置仅 btc-5m 可用');
-      return;
-    }
-    enqueueCommand(resetInstance, { action: 'reset', queryId, from: query.from?.username ?? null });
+    enqueueCommand(instanceId, { action: 'reset', queryId, from: query.from?.username ?? null });
     await answerCallbackQuery(queryId, '已排队：重置本金/净胜负');
     return;
   }

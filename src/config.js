@@ -246,6 +246,14 @@ const config = {
       );
       return String(raw).replace(/[^a-zA-Z0-9_-]/g, '') || 'btc-5m';
     })(),
+    /**
+     * Optional shared directory for tg-cmd-{instance}.json queues.
+     * Use when multiple wallet deployments (separate dirs) share one Telegram bot token.
+     */
+    cmdLogsDir: (() => {
+      const raw = optional('TELEGRAM_CMD_LOGS_DIR', '').trim();
+      return raw || null;
+    })(),
   },
 
   // Risk — symmetric cap for YES/NO limit orders; 0 = no cap
