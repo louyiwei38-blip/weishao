@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#0f1419" />
+  <title>手动开单 · 动态首注</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="top">
+    <h1>手动开单</h1>
+    <p class="sub">总返 1:1.85（利润=本金×0.85）· P/N 补队列</p>
+  </header>
+
+  <section class="card hero">
+    <div class="label">下一注金额</div>
+    <div class="stake" id="nextStake">—</div>
+    <div class="profit" id="nextProfit"></div>
+    <div class="mode" id="stakeMode">—</div>
+    <div class="actions">
+      <button type="button" class="btn win" id="btnWin">赢</button>
+      <button type="button" class="btn loss" id="btnLoss">输</button>
+    </div>
+    <button type="button" class="btn ghost" id="btnUndo">撤销上一笔</button>
+  </section>
+
+  <section class="grid stats">
+    <div class="stat"><span class="stat-k">胜率</span><span class="stat-val" id="statWinRate">—</span></div>
+    <div class="stat"><span class="stat-k">胜负</span><span class="stat-val" id="statWL">0胜 0负</span></div>
+    <div class="stat"><span class="stat-k">净胜负 N</span><span class="stat-val" id="statNet">0</span></div>
+    <div class="stat"><span class="stat-k">余额</span><span class="stat-val" id="statBalance">—</span></div>
+    <div class="stat"><span class="stat-k">本金 P</span><span class="stat-val" id="statPrincipal">—</span></div>
+    <div class="stat"><span class="stat-k">目标线</span><span class="stat-val" id="statTarget">—</span></div>
+    <div class="stat wide"><span class="stat-k">gap</span><span class="stat-val" id="statGap">—</span></div>
+    <div class="stat wide"><span class="stat-k">补队列</span><span class="stat-val queue" id="queueList">空</span></div>
+  </section>
+
+  <section class="card">
+    <h2>最近记录</h2>
+    <ul class="history" id="history"><li class="empty">暂无记录</li></ul>
+  </section>
+
+  <section class="card">
+    <h2>设置</h2>
+    <p class="sync" id="syncStatus">仅本机 localStorage</p>
+    <form id="settingsForm" class="form">
+      <label>当前余额 / 重置本金<input type="number" step="0.01" min="0" id="setBalance" placeholder="例如 500" /></label>
+      <div class="row2">
+        <label>默认首注<input type="number" step="0.01" min="1" id="setDefaultBet" value="10" /></label>
+        <label>步进 step<input type="number" step="0.01" min="1" id="setStep" value="10" /></label>
+      </div>
+      <div class="row2">
+        <label>单笔上限<input type="number" step="0.01" min="1" id="setStakeMax" value="30" /></label>
+        <label>补层 T 上限<input type="number" step="0.01" min="1" id="setTCap" value="20" /></label>
+      </div>
+      <label>利润倍数（总返1.85倍 → 填 0.85）<input type="number" step="0.01" min="0.01" id="setOdds" value="0.85" /></label>
+      <label>云端同步地址（手机电脑同 URL）<input type="url" id="setApi" placeholder="http://服务器:8787" /></label>
+      <div class="row-btns">
+        <button type="submit" class="btn primary">保存设置</button>
+        <button type="button" class="btn ghost" id="btnReset">重置 P/N</button>
+      </div>
+    </form>
+    <div class="row-btns tools">
+      <button type="button" class="btn ghost" id="btnExport">导出 JSON</button>
+      <label class="btn ghost file-btn">导入 JSON<input type="file" id="importFile" accept="application/json" hidden /></label>
+    </div>
+  </section>
+
+  <div class="toast" id="toast"></div>
+  <script src="lib/bankroll.global.js"></script>
+  <script src="app.bundle.js"></script>
+</body>
+</html>

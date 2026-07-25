@@ -271,6 +271,43 @@ grep chainlink logs/bot.log | tail -20
 
 ---
 
+## 八-B、手动开单 Tracker（手机 + 电脑）
+
+独立 Web 工具，记录赢/输、P/N、补队列；**不连 Polymarket**，无需 `.env` 私钥。
+
+### 云服务器部署
+
+```bash
+cd ~/polymarket-bot          # 或你的项目目录
+git pull
+npm install
+npm run pm2:manual:start     # 构建前端 + PM2 常驻，默认端口 8787
+pm2 save
+```
+
+**放行防火墙 / 安全组 TCP 8787**，手机浏览器访问：
+
+```text
+http://你的公网IP:8787
+```
+
+数据文件：`logs/manual-tracker-state.json`（手机与电脑同 URL 即自动同步）。
+
+### 常用命令
+
+| 命令 | 说明 |
+|------|------|
+| `npm run pm2:manual:start` | 首次启动 |
+| `npm run pm2:manual:restart` | 更新代码后重启 |
+| `npm run pm2:manual:logs` | 查看日志 |
+| `npm run pm2:manual:stop` | 停止 |
+
+可选环境变量：`MANUAL_TRACKER_PORT=8787`
+
+> 无登录鉴权，勿对公网裸奔；可配合安全组只允许自己 IP，或 Nginx 反代 + 基础认证。
+
+---
+
 ## 九、systemd（可选）
 
 见原文 `/etc/systemd/system/polymarket-bot.service` 配置，`Environment=POLY_KEY_PASSWORD=...` 必填。

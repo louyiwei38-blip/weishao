@@ -42,7 +42,12 @@
     "pm2:w2:delete": "pm2 delete ecosystem.wallet2.config.cjs",
     "pm2:w2:btc:start": "pm2 start ecosystem.wallet2.config.cjs --only W2-btc-5m --env live",
     "pm2:w2:btc:dry": "pm2 start ecosystem.wallet2.config.cjs --only W2-btc-5m --env dry",
-    "pm2:w2:logs": "pm2 logs W2-btc-5m"
+    "pm2:w2:logs": "pm2 logs W2-btc-5m",
+    "manual:tracker": "node scripts/build-manual-tracker-client.cjs && node scripts/manual-tracker-server.js",
+    "pm2:manual:start": "node scripts/build-manual-tracker-client.cjs && pm2 start ecosystem.manual-tracker.config.cjs",
+    "pm2:manual:restart": "node scripts/build-manual-tracker-client.cjs && pm2 restart manual-tracker",
+    "pm2:manual:stop": "pm2 stop manual-tracker",
+    "pm2:manual:logs": "pm2 logs manual-tracker"
   },
   "engines": {
     "node": ">=18.0.0"
