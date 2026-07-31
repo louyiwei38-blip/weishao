@@ -4,7 +4,8 @@
  * P = principal, locked from Portfolio on first use (never re-locked on max-loss halt)
  * N = net wins−losses; +1 win / −1 loss on confirmed settlement (kept across max-loss halt)
  * target = P + N × step
- * gap = max(0, target − Portfolio)
+ * gap = max(0, target − equity)
+ *   equity = Portfolio (legacy) OR P + stats.total.pnlUsd (BANKROLL_USE_STATS_EQUITY=true)
  *
  * Catch-up queue (补1, 补2, …):
  *   - No gap & empty queue → stake = defaultBet (TRADE_BUDGET_USD)
@@ -274,17 +275,20 @@ function syncCatchUpQueue(balance) {
 }
 
 /**
- * @param {{ balance: number, entryPrice: number|null|undefined }} args
+ * @param {{ balance: number, entryPrice: number|null|undefined, spendCap?: number|null }} args
+ * balance — equity for gap / catch-up queue (stats-based or Portfolio)
+ * spendCap — max stake clamp (Cash); defaults to balance when omitted
  */
-export function computeStake({ balance, entryPrice }) {
+export function computeStake({ balance, entryPrice, spendCap }) {
   const step = config.bankroll.stepUsd;
   const defaultBet = config.tradeBudgetUsd;
   const tCap = config.bankroll.catchUpProfitCapUsd;
   const stakeMax = Math.min(config.bankroll.stakeMaxUsd, config.maxBetUsd);
   const bal = Number(balance);
   const p = Number(entryPrice);
+  const cap = Number.isFinite(Number(spendCap)) ? Number(spendCap) : bal;
 
-  // Open / clear queue against live Portfolio before sizing
+  // Sync queue against sizing equity before stake calc
   if (Number.isFinite(bal)) syncCatchUpQueue(bal);
 
   const st = getState();
@@ -294,7 +298,7 @@ export function computeStake({ balance, entryPrice }) {
   const clampStake = (raw) => {
     let s = Math.max(0, Number(raw) || 0);
     s = Math.min(s, stakeMax);
-    if (Number.isFinite(bal) && bal >= 0) s = Math.min(s, bal);
+    if (Number.isFinite(cap) && cap >= 0) s = Math.min(s, cap);
     return round2(s);
   };
 
@@ -573,7 +577,7 @@ export function resetPrincipalAndNet(portfolioBalance) {
   });
 }
 
-export function formatBankrollTelegramLines(sizing = null) {
+export function formatBankrollTelegramLines(sizing = null, { statsEquity = null } = {}) {
   const st = getState();
   const P = st.principal;
   const N = st.netCount;
@@ -582,9 +586,13 @@ export function formatBankrollTelegramLines(sizing = null) {
   const qText = q.length
     ? ` · 补队列[${q.map((x) => `补${x.id}=$${Number(x.usd).toFixed(2)}`).join(', ')}]`
     : '';
+  const equityNote = statsEquity != null
+    ? ` · 账本 $${Number(statsEquity).toFixed(2)}`
+    : '';
   let line =
     `资金: 本金 $${P != null ? P.toFixed(2) : '—'} · 净胜负 ${N}` +
     (target != null ? ` · 目标 $${target.toFixed(2)}` : '') +
+    equityNote +
     qText +
     `\n`;
   if (sizing?.mode === 'catch_up') {

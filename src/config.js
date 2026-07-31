@@ -174,6 +174,8 @@ const config = {
   cryptoTakerFeeRate: num('CRYPTO_TAKER_FEE_RATE', 0.07),
   /** Subtract entry taker fee from PnL / stats / daily loss tracking */
   includeTradingFees: bool('INCLUDE_TRADING_FEES', true),
+  /** Gap/catch-up sizing uses P + stats.total.pnlUsd instead of live Portfolio */
+  bankrollUseStatsEquity: bool('BANKROLL_USE_STATS_EQUITY', true),
   /**
    * Shared dynamic bankroll (P/N + catch-up queue).
    * Catch-up: play front layer L with win profit T = L + step; stake = T×p/(1−p).

@@ -124,10 +124,13 @@ function formatStatsTelegramBlock() {
 /** 开单/结算共用：本链路累计盈亏 + 马丁进度 + 共享资金线 */
 function formatChainTelegramLines(mgState = martingale.getState(), sizing = null) {
   const chainPnl = Number(mgState.chainPnlUsd) || 0;
+  const statsEquity = config.bankrollUseStatsEquity
+    ? martingale.resolveSizingEquity()
+    : null;
   return (
     `本链路盈亏: <b>${stats.formatPnlUsd(chainPnl)}</b>\n` +
     `马丁: 默认首注 $${config.tradeBudgetUsd} · 连败 ${mgState.consecutiveLosses} · 本单注 $${mgState.currentBet}\n` +
-    formatBankrollTelegramLines(sizing) +
+    formatBankrollTelegramLines(sizing, { statsEquity }) +
     buttonSequence.formatTelegramLines()
   );
 }
@@ -1417,27 +1420,33 @@ async function applySettlement(pending, { candles } = {}) {
   const hadProject = sources.includes('project');
   const hadButton = sources.includes('button');
 
-  // Portfolio needed every settle to update catch-up queue vs live gap (P/N never reset on halt)
-  let settlePortfolio = null;
-  try {
-    const bd = await getBalanceBreakdown();
-    settlePortfolio = bd.portfolio;
-  } catch (err) {
-    logger.warn('[settle] 拉取 Portfolio 失败 — 补队列可能无法按真实 gap 更新', {
-      error: err?.message,
-    });
+  // Stats first so bankroll gap uses up-to-date cumulative P&L in stats-equity mode.
+  stats.recordSettlement({ won, pnlUsd });
+
+  let settleEquity = null;
+  if (config.bankrollUseStatsEquity) {
+    settleEquity = martingale.resolveSizingEquity();
+  } else {
+    try {
+      const bd = await getBalanceBreakdown();
+      settleEquity = bd.portfolio;
+    } catch (err) {
+      logger.warn('[settle] 拉取 Portfolio 失败 — 补队列可能无法按真实 gap 更新', {
+        error: err?.message,
+      });
+    }
   }
 
   let halted = false;
   let chainPnlUsd = 0;
 
   if (hadProject) {
-    const mgResult = martingale.onSettled(won, pnlUsd, settlePortfolio);
+    const mgResult = martingale.onSettled(won, pnlUsd, settleEquity);
     halted = mgResult.halted;
     chainPnlUsd = mgResult.chainPnlUsd;
     vegasState.onSettled(won, halted);
   } else {
-    martingale.bankroll.onSettled(won, settlePortfolio);
+    martingale.bankroll.onSettled(won, settleEquity);
   }
 
   if (hadButton) {
@@ -1445,7 +1454,6 @@ async function applySettlement(pending, { candles } = {}) {
   }
 
   if (!won) recordLoss(-pnlUsd);
-  stats.recordSettlement({ won, pnlUsd });
   if (halted) stats.recordStopLoss();
 
   logger.info(`[settle] ${sourceLabel} 结算结果`, {
@@ -1667,6 +1675,7 @@ async function scheduler() {
     martingaleMultiplier: config.martingaleMultiplier,
     martingaleMaxLosses: config.martingaleMaxLosses,
     bankroll: br,
+    bankrollUseStatsEquity: config.bankrollUseStatsEquity,
     startupBalance,
     orderType: config.orderType,
     orderRetryDelayMs: config.orderRetryDelayMs,

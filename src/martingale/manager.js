@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import config from '../config.js';
 import logger from '../utils/logger.js';
 import { scopedLogPath } from '../utils/instancePaths.js';
+import * as stats from '../stats/manager.js';
 import * as bankroll from './bankroll.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -70,26 +71,55 @@ export function init() {
   bankroll.init();
 }
 
+function round2(n) {
+  return Math.round(Number(n) * 100) / 100;
+}
+
+/**
+ * Equity for gap / catch-up sizing.
+ * Stats mode: P + cumulative stats P&L (fee-adjusted, local ledger).
+ * Legacy mode: live Polymarket Portfolio (Cash + positions).
+ * @param {number|null|undefined} portfolioBalance Fallback when P not locked or stats mode off
+ */
+export function resolveSizingEquity(portfolioBalance = null) {
+  if (!config.bankrollUseStatsEquity) {
+    const fb = Number(portfolioBalance);
+    return Number.isFinite(fb) ? fb : null;
+  }
+
+  const br = bankroll.getState();
+  const P = br.principal;
+  if (P == null) {
+    const fb = Number(portfolioBalance);
+    return Number.isFinite(fb) ? fb : null;
+  }
+
+  const snap = stats.getSnapshot();
+  return round2(P + (Number(snap.total.pnlUsd) || 0));
+}
+
 /**
  * Dynamic stake every shot (entry + MG_CONT). Martingale only tracks loss streak / halt.
- * @param {number} equityBalance Portfolio (Cash + positions) — drives bankroll target line
+ * @param {number} portfolioBalance Polymarket Portfolio — locks P; legacy gap source
  * @param {number|null|undefined} entryPrice token price in (0,1)
- * @param {number|null|undefined} cashBalance Spendable Cash; defaults to equityBalance
+ * @param {number|null|undefined} cashBalance Spendable Cash for order spend clamp
  * @returns {{ actualBet: number, skipReason: string|null, sizing: object|null }}
  */
-export function prepareOrder(equityBalance, entryPrice = null, cashBalance = null) {
+export function prepareOrder(portfolioBalance, entryPrice = null, cashBalance = null) {
   const s = state[MARTINGALE_KEY];
-  bankroll.ensurePrincipal(equityBalance);
+  bankroll.ensurePrincipal(portfolioBalance);
 
-  const sizing = bankroll.computeStake({
-    balance: equityBalance,
-    entryPrice,
-  });
-
+  const sizingEquity = resolveSizingEquity(portfolioBalance);
   const spendable =
     cashBalance != null && Number.isFinite(Number(cashBalance))
       ? Number(cashBalance)
-      : equityBalance;
+      : portfolioBalance;
+
+  const sizing = bankroll.computeStake({
+    balance: sizingEquity ?? portfolioBalance,
+    entryPrice,
+    spendCap: spendable,
+  });
 
   const actualBet = Math.min(
     sizing.stakeUsd,
@@ -109,7 +139,9 @@ export function prepareOrder(equityBalance, entryPrice = null, cashBalance = nul
     key: MARTINGALE_KEY,
     mode: sizing.mode,
     actualBet,
-    equityBalance,
+    portfolioBalance,
+    sizingEquity,
+    statsEquityMode: config.bankrollUseStatsEquity,
     cashBalance: spendable,
     entryPrice: sizing.entryPrice,
     gapUsd: sizing.gapUsd,
@@ -120,6 +152,9 @@ export function prepareOrder(equityBalance, entryPrice = null, cashBalance = nul
     shares: sizing.shares,
     consecutiveLosses: s.consecutiveLosses,
     bankroll: bankroll.getState(),
+    statsPnlUsd: config.bankrollUseStatsEquity
+      ? stats.getSnapshot().total.pnlUsd
+      : undefined,
   });
 
   return { actualBet, skipReason: null, sizing };
@@ -128,7 +163,7 @@ export function prepareOrder(equityBalance, entryPrice = null, cashBalance = nul
 /**
  * @param {boolean} won
  * @param {number} [pnlUsd=0]
- * @param {number|null|undefined} [equityBalance=null] Portfolio after settle — updates catch-up queue
+ * @param {number|null|undefined} [equityBalance=null] Sizing equity after settle (stats or Portfolio)
  * @returns {{ halted: boolean, chainPnlUsd: number, bankroll: object }}
  */
 export function onSettled(won, pnlUsd = 0, equityBalance = null) {
