@@ -5,7 +5,7 @@ import config from '../config.js';
 
 const VALIDITY_MS = () => config.telegram.buttonValidityMs;
 
-/** @typedef {'reset'|'seq_up'|'seq_down'} ButtonAction */
+/** @typedef {'reset'} ButtonAction */
 
 function encodeInstanceId(instanceId) {
   return String(instanceId || '').replace(/-/g, '');
@@ -14,8 +14,8 @@ function encodeInstanceId(instanceId) {
 export function buildCallbackData(action, instanceId = config.instanceId, expMs = Date.now() + VALIDITY_MS()) {
   const inst = encodeInstanceId(instanceId);
   const exp = Math.trunc(expMs / 1000);
-  const code = action === 'reset' ? 'r' : action === 'seq_up' ? 'u' : 'd';
-  return `v1:${code}:${inst}:${exp}`;
+  if (action !== 'reset') return '';
+  return `v1:r:${inst}:${exp}`;
 }
 
 export function parseCallbackData(data) {
@@ -32,8 +32,6 @@ export function parseCallbackData(data) {
   /** @type {ButtonAction|null} */
   let action = null;
   if (code === 'r') action = 'reset';
-  else if (code === 'u') action = 'seq_up';
-  else if (code === 'd') action = 'seq_down';
   else return { ok: false, reason: 'bad_action' };
 
   return { ok: true, action, instanceId: decodeInstanceId(instRaw), exp };
@@ -52,10 +50,6 @@ export function buildInlineKeyboard(instanceId = config.instanceId) {
   return {
     inline_keyboard: [
       [{ text: '🔄 重置本金/净胜负', callback_data: buildCallbackData('reset', resetInst, exp) }],
-      [
-        { text: '📈 6周期买涨', callback_data: buildCallbackData('seq_up', instanceId, exp) },
-        { text: '📉 6周期买跌', callback_data: buildCallbackData('seq_down', instanceId, exp) },
-      ],
     ],
   };
 }

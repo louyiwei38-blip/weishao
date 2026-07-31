@@ -147,20 +147,6 @@ async function handleCallbackQuery(query) {
     return;
   }
 
-  if (action === 'seq_up' || action === 'seq_down') {
-    enqueueCommand(instanceId, {
-      action,
-      queryId,
-      direction: action === 'seq_up' ? 'UP' : 'DOWN',
-      from: query.from?.username ?? null,
-    });
-    await answerCallbackQuery(
-      queryId,
-      action === 'seq_up' ? '已启动：6周期买涨' : '已启动：6周期买跌',
-    );
-    return;
-  }
-
   await answerCallbackQuery(queryId, '未知操作');
 }
 

@@ -69,7 +69,6 @@ import {
   shouldMgContFastPath,
   nextCycleStartTs,
   isWithinTradeWindow,
-  firstButtonCycleStartTs,
   resolveCycleSignalDelayMs,
 } from './utils/fastPath.js';
 import {
@@ -378,32 +377,6 @@ async function processCycleTradeDecision({ cycleStartTs, projectSignalObj, proje
   return { handled: false };
 }
 
-/**
- * Place the first button-sequence bet as soon as the target cycle window is open.
- * @returns {Promise<{ handled?: boolean, status?: string, targetCycle?: number, result?: object }>}
- */
-async function tryButtonSequenceFirstTrade() {
-  const btn = buttonSequence.getState();
-  if (!btn.active || !btn.pendingStart) return { status: 'not_pending' };
-  if (pendingBet || hasActiveRestingFillWatch()) return { status: 'busy' };
-
-  const now = Date.now();
-  const targetCycle = firstButtonCycleStartTs(now, CYCLE_MS, config.minTradeRemainingMs);
-  if (now < targetCycle) {
-    return { status: 'wait_boundary', targetCycle };
-  }
-  if (!isWithinTradeWindow(now, targetCycle, CYCLE_MS, config.minTradeRemainingMs)) {
-    return { status: 'too_late', targetCycle };
-  }
-  if (isCycleOrdered(targetCycle)) return { status: 'already_ordered', targetCycle };
-
-  return processCycleTradeDecision({
-    cycleStartTs: targetCycle,
-    projectSignalObj: null,
-    projectSource: 'button_seq',
-  });
-}
-
 async function handleTelegramCommand(cmd) {
   if (cmd.action === 'reset') {
     if (config.instanceId !== config.telegram.resetInstanceId) return;
@@ -416,28 +389,6 @@ async function handleTelegramCommand(cmd) {
       `补队列: <b>已清空</b>\n` +
       `目标线: <b>$${Number(st.targetBalance).toFixed(2)}</b>\n` +
       await formatBalanceTelegramLine(bal) +
-      formatStatsTelegramBlock(),
-    );
-    return;
-  }
-
-  if (cmd.action === 'seq_up' || cmd.action === 'seq_down') {
-    const direction = cmd.direction === 'DOWN' ? 'DOWN' : 'UP';
-    buttonSequence.startSequence(direction);
-    const targetCycle = firstButtonCycleStartTs(Date.now(), CYCLE_MS, config.minTradeRemainingMs);
-    const kick = await tryButtonSequenceFirstTrade();
-    const side = direction === 'UP' ? '📈 买涨' : '📉 买跌';
-    const firstCycleNote = kick.handled
-      ? `首注: 已开 <b>${formatBeijingTime(targetCycle)}</b> 窗口`
-      : `首注: <b>${formatBeijingTime(targetCycle)}</b> 窗口（边界到达后立即开）`;
-    await notifyTelegram(
-      `${tgHead('🔘 <b>按钮序列已启动</b>')}\n` +
-      `方向: <b>${side}</b>\n` +
-      `周期: 固定 6 个周期窗口\n` +
-      `${firstCycleNote}\n` +
-      `(覆盖此前未完成的按钮序列)\n` +
-      buttonSequence.formatTelegramLines() +
-      await formatBalanceTelegramLine() +
       formatStatsTelegramBlock(),
     );
   }
