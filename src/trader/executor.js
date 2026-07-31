@@ -249,7 +249,7 @@ function buildOrderResult(parsed, actualFill, extras = {}) {
   return {
     orderId: parsed.orderId,
     skipped: false,
-    resting: Boolean(parsed.resting && usdcSpent <= 0),
+    resting: Boolean(actualFill?.resting || (parsed.resting && usdcSpent <= 0)),
     usdcSpent,
     makingAmount: parsed.makingAmount ?? 0,
     takingAmount: parsed.takingAmount ?? 0,
@@ -771,7 +771,7 @@ async function submitLimitOrder(client, params, exec) {
       stakeUsd,
       parsed,
       actualFill,
-      resting: Boolean(parsed.resting && !(actualFill?.usdcSpent > 0)),
+      resting: Boolean(parsed.resting || actualFill?.resting),
       usdcSpent: Math.max(0, parseFloat(actualFill?.usdcSpent) || 0) || (
         parsed.resting ? 0 : estCost
       ),

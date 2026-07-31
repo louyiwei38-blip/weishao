@@ -170,6 +170,10 @@ const config = {
   maxDailyLossUsd: num('MAX_DAILY_LOSS_USD', 10000),
   minBalanceUsd: num('MIN_BALANCE_USD', 0),
   maxBetUsd: num('MAX_BET_USD', 30),
+  /** Polymarket crypto taker fee rate (see docs.polymarket.com/trading/fees) */
+  cryptoTakerFeeRate: num('CRYPTO_TAKER_FEE_RATE', 0.07),
+  /** Subtract entry taker fee from PnL / stats / daily loss tracking */
+  includeTradingFees: bool('INCLUDE_TRADING_FEES', true),
   /**
    * Shared dynamic bankroll (P/N + catch-up queue).
    * Catch-up: play front layer L with win profit T = L + step; stake = T×p/(1−p).

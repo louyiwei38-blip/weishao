@@ -11,7 +11,6 @@
  *     # parallelFixed: each signal locks direction for N bets; win does not stop;
  *     # new signals spawn independent chains that run in parallel
  */
-import ccxt from 'ccxt';
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -132,52 +131,72 @@ function resolveRange() {
   };
 }
 
-function createExchange() {
-  return new ccxt.okx({
-    enableRateLimit: true,
-    timeout: 60_000,
-    options: { defaultType: 'swap' },
-  });
+const OKX_CANDLES_URL = 'https://www.okx.com/api/v5/market/history-candles';
+
+function mergeCandles(existing, incoming) {
+  const dedup = new Map(existing.map((c) => [c.t, c]));
+  for (const c of incoming) dedup.set(c.t, c);
+  return [...dedup.values()].sort((a, b) => a.t - b.t);
 }
 
-function fetchSymbolForExchange() {
-  return SYMBOL;
-}
-
-async function fetchAllCandles(exchange, symbol, timeframe, since, until) {
+/** Direct OKX REST — avoids CCXT loadMarkets (often blocked while candle API works). */
+async function fetchOkxCandlesDirect(instId, bar, since, until) {
   const all = [];
-  let cursor = since;
+  let after = since;
   let batches = 0;
   let emptySkips = 0;
-  // Allow enough forward skips to reach late listings (e.g. OKX SOL ~2021) on short TFs
   const maxEmptySkips = Math.ceil((until - since) / (BAR_MS * 300)) + 8;
-  while (cursor < until) {
-    const batch = await exchange.fetchOHLCV(symbol, timeframe, cursor, 300);
+
+  while (after < until) {
+    const url = new URL(OKX_CANDLES_URL);
+    url.searchParams.set('instId', instId);
+    url.searchParams.set('bar', bar);
+    url.searchParams.set('after', String(after));
+    url.searchParams.set('limit', '300');
+
+    const res = await fetch(url, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) throw new Error(`OKX candles HTTP ${res.status}`);
+    const json = await res.json();
+    if (json.code !== '0') throw new Error(`OKX candles ${json.code} ${json.msg || ''}`.trim());
+
+    const batch = json.data || [];
     if (!batch.length) {
-      // Listing may start later than --from (e.g. OKX BNB); skip forward
       emptySkips += 1;
       if (emptySkips > maxEmptySkips) break;
-      cursor += BAR_MS * 300;
+      after += BAR_MS * 300;
       await new Promise((r) => setTimeout(r, 40));
       continue;
     }
     emptySkips = 0;
+
+    let maxT = after;
     for (const row of batch) {
-      const [t, o, h, l, c, v] = row;
-      if (t >= until) break;
-      all.push({ t, open: o, high: h, low: l, close: c, volume: v });
+      const t = Number(row[0]);
+      if (!Number.isFinite(t) || t <= after || t >= until) continue;
+      all.push({
+        t,
+        open: Number(row[1]),
+        high: Number(row[2]),
+        low: Number(row[3]),
+        close: Number(row[4]),
+        volume: Number(row[5]),
+      });
+      maxT = Math.max(maxT, t);
     }
-    const lastT = batch.at(-1)[0];
-    if (lastT <= cursor) break;
-    cursor = lastT + BAR_MS;
+
+    if (maxT <= after) break;
+    after = maxT;
     batches += 1;
     if (batches % 50 === 0) {
-      console.log(`  … fetched ${all.length} bars @ ${new Date(lastT).toISOString()}`);
+      console.log(`  … fetched ${all.length} bars @ ${new Date(maxT).toISOString()}`);
     }
     await new Promise((r) => setTimeout(r, 40));
   }
-  const dedup = new Map(all.map((c) => [c.t, c]));
-  return [...dedup.values()].sort((a, b) => a.t - b.t);
+
+  return mergeCandles([], all);
 }
 
 async function ensureCandles(fromMs, toMs) {
@@ -195,86 +214,115 @@ async function ensureCandles(fromMs, toMs) {
     return candles;
   }
 
-  const fetchSymbol = fetchSymbolForExchange();
-  console.log(
-    `Fetching ${EXCHANGE_ID} ${fetchSymbol} ${TIMEFRAME} ${new Date(needSince).toISOString()} → ${new Date(toMs).toISOString()} ...`,
-  );
-  const ex = createExchange();
-  candles = await fetchAllCandles(ex, fetchSymbol, TIMEFRAME, needSince, toMs);
-  if (!existsSync(OUT_DIR)) mkdirSync(OUT_DIR, { recursive: true });
-  writeFileSync(CACHE_FILE, JSON.stringify(candles));
-  console.log(`Fetched ${candles.length} bars → ${CACHE_FILE}`);
-  return candles;
+  const fetchSince = candles.length && cacheStart <= needSince && cacheEnd < toMs - 2 * BAR_MS
+    ? cacheEnd
+    : needSince;
+  const fetchLabel = fetchSince > needSince
+    ? `incremental ${new Date(fetchSince).toISOString()} → ${new Date(toMs).toISOString()}`
+    : `${new Date(needSince).toISOString()} → ${new Date(toMs).toISOString()}`;
+
+  console.log(`Fetching OKX ${OKX_INST_ID} ${OKX_BAR} ${fetchLabel} ...`);
+  try {
+    const fetched = await fetchOkxCandlesDirect(OKX_INST_ID, OKX_BAR, fetchSince, toMs);
+    candles = fetchSince > needSince ? mergeCandles(candles, fetched) : fetched;
+    if (!existsSync(OUT_DIR)) mkdirSync(OUT_DIR, { recursive: true });
+    writeFileSync(CACHE_FILE, JSON.stringify(candles));
+    console.log(`Fetched ${fetched.length} bars (total ${candles.length}) → ${CACHE_FILE}`);
+    return candles;
+  } catch (err) {
+    if (candles.length && cacheEnd >= fromMs - 2 * BAR_MS) {
+      console.warn(
+        `OKX fetch failed (${err.message}); using cache through ${new Date(cacheEnd).toISOString()}`,
+      );
+      return candles;
+    }
+    throw err;
+  }
 }
 
 /**
  * Load or fetch OKX EMA144/169 bands aligned to candle timestamps.
  * Cache stores { t, ema144, ema169, upper, lower }[] parallel to candles by t.
  */
+function loadEmaBandsFromCache(candles, { minCoverage = 0.9 } = {}) {
+  if (!existsSync(EMA_CACHE_FILE)) return null;
+  try {
+    const cached = JSON.parse(readFileSync(EMA_CACHE_FILE, 'utf8'));
+    if (cached?.instId !== OKX_INST_ID || cached?.bar !== OKX_BAR || !Array.isArray(cached.points)) {
+      return null;
+    }
+    const byTs = new Map(cached.points.map((p) => [p.t, p]));
+    const bands = candles.map((c) => {
+      const p = byTs.get(c.t);
+      if (!p) return null;
+      return {
+        ema144: p.ema144,
+        ema169: p.ema169,
+        upper: p.upper,
+        lower: p.lower,
+      };
+    });
+    const hit = bands.filter(Boolean).length;
+    if (hit < candles.length * minCoverage) return null;
+    console.log(
+      `Using OKX EMA cache: ${hit}/${candles.length} bars aligned (${OKX_INST_ID} ${OKX_BAR})`,
+    );
+    return bands;
+  } catch {
+    return null;
+  }
+}
+
 async function ensureOkxBands(candles) {
   if (!candles.length) return [];
 
-  if (existsSync(EMA_CACHE_FILE) && !FORCE_FETCH) {
-    try {
-      const cached = JSON.parse(readFileSync(EMA_CACHE_FILE, 'utf8'));
-      if (cached?.instId === OKX_INST_ID && cached?.bar === OKX_BAR && Array.isArray(cached.points)) {
-        const byTs = new Map(cached.points.map((p) => [p.t, p]));
-        const bands = candles.map((c) => {
-          const p = byTs.get(c.t);
-          if (!p) return null;
-          return {
-            ema144: p.ema144,
-            ema169: p.ema169,
-            upper: p.upper,
-            lower: p.lower,
-          };
-        });
-        const hit = bands.filter(Boolean).length;
-        if (hit >= candles.length * 0.9) {
-          console.log(
-            `Using OKX EMA cache: ${hit}/${candles.length} bars aligned (${OKX_INST_ID} ${OKX_BAR})`,
-          );
-          return bands;
-        }
-        console.log(`OKX EMA cache coverage low (${hit}/${candles.length}), refetching…`);
-      }
-    } catch {
-      console.log('OKX EMA cache unreadable, refetching…');
-    }
+  if (!FORCE_FETCH) {
+    const cached = loadEmaBandsFromCache(candles);
+    if (cached) return cached;
+    console.log('OKX EMA cache missing or low coverage, refetching…');
   }
 
   console.log(`Fetching OKX EMA144/169 for ${OKX_INST_ID} ${OKX_BAR}…`);
-  let lastLog = 0;
-  const bands = await fetchOkxVegasBandsHistory(candles, {
-    instId: OKX_INST_ID,
-    bar: OKX_BAR,
-    onProgress: (n) => {
-      if (n - lastLog >= 500) {
-        console.log(`  … EMA points ${n}`);
-        lastLog = n;
-      }
-    },
-  });
-
-  const points = [];
-  for (let i = 0; i < candles.length; i += 1) {
-    const b = bands[i];
-    if (!b) continue;
-    points.push({
-      t: candles[i].t,
-      ema144: b.ema144,
-      ema169: b.ema169,
-      upper: b.upper,
-      lower: b.lower,
+  try {
+    let lastLog = 0;
+    const bands = await fetchOkxVegasBandsHistory(candles, {
+      instId: OKX_INST_ID,
+      bar: OKX_BAR,
+      onProgress: (n) => {
+        if (n - lastLog >= 500) {
+          console.log(`  … EMA points ${n}`);
+          lastLog = n;
+        }
+      },
     });
+
+    const points = [];
+    for (let i = 0; i < candles.length; i += 1) {
+      const b = bands[i];
+      if (!b) continue;
+      points.push({
+        t: candles[i].t,
+        ema144: b.ema144,
+        ema169: b.ema169,
+        upper: b.upper,
+        lower: b.lower,
+      });
+    }
+    if (!existsSync(OUT_DIR)) mkdirSync(OUT_DIR, { recursive: true });
+    writeFileSync(
+      EMA_CACHE_FILE,
+      JSON.stringify({ instId: OKX_INST_ID, bar: OKX_BAR, points }),
+    );
+    console.log(`OKX EMA aligned ${points.length}/${candles.length} → ${EMA_CACHE_FILE}`);
+    return bands;
+  } catch (err) {
+    const cached = loadEmaBandsFromCache(candles, { minCoverage: 0.85 });
+    if (cached) {
+      console.warn(`OKX EMA fetch failed (${err.message}); using cache`);
+      return cached;
+    }
+    throw err;
   }
-  if (!existsSync(OUT_DIR)) mkdirSync(OUT_DIR, { recursive: true });
-  writeFileSync(
-    EMA_CACHE_FILE,
-    JSON.stringify({ instId: OKX_INST_ID, bar: OKX_BAR, points }),
-  );
-  console.log(`OKX EMA aligned ${points.length}/${candles.length} → ${EMA_CACHE_FILE}`);
-  return bands;
 }
 
 function candleOutcome(candle) {

@@ -39,32 +39,28 @@ async function pollUntilFilledOrCycleEnd(entry) {
     `orderIds=${allIds.join(',')}`
   );
 
+  let registered = false;
+  let lastSpent = 0;
+
   while (Date.now() < cycleEndMs) {
     if (entry.abort) return;
 
     try {
-      let totalSpent = 0;
-      let lastFill = null;
-      let anyFill = false;
-      for (const id of allIds) {
-        const fill = await fetchFillFromOrder(client, id);
-        if (fill.usdcSpent > 0) {
-          anyFill = true;
-          totalSpent += fill.usdcSpent;
-          lastFill = fill;
+      const primaryFill = await fetchFillFromOrder(client, orderId);
+      if (primaryFill.usdcSpent > 0 || companionIds.length === 0) {
+        let spent = primaryFill.usdcSpent || 0;
+        let lastFill = primaryFill.usdcSpent > 0 ? primaryFill : null;
+        for (const id of companionIds) {
+          const f = await fetchFillFromOrder(client, id);
+          spent += f.usdcSpent || 0;
+          if (f.usdcSpent > 0) lastFill = f;
         }
-      }
-      if (anyFill && totalSpent > 0) {
-        // Wait until primary has fill, or no companions, before registering
-        const primaryFill = await fetchFillFromOrder(client, orderId);
-        if (primaryFill.usdcSpent > 0 || companionIds.length === 0) {
-          let spent = primaryFill.usdcSpent || 0;
-          for (const id of companionIds) {
-            const f = await fetchFillFromOrder(client, id);
-            spent += f.usdcSpent || 0;
-          }
+        if (spent > lastSpent + 1e-6) {
+          const isUpdate = registered;
+          lastSpent = spent;
           logger.info(
-            `[fillWatch] 已成交合计 $${spent.toFixed(2)} | orderIds=${allIds.join(',')}`
+            `[fillWatch] 成交合计 $${spent.toFixed(2)}${isUpdate ? ' (追加)' : ''} | ` +
+            `orderIds=${allIds.join(',')}`
           );
           if (onOrderFilled) {
             await onOrderFilled({
@@ -74,9 +70,10 @@ async function pollUntilFilledOrCycleEnd(entry) {
                 ...(lastFill || primaryFill),
                 usdcSpent: spent,
               },
+              isUpdate,
             });
           }
-          return;
+          registered = true;
         }
       }
     } catch (err) {
@@ -89,7 +86,13 @@ async function pollUntilFilledOrCycleEnd(entry) {
   }
 
   if (!entry.abort) {
-    logger.info(`[fillWatch] 周期结束前未成交，停止监视 orderId=${orderId}`);
+    if (registered) {
+      logger.info(
+        `[fillWatch] 周期内监视结束，最终成交 $${lastSpent.toFixed(2)} orderId=${orderId}`
+      );
+    } else {
+      logger.info(`[fillWatch] 周期结束前未成交，停止监视 orderId=${orderId}`);
+    }
   }
 }
 

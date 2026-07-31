@@ -50,7 +50,7 @@ import {
   clearOrderDedup,
   warnOrderPolicyMismatch,
 } from './trader/executor.js';
-import { fetchFillFromOrder, formatFillNote, formatPriceOddsLines, formatSettlementTradeLines } from './trader/fillSync.js';
+import { fetchCombinedFillFromOrders, formatFillNote, formatPriceOddsLines, formatSettlementTradeLines } from './trader/fillSync.js';
 import {
   initRestingFillWatcher,
   scheduleRestingFillWatch,
@@ -614,6 +614,9 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle', sources
     }
 
     const spent = orderResult.usdcSpent || 0;
+    const companionOrderIds = orderResult.companionOrderIds || (
+      orderResult.topUpOrderId ? [orderResult.topUpOrderId] : []
+    );
 
     if (spent > 0) {
       registerPendingBet({
@@ -623,9 +626,23 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle', sources
         orderId: orderResult.orderId,
         limitPrice: orderResult.limitPrice,
         fill: orderResult.fill,
+        companionOrderIds,
         sources,
         signalId: signalObj.signalId,
       });
+
+      const stillResting = orderResult.resting || orderResult.fill?.resting;
+      if (stillResting) {
+        scheduleRestingFillWatch({
+          orderId: orderResult.orderId,
+          cycleStartTs,
+          signal: signalObj.signal,
+          signalId: signalObj.signalId,
+          cycleEndMs,
+          limitPrice: orderResult.limitPrice,
+          companionOrderIds,
+        });
+      }
 
       const side = signalObj.signal === 'UP' ? '📈 买涨 UP' : '📉 买跌 DOWN';
       const fillNote = formatFillNote(orderResult.fill);
@@ -1228,6 +1245,7 @@ function registerPendingBet({
   limitPrice,
   entryPrice,
   fill,
+  companionOrderIds = [],
   sources = ['project'],
   signalId = null,
 }) {
@@ -1239,6 +1257,7 @@ function registerPendingBet({
     limitPrice,
     entryPrice: entryPrice ?? fill?.entryPrice ?? limitPrice ?? null,
     fill: fill ?? null,
+    companionOrderIds: companionOrderIds.filter(Boolean),
     sources,
     signalId,
   };
@@ -1263,29 +1282,74 @@ function registerPendingBet({
   });
 }
 
+function updatePendingBetFill({ actualBet, fill, companionOrderIds }) {
+  if (!pendingBet) return;
+  const prev = Number(pendingBet.actualBet) || 0;
+  const next = Number(actualBet) || 0;
+  if (next <= prev + 1e-6) return;
+
+  pendingBet.actualBet = next;
+  pendingBet.fill = fill ?? pendingBet.fill;
+  if (companionOrderIds?.length) {
+    pendingBet.companionOrderIds = companionOrderIds.filter(Boolean);
+  }
+  pendingBet.entryPrice = fill?.entryPrice ?? pendingBet.entryPrice;
+  savePending();
+  logger.info('[main] 待结算注单成交已更新', {
+    cycleStartTs: formatBeijingTime(pendingBet.cycleStartTs),
+    prevBet: prev,
+    actualBet: next,
+  });
+}
+
 async function confirmOrderFilled(pending) {
   if (config.dryRun) return true;
-  if (!pending?.orderId) return true;
-
-  // Order was already confirmed at placement / resting fill watch.
-  if (Number(pending.fill?.usdcSpent) > 0 || Number(pending.actualBet) > 0) {
-    return true;
-  }
+  if (!pending?.orderId) return Number(pending?.actualBet) > 0;
 
   try {
     const client = await getClobClient();
-    const fill = await fetchFillFromOrder(client, pending.orderId);
-    if (fill.usdcSpent > 0) return true;
+    const orderIds = [
+      pending.orderId,
+      ...(pending.companionOrderIds || []),
+    ].filter(Boolean);
+    const combined = await fetchCombinedFillFromOrders(client, orderIds);
+
+    if (combined.usdcSpent > 0) {
+      const prev = Number(pending.actualBet) || 0;
+      if (Math.abs(combined.usdcSpent - prev) > 1e-6) {
+        logger.info('[settle] 结算前刷新成交合计', {
+          orderIds,
+          prevBet: prev,
+          refreshedBet: combined.usdcSpent,
+        });
+      }
+      pending.actualBet = combined.usdcSpent;
+      pending.fill = combined;
+      pending.entryPrice = combined.entryPrice ?? pending.entryPrice ?? pending.limitPrice ?? null;
+      savePending();
+      return true;
+    }
+
+    if (Number(pending.actualBet) > 0) {
+      logger.warn('[settle] getOrder 无成交记录 — 沿用 pending actualBet', {
+        orderId: pending.orderId,
+        actualBet: pending.actualBet,
+      });
+      return true;
+    }
 
     logger.warn('[settle] 结算时订单未成交 — 作废待结算注单', {
       orderId: pending.orderId,
-      status: fill.status,
     });
     unmarkCycleOrdered(pending.cycleStartTs);
     pendingBet = null;
     savePending();
     return false;
   } catch (err) {
+    if (Number(pending.actualBet) > 0) {
+      logger.warn('[settle] 成交刷新失败 — 沿用 pending actualBet', { error: err?.message });
+      return true;
+    }
     logger.warn('[settle] 成交确认失败', { error: err?.message });
     return false;
   }
@@ -1347,7 +1411,7 @@ async function applySettlement(pending, { candles } = {}) {
     : settleSourceLabel();
   const price = entryPrice ?? limitPrice ?? null;
 
-  const pnlUsd = stats.computeSettlementPnl(won, actualBet, price);
+  const { pnlUsd, feeUsd } = stats.computeSettlementDetail(won, actualBet, price);
 
   const sources = pending.sources || ['project'];
   const hadProject = sources.includes('project');
@@ -1380,7 +1444,7 @@ async function applySettlement(pending, { candles } = {}) {
     buttonSequence.onSettled(won, pnlUsd);
   }
 
-  if (!won) recordLoss(actualBet);
+  if (!won) recordLoss(-pnlUsd);
   stats.recordSettlement({ won, pnlUsd });
   if (halted) stats.recordStopLoss();
 
@@ -1393,6 +1457,7 @@ async function applySettlement(pending, { candles } = {}) {
     won,
     settleDelta,
     pnlUsd,
+    feeUsd,
     actualBet,
     martingaleHalted: halted,
     chainPnlUsd,
@@ -1412,6 +1477,8 @@ async function applySettlement(pending, { candles } = {}) {
     actualBet,
     entryPrice: price,
     pnlUsd,
+    feeUsd,
+    feeIncluded: true,
     won,
     winningOutcome,
     targetPrice,
@@ -1507,6 +1574,7 @@ async function applySettlement(pending, { candles } = {}) {
         entryPrice: price,
         actualBet,
         pnlUsd,
+        feeUsd,
         formatPnl: stats.formatPnlUsd,
       }) +
       `本链路盈亏: <b>${stats.formatPnlUsd(chainPnlUsd)}</b>\n` +
@@ -1658,10 +1726,26 @@ async function scheduler() {
   });
 
   initRestingFillWatcher(async (ctx) => {
+    const companionOrderIds = ctx.companionOrderIds || (
+      ctx.topUpOrderId ? [ctx.topUpOrderId] : []
+    );
+    const sameCycle = pendingBet?.cycleStartTs === ctx.cycleStartTs;
+    const sameOrder = pendingBet?.orderId === ctx.orderId;
+
+    if (ctx.isUpdate || (sameCycle && sameOrder)) {
+      updatePendingBetFill({
+        actualBet: ctx.actualBet,
+        fill: ctx.fill,
+        companionOrderIds,
+      });
+      return;
+    }
+
     if (pendingBet) {
       logger.debug('[fillWatch] 已有待结算注单，跳过重复登记');
       return;
     }
+
     registerPendingBet({
       cycleStartTs: ctx.cycleStartTs,
       signal: ctx.signal,
@@ -1669,6 +1753,7 @@ async function scheduler() {
       orderId: ctx.orderId,
       limitPrice: ctx.limitPrice,
       fill: ctx.fill,
+      companionOrderIds,
     });
 
     const side = ctx.signal === 'UP' ? '📈 买涨 UP' : '📉 买跌 DOWN';

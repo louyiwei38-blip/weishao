@@ -3,6 +3,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { beijingDateKey } from '../utils/datetime.js';
 import { calcWinNetProfit } from '../trader/fillSync.js';
+import { computeNetSettlementPnl } from '../trader/polymarketFees.js';
 import logger from '../utils/logger.js';
 import { scopedLogPath } from '../utils/instancePaths.js';
 
@@ -81,8 +82,10 @@ function readSettlementEntries() {
 }
 
 function resolveEntryPnl(entry) {
-  const pnl = Number(entry.pnlUsd);
-  if (Number.isFinite(pnl)) return pnl;
+  if (entry.feeIncluded === true) {
+    const pnl = Number(entry.pnlUsd);
+    if (Number.isFinite(pnl)) return pnl;
+  }
 
   const won = Boolean(entry.won);
   const stake = Number(entry.actualBet) || 0;
@@ -150,16 +153,30 @@ export function init() {
 }
 
 export function computeSettlementPnl(won, stakeUsd, entryPrice) {
+  return computeSettlementDetail(won, stakeUsd, entryPrice).pnlUsd;
+}
+
+export function computeSettlementDetail(won, stakeUsd, entryPrice) {
   const stake = Number(stakeUsd);
-  if (!Number.isFinite(stake) || stake <= 0) return 0;
-  if (!won) return -stake;
+  if (!Number.isFinite(stake) || stake <= 0) {
+    return { pnlUsd: 0, feeUsd: 0, totalCost: 0 };
+  }
 
   const price = Number(entryPrice);
-  const profit = calcWinNetProfit(stake, price);
-  if (profit != null) return profit;
+  if (Number.isFinite(price) && price > 0 && price < 1) {
+    return computeNetSettlementPnl(won, stake, price);
+  }
 
-  const fallback = calcWinNetProfit(stake, 0.5);
-  return fallback != null ? fallback : stake;
+  const net = computeNetSettlementPnl(won, stake, 0.5);
+  if (!won) return net;
+
+  const gross = calcWinNetProfit(stake, 0.5);
+  if (gross == null) return net;
+  return {
+    pnlUsd: gross - net.feeUsd,
+    feeUsd: net.feeUsd,
+    totalCost: stake + net.feeUsd,
+  };
 }
 
 function winRatePct(wins, losses) {
@@ -243,7 +260,7 @@ export function formatTelegramBlock() {
   return (
     `\n──────────\n` +
     `📊 <b>统计</b> (${s.beijingDate || '—'} 北京)\n` +
-    `盈亏: 累计 <b>${formatPnlUsd(s.total.pnlUsd)}</b> | 今日 <b>${formatPnlUsd(s.today.pnlUsd)}</b>\n` +
+    `盈亏: 累计 <b>${formatPnlUsd(s.total.pnlUsd)}</b> | 今日 <b>${formatPnlUsd(s.today.pnlUsd)}</b> (含手续费)\n` +
     `胜率: 累计 <b>${s.totalWinRate.toFixed(1)}%</b> (${s.total.wins}胜/${s.total.losses}输)\n` +
     `     今日 <b>${s.todayWinRate.toFixed(1)}%</b> (${s.today.wins}胜/${s.today.losses}输)\n` +
     `止损: 今日 <b>${s.today.stopLosses}</b> | 总计 <b>${s.total.stopLosses}</b>`
