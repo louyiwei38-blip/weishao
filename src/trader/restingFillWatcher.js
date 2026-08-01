@@ -1,5 +1,5 @@
 /**
- * GTC resting orders: after short fillSync, keep polling getOrder until cycle end.
+ * GTC resting orders: after short fillSync, keep polling getOrder until cycle end + grace.
  * On fill → callback to open pending bet + schedule settlement.
  */
 
@@ -16,17 +16,24 @@ const active = new Map();
 /** @type {(ctx: object) => Promise<void>|void} */
 let onOrderFilled = null;
 
+/** Extra watch after cycle end so late GTC fills still register pending + settle. */
+function watchGraceMs() {
+  const buffer = Number(config.chainlink?.settleBufferMs) || 1500;
+  return buffer + 90_000;
+}
+
 export function initRestingFillWatcher(handler) {
   onOrderFilled = handler;
 }
 
 async function pollUntilFilledOrCycleEnd(entry) {
-  const { orderId, cycleEndMs, ctx } = entry;
+  const { orderId, cycleEndMs, watchUntilMs, ctx } = entry;
   const pollMs = config.fillSyncPollMs;
   const companionIds = Array.isArray(ctx.companionOrderIds)
     ? ctx.companionOrderIds.filter(Boolean)
     : (ctx.topUpOrderId ? [ctx.topUpOrderId] : []);
   const allIds = [orderId, ...companionIds].filter(Boolean);
+  const deadline = Number.isFinite(watchUntilMs) ? watchUntilMs : cycleEndMs;
 
   const client = await getClobClient();
   if (!clobHasL2Creds(client)) {
@@ -35,14 +42,14 @@ async function pollUntilFilledOrCycleEnd(entry) {
   }
 
   logger.info(
-    `[fillWatch] 监视挂单至 ${formatBeijingTime(cycleEndMs)} ` +
-    `orderIds=${allIds.join(',')}`
+    `[fillWatch] 监视挂单至 ${formatBeijingTime(deadline)} ` +
+    `(周期结束 ${formatBeijingTime(cycleEndMs)}) orderIds=${allIds.join(',')}`
   );
 
   let registered = false;
   let lastSpent = 0;
 
-  while (Date.now() < cycleEndMs) {
+  while (Date.now() < deadline) {
     if (entry.abort) return;
 
     try {
@@ -59,7 +66,8 @@ async function pollUntilFilledOrCycleEnd(entry) {
           const isUpdate = registered;
           lastSpent = spent;
           logger.info(
-            `[fillWatch] 成交合计 $${spent.toFixed(2)}${isUpdate ? ' (追加)' : ''} | ` +
+            `[fillWatch] 成交合计 $${spent.toFixed(2)}${isUpdate ? ' (追加)' : ''}` +
+            `${Date.now() > cycleEndMs ? ' (周期后)' : ''} | ` +
             `orderIds=${allIds.join(',')}`
           );
           if (onOrderFilled) {
@@ -80,7 +88,7 @@ async function pollUntilFilledOrCycleEnd(entry) {
       logger.warn(`[fillWatch] getOrder 失败: ${err?.message}`);
     }
 
-    const remaining = cycleEndMs - Date.now();
+    const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     await sleep(Math.min(pollMs, remaining));
   }
@@ -88,10 +96,10 @@ async function pollUntilFilledOrCycleEnd(entry) {
   if (!entry.abort) {
     if (registered) {
       logger.info(
-        `[fillWatch] 周期内监视结束，最终成交 $${lastSpent.toFixed(2)} orderId=${orderId}`
+        `[fillWatch] 监视结束，最终成交 $${lastSpent.toFixed(2)} orderId=${orderId}`
       );
     } else {
-      logger.info(`[fillWatch] 周期结束前未成交，停止监视 orderId=${orderId}`);
+      logger.info(`[fillWatch] 监视窗口结束仍未成交，停止监视 orderId=${orderId}`);
     }
   }
 }
@@ -104,14 +112,20 @@ export function scheduleRestingFillWatch(ctx) {
   const { orderId, cycleEndMs } = ctx;
   if (!orderId || config.dryRun) return;
 
-  if (!Number.isFinite(cycleEndMs) || cycleEndMs <= Date.now()) {
-    logger.debug('[fillWatch] 周期已结束，跳过监视');
+  if (!Number.isFinite(cycleEndMs)) {
+    logger.debug('[fillWatch] 无效 cycleEndMs，跳过监视');
+    return;
+  }
+
+  const watchUntilMs = cycleEndMs + watchGraceMs();
+  if (watchUntilMs <= Date.now()) {
+    logger.debug('[fillWatch] 监视窗口已过，跳过');
     return;
   }
 
   stopRestingFillWatch(orderId);
 
-  const entry = { orderId, cycleEndMs, ctx, abort: false };
+  const entry = { orderId, cycleEndMs, watchUntilMs, ctx, abort: false };
   active.set(orderId, entry);
 
   pollUntilFilledOrCycleEnd(entry)

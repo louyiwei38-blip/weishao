@@ -4,7 +4,6 @@ import { fileURLToPath } from 'url';
 import config from '../config.js';
 import logger from '../utils/logger.js';
 import { scopedLogPath } from '../utils/instancePaths.js';
-import * as stats from '../stats/manager.js';
 import * as bankroll from './bankroll.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -77,7 +76,7 @@ function round2(n) {
 
 /**
  * Equity for gap / catch-up sizing.
- * Stats mode: P + cumulative stats P&L (fee-adjusted, local ledger).
+ * Stats mode: P + wallet-shared realizedPnlUsd (all instances write into bankroll-state).
  * Legacy mode: live Polymarket Portfolio (Cash + positions).
  * @param {number|null|undefined} portfolioBalance Fallback when P not locked or stats mode off
  */
@@ -94,8 +93,9 @@ export function resolveSizingEquity(portfolioBalance = null) {
     return Number.isFinite(fb) ? fb : null;
   }
 
-  const snap = stats.getSnapshot();
-  return round2(P + (Number(snap.total.pnlUsd) || 0));
+  // Prefer shared wallet ledger — per-instance stats would collapse catch-up queues across TFs
+  if (br.ledgerEquity != null) return br.ledgerEquity;
+  return round2(P + (Number(br.realizedPnlUsd) || 0));
 }
 
 /**
@@ -152,8 +152,8 @@ export function prepareOrder(portfolioBalance, entryPrice = null, cashBalance = 
     shares: sizing.shares,
     consecutiveLosses: s.consecutiveLosses,
     bankroll: bankroll.getState(),
-    statsPnlUsd: config.bankrollUseStatsEquity
-      ? stats.getSnapshot().total.pnlUsd
+    walletRealizedPnlUsd: config.bankrollUseStatsEquity
+      ? bankroll.getState().realizedPnlUsd
       : undefined,
   });
 
@@ -174,7 +174,7 @@ export function onSettled(won, pnlUsd = 0, equityBalance = null) {
   const chainPnlUsd = s.chainPnlUsd;
 
   /** Always update N + catch-up queue; max-loss halt does NOT reset P/N. */
-  const br = bankroll.onSettled(won, equityBalance);
+  const br = bankroll.onSettled(won, equityBalance, pnlUsd);
 
   if (won) {
     resetToBaseBet();

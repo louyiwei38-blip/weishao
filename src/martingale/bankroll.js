@@ -3,17 +3,19 @@
  *
  * P = principal, locked from Portfolio on first use (never re-locked on max-loss halt)
  * N = net wins−losses; +1 win / −1 loss on confirmed settlement (kept across max-loss halt)
+ * realizedPnlUsd = wallet-wide cumulative settle PnL (shared across instances)
  * target = P + N × step
  * gap = max(0, target − equity)
- *   equity = Portfolio (legacy) OR P + stats.total.pnlUsd (BANKROLL_USE_STATS_EQUITY=true)
+ *   equity = Portfolio (legacy) OR P + realizedPnlUsd (BANKROLL_USE_STATS_EQUITY=true)
  *
  * Catch-up queue (补1, 补2, …):
  *   - No gap & empty queue → stake = defaultBet (TRADE_BUDGET_USD)
  *   - Else play front layer L; win profit T = L + step; stake = T × p/(1−p)
  *   - Loss: keep playing same layer; append 补N = gap − Σ(uncleared)
  *   - Win on layer: clear that layer; advance to next; empty+gap→ new 补1; empty+no gap→ default
+ *   - Sync never merges layers into a single 补1 — only shrink front / trim tail
  */
-import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, closeSync, unlinkSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, closeSync, unlinkSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import config from '../config.js';
@@ -29,15 +31,27 @@ const GAP_EPS = 0.01;
 
 /**
  * @typedef {{ id: number, usd: number }} CatchUpLayer
- * @type {{ principal: number|null, netCount: number, catchUpQueue: CatchUpLayer[], nextLayerId: number, updatedAt: string|null }}
+ * @type {{ principal: number|null, netCount: number, realizedPnlUsd: number, catchUpQueue: CatchUpLayer[], nextLayerId: number, updatedAt: string|null }}
  */
 let cache = {
   principal: null,
   netCount: 0,
+  realizedPnlUsd: 0,
   catchUpQueue: [],
   nextLayerId: 1,
   updatedAt: null,
 };
+
+function emptyState() {
+  return {
+    principal: null,
+    netCount: 0,
+    realizedPnlUsd: 0,
+    catchUpQueue: [],
+    nextLayerId: 1,
+    updatedAt: null,
+  };
+}
 
 function sleepSync(ms) {
   const end = Date.now() + ms;
@@ -78,6 +92,27 @@ function round2(n) {
   return Math.round(Number(n) * 100) / 100;
 }
 
+/** Sum total.pnlUsd from all per-instance stats-state*.json (bootstrap shared ledger). */
+function sumStatsPnlFromDisk() {
+  if (!existsSync(LOGS_DIR)) return 0;
+  let total = 0;
+  try {
+    for (const name of readdirSync(LOGS_DIR)) {
+      if (!/^stats-state(-[\w.-]+)?\.json$/i.test(name)) continue;
+      try {
+        const raw = JSON.parse(readFileSync(join(LOGS_DIR, name), 'utf8'));
+        const pnl = Number(raw?.total?.pnlUsd);
+        if (Number.isFinite(pnl)) total += pnl;
+      } catch {
+        /* skip */
+      }
+    }
+  } catch {
+    return 0;
+  }
+  return round2(total);
+}
+
 /** @returns {CatchUpLayer[]} */
 function normalizeQueue(raw) {
   if (!Array.isArray(raw)) return [];
@@ -107,22 +142,26 @@ function nextIdFromQueue(queue, hint) {
 }
 
 function readDisk() {
-  if (!existsSync(STATE_FILE)) {
-    return { principal: null, netCount: 0, catchUpQueue: [], nextLayerId: 1, updatedAt: null };
-  }
+  if (!existsSync(STATE_FILE)) return emptyState();
   try {
     const raw = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
     const catchUpQueue = normalizeQueue(raw.catchUpQueue);
+    let realizedPnlUsd = Number(raw.realizedPnlUsd);
+    if (!Number.isFinite(realizedPnlUsd)) {
+      // Migrate: wallet ledger missing → sum all instance stats so multi-TF gap stays consistent
+      realizedPnlUsd = sumStatsPnlFromDisk();
+    }
     return {
       principal: Number.isFinite(Number(raw.principal)) ? Number(raw.principal) : null,
       netCount: Number.isFinite(Number(raw.netCount)) ? Math.trunc(Number(raw.netCount)) : 0,
+      realizedPnlUsd: round2(realizedPnlUsd),
       catchUpQueue,
       nextLayerId: nextIdFromQueue(catchUpQueue, raw.nextLayerId),
       updatedAt: raw.updatedAt ?? null,
     };
   } catch {
     logger.warn('[bankroll] state parse failed, reset');
-    return { principal: null, netCount: 0, catchUpQueue: [], nextLayerId: 1, updatedAt: null };
+    return emptyState();
   }
 }
 
@@ -132,6 +171,7 @@ function writeDisk(state) {
   const payload = {
     principal: state.principal,
     netCount: state.netCount,
+    realizedPnlUsd: round2(Number(state.realizedPnlUsd) || 0),
     catchUpQueue,
     nextLayerId: nextIdFromQueue(catchUpQueue, state.nextLayerId),
     updatedAt: new Date().toISOString(),
@@ -170,6 +210,20 @@ function gapOf(P, N, balance) {
 export function init() {
   withLock(() => {
     reload();
+    // Persist migrated ledger so every instance shares the same realizedPnlUsd
+    if (existsSync(STATE_FILE)) {
+      try {
+        const raw = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
+        if (!Number.isFinite(Number(raw.realizedPnlUsd))) {
+          writeDisk(cache);
+          logger.info('[bankroll] migrated realizedPnlUsd from stats-state*', {
+            realizedPnlUsd: cache.realizedPnlUsd,
+          });
+        }
+      } catch {
+        /* ignore */
+      }
+    }
     logger.info('[bankroll] loaded', { ...cache, file: STATE_FILE });
   });
 }
@@ -201,26 +255,29 @@ export function getState() {
   const step = config.bankroll.stepUsd;
   const P = cache.principal;
   const N = cache.netCount;
+  const realizedPnlUsd = round2(Number(cache.realizedPnlUsd) || 0);
   const queue = normalizeQueue(cache.catchUpQueue);
   const front = queue[0] ?? null;
   return {
     principal: P,
     netCount: N,
+    realizedPnlUsd,
     catchUpQueue: queue,
     catchUpLayerUsd: front?.usd ?? null,
     catchUpLayerIndex: front?.id ?? null,
     stepUsd: step,
     targetBalance: P == null ? null : P + N * step,
+    ledgerEquity: P == null ? null : round2(P + realizedPnlUsd),
     updatedAt: cache.updatedAt,
   };
 }
 
 /**
- * Sync queue with live gap before sizing:
- * - gap≈0 → clear queue (debt already gone)
- * - gap>0 & empty queue → open 补1 = gap
- * - gap>0 & queue claims more than live gap → rebuild 补1 = gap
- *   (Portfolio may recover while a stale layer remains; never oversize vs live gap)
+ * Align queue to live gap without destroying layer structure:
+ * - gap≈0 → clear queue
+ * - gap>0 & empty → open next 补N = gap
+ * - front > gap → shrink front amount only (keep 补N id)
+ * - sum > gap → trim from tail (never merge all into 补1)
  * @param {number} balance
  */
 function syncCatchUpQueue(balance) {
@@ -230,31 +287,37 @@ function syncCatchUpQueue(balance) {
     let queue = normalizeQueue(cache.catchUpQueue);
     let nextLayerId = nextIdFromQueue(queue, cache.nextLayerId);
     let changed = false;
-    let reason = null;
+    const reasons = [];
 
     if (gap < GAP_EPS) {
       if (queue.length) {
         queue = [];
         nextLayerId = 1;
         changed = true;
-        reason = 'gap_cleared';
+        reasons.push('gap_cleared');
       }
     } else if (queue.length === 0) {
-      const made = makeLayer(gap, 1);
+      const made = makeLayer(gap, nextLayerId);
       queue = [made.layer];
       nextLayerId = made.nextLayerId;
       changed = true;
-      reason = 'open_补1';
+      reasons.push('open_补');
     } else {
-      const sum = queueSum(queue);
-      const front = queue[0].usd;
-      // Stale layers (e.g. 补1=$20 while live gap=$0.15) must not drive sizing
-      if (sum - gap > GAP_EPS || front - gap > GAP_EPS) {
-        const made = makeLayer(gap, 1);
-        queue = [made.layer];
-        nextLayerId = made.nextLayerId;
+      if (queue[0].usd - gap > GAP_EPS) {
+        queue = [{ ...queue[0], usd: round2(gap) }, ...queue.slice(1)];
         changed = true;
-        reason = 'shrink_to_live_gap';
+        reasons.push('shrink_front');
+      }
+      while (queue.length > 1 && queueSum(queue) - gap > GAP_EPS) {
+        queue = queue.slice(0, -1);
+        changed = true;
+        reasons.push('trim_tail');
+      }
+      // Single remaining layer still larger than gap → shrink only
+      if (queue.length === 1 && queue[0].usd - gap > GAP_EPS) {
+        queue = [{ ...queue[0], usd: round2(gap) }];
+        changed = true;
+        reasons.push('shrink_front');
       }
     }
 
@@ -263,15 +326,39 @@ function syncCatchUpQueue(balance) {
       cache.nextLayerId = nextLayerId;
       writeDisk(cache);
       logger.info('[bankroll] catch-up queue synced', {
-        reason,
+        reason: reasons.join('+'),
         gapUsd: gap,
         catchUpQueue: queue,
         netCount: cache.netCount,
         principal: cache.principal,
+        realizedPnlUsd: cache.realizedPnlUsd,
       });
     }
     return getState();
   });
+}
+
+/** After settle: keep layer ids, shrink/trim if sum exceeds new gap. */
+function reconcileQueueToGap(queue, gap, nextLayerId) {
+  let q = normalizeQueue(queue);
+  let nextId = nextIdFromQueue(q, nextLayerId);
+  if (gap < GAP_EPS) {
+    return { queue: [], nextLayerId: 1 };
+  }
+  if (q.length === 0) {
+    const made = makeLayer(gap, nextId);
+    return { queue: [made.layer], nextLayerId: made.nextLayerId };
+  }
+  if (q[0].usd - gap > GAP_EPS) {
+    q = [{ ...q[0], usd: round2(gap) }, ...q.slice(1)];
+  }
+  while (q.length > 1 && queueSum(q) - gap > GAP_EPS) {
+    q = q.slice(0, -1);
+  }
+  if (q.length === 1 && q[0].usd - gap > GAP_EPS) {
+    q = [{ ...q[0], usd: round2(gap) }];
+  }
+  return { queue: q, nextLayerId: nextIdFromQueue(q, nextId) };
 }
 
 /**
@@ -479,42 +566,48 @@ export function computeCatchUpTopUp({
 }
 
 /**
- * Apply settlement to N and the catch-up queue.
+ * Apply settlement to N, shared ledger PnL, and the catch-up queue.
  * @param {boolean} won
- * @param {number|null|undefined} [equityBalance] Portfolio after settlement
+ * @param {number|null|undefined} [equityBalance] Fallback equity (Portfolio / caller)
+ * @param {number|null|undefined} [pnlUsd] This settle's fee-adjusted PnL — updates shared ledger
  */
-export function onSettled(won, equityBalance = null) {
+export function onSettled(won, equityBalance = null, pnlUsd = null) {
   return withLock(() => {
     reload();
+    if (Number.isFinite(Number(pnlUsd))) {
+      cache.realizedPnlUsd = round2((Number(cache.realizedPnlUsd) || 0) + Number(pnlUsd));
+    }
     cache.netCount += won ? 1 : -1;
 
     let queue = normalizeQueue(cache.catchUpQueue);
     let nextLayerId = nextIdFromQueue(queue, cache.nextLayerId);
-    const balOk = Number.isFinite(Number(equityBalance));
+
+    // Prefer wallet-shared ledger equity so multi-instance gap stays consistent
+    let equity = Number(equityBalance);
+    if (config.bankrollUseStatsEquity && cache.principal != null) {
+      equity = round2(cache.principal + (Number(cache.realizedPnlUsd) || 0));
+    }
+    const balOk = Number.isFinite(equity);
     let gap = null;
 
     if (!balOk) {
-      logger.warn('[bankroll] settled without Portfolio — N updated, catch-up queue unchanged', {
+      logger.warn('[bankroll] settled without equity — N/PnL updated, catch-up queue unchanged', {
         won,
         netCount: cache.netCount,
+        realizedPnlUsd: cache.realizedPnlUsd,
         catchUpQueue: queue,
       });
     } else {
-      gap = gapOf(cache.principal, cache.netCount, equityBalance);
+      gap = gapOf(cache.principal, cache.netCount, equity);
 
       if (won) {
         if (queue.length > 0) queue = queue.slice(1);
-        if (gap < GAP_EPS) {
-          queue = [];
-          nextLayerId = 1;
-        } else if (queue.length === 0) {
-          const made = makeLayer(gap, 1);
-          queue = [made.layer];
-          nextLayerId = made.nextLayerId;
-        }
+        const reconciled = reconcileQueueToGap(queue, gap, nextLayerId);
+        queue = reconciled.queue;
+        nextLayerId = reconciled.nextLayerId;
       } else if (queue.length === 0) {
         if (gap >= GAP_EPS) {
-          const made = makeLayer(gap, 1);
+          const made = makeLayer(gap, nextLayerId);
           queue = [made.layer];
           nextLayerId = made.nextLayerId;
         }
@@ -524,6 +617,11 @@ export function onSettled(won, equityBalance = null) {
           const made = makeLayer(next, nextLayerId);
           queue = [...queue, made.layer];
           nextLayerId = made.nextLayerId;
+        } else if (gap >= GAP_EPS) {
+          // gap shrank vs queue (fees / multi-instance) — shrink/trim, keep layers
+          const reconciled = reconcileQueueToGap(queue, gap, nextLayerId);
+          queue = reconciled.queue;
+          nextLayerId = reconciled.nextLayerId;
         }
       }
     }
@@ -537,14 +635,17 @@ export function onSettled(won, equityBalance = null) {
       won,
       netCount: cache.netCount,
       principal: cache.principal,
+      realizedPnlUsd: cache.realizedPnlUsd,
       target,
       gapUsd: gap,
-      equityBalance: balOk ? Number(equityBalance) : null,
+      equityBalance: balOk ? equity : null,
+      pnlUsd: Number.isFinite(Number(pnlUsd)) ? Number(pnlUsd) : null,
       catchUpQueue: queue,
     });
     return {
       netCount: cache.netCount,
       principal: cache.principal,
+      realizedPnlUsd: cache.realizedPnlUsd,
       catchUpQueue: queue,
       gapUsd: gap,
       targetBalance: target,
@@ -553,7 +654,7 @@ export function onSettled(won, equityBalance = null) {
 }
 
 /**
- * Reset principal to live Portfolio and net count to 0; clear catch-up queue.
+ * Reset principal to live Portfolio and net count to 0; clear catch-up queue + ledger PnL.
  * @param {number} portfolioBalance
  */
 export function resetPrincipalAndNet(portfolioBalance) {
@@ -565,10 +666,11 @@ export function resetPrincipalAndNet(portfolioBalance) {
     reload();
     cache.principal = Math.round(bal * 1e6) / 1e6;
     cache.netCount = 0;
+    cache.realizedPnlUsd = 0;
     cache.catchUpQueue = [];
     cache.nextLayerId = 1;
     writeDisk(cache);
-    logger.info('[bankroll] manual reset P/N + cleared catch-up queue', {
+    logger.info('[bankroll] manual reset P/N + cleared catch-up queue + ledger PnL', {
       principal: cache.principal,
       netCount: cache.netCount,
       portfolioBalance: bal,

@@ -1292,12 +1292,30 @@ async function confirmOrderFilled(pending) {
       return true;
     }
 
+    const snapshot = {
+      cycleStartTs: pending.cycleStartTs,
+      signal: pending.signal,
+      orderId: pending.orderId,
+      actualBet: pending.actualBet,
+    };
     logger.warn('[settle] 结算时订单未成交 — 作废待结算注单', {
       orderId: pending.orderId,
     });
     unmarkCycleOrdered(pending.cycleStartTs);
     pendingBet = null;
     savePending();
+    trackWork((async () => {
+      await notifyTelegram(
+        `${tgHead('⚠️ <b>结算跳过</b>（订单未成交，已作废）')}\n` +
+        `窗口: ${formatBeijingTime(snapshot.cycleStartTs)}\n` +
+        `方向: ${snapshot.signal === 'UP' ? '📈 UP' : '📉 DOWN'}\n` +
+        `orderId: <code>${escapeHtml(String(snapshot.orderId || '—'))}</code>\n` +
+        `周期: ${config.timeframe}\n` +
+        formatStatsTelegramBlock(),
+      );
+    })().catch((err) => {
+      logger.warn('[settle] 作废通知 Telegram 失败', { error: err?.message });
+    }));
     return false;
   } catch (err) {
     if (Number(pending.actualBet) > 0) {
@@ -1397,7 +1415,7 @@ async function applySettlement(pending, { candles } = {}) {
     chainPnlUsd = mgResult.chainPnlUsd;
     vegasState.onSettled(won, halted);
   } else {
-    martingale.bankroll.onSettled(won, settleEquity);
+    martingale.bankroll.onSettled(won, settleEquity, pnlUsd);
   }
 
   if (hadButton) {
@@ -1454,7 +1472,61 @@ async function applySettlement(pending, { candles } = {}) {
 
   const mg = martingale.getState();
 
-  // Settlement-driven fast path FIRST — do not wait on Telegram/balance before re-entry.
+  const resultEmoji = won ? '✅' : '❌';
+  const resultText = won ? '赢' : '输';
+  const mismatchNote = cross?.mismatch
+    ? `\n⚠️ 交易所 K 线: ${escapeHtml(cross.exchangeDirection)} ≠ Chainlink ${escapeHtml(cross.chainlinkOutcome)}`
+    : '';
+
+  const brAfter = mg.bankroll;
+  const haltNote = halted
+    ? `\n⚠️ <b>马丁连亏止损</b> — 等待通道外实体后再检测；连败计数已清零` +
+      `\n本金/净胜负保持` +
+      (brAfter?.principal != null ? ` P=$${Number(brAfter.principal).toFixed(2)}` : '') +
+      (brAfter?.netCount != null ? ` · N=${brAfter.netCount}` : '')
+    : won
+      ? `\n⏹ <b>链路结束</b> — 等待通道外实体后再检测`
+      : '';
+
+  const priceLine = usesChainlinkSettlement()
+    ? `目标价: $${targetPrice.toFixed(2)} → 收盘价: $${closePrice.toFixed(2)}\n`
+    : `开盘: $${targetPrice.toFixed(2)} → 收盘: $${closePrice.toFixed(2)}\n`;
+
+  const statsEquity = config.bankrollUseStatsEquity
+    ? martingale.resolveSizingEquity()
+    : null;
+
+  // Fire settle TG before MG_CONT so notify isn't starved by open-order bursts / 429.
+  trackWork((async () => {
+    const balanceLine = await formatBalanceTelegramLine();
+    await notifyTelegram(
+      `${tgHead(`${resultEmoji} <b>结算${resultText}</b> (${sourceLabel})`)}\n` +
+      `窗口: ${windowLabel}\n` +
+      `周期: ${config.timeframe}\n` +
+      `方向: ${side}\n` +
+      formatSettlementTradeLines({
+        entryPrice: price,
+        actualBet,
+        pnlUsd,
+        feeUsd,
+        formatPnl: stats.formatPnlUsd,
+      }) +
+      `本链路盈亏: <b>${stats.formatPnlUsd(chainPnlUsd)}</b>\n` +
+      priceLine +
+      `结果: <b>${winningOutcome}</b> (Δ ${settleDelta >= 0 ? '+' : ''}${settleDelta.toFixed(2)})\n` +
+      mismatchNote + haltNote +
+      `连败: ${mg.consecutiveLosses} · 默认首注 $${config.tradeBudgetUsd}\n` +
+      formatBankrollTelegramLines(null, { statsEquity }) +
+      buttonSequence.formatTelegramLines() +
+      `今日亏损: $${getDailyLossUsd().toFixed(2)} / $${config.maxDailyLossUsd}\n` +
+      balanceLine +
+      formatStatsTelegramBlock()
+    );
+  })().catch((err) => {
+    logger.warn('[main] 结算 Telegram 推送失败', { error: err?.message });
+  }));
+
+  // Fast path after settle TG is queued (do not await Telegram).
   const nextCycle = nextCycleStartTs(cycleStartTs, CYCLE_MS);
 
   if (shouldMgContFastPath({
@@ -1500,56 +1572,6 @@ async function applySettlement(pending, { candles } = {}) {
       });
     }
   }
-
-  const resultEmoji = won ? '✅' : '❌';
-  const resultText = won ? '赢' : '输';
-  const mismatchNote = cross?.mismatch
-    ? `\n⚠️ 交易所 K 线: ${escapeHtml(cross.exchangeDirection)} ≠ Chainlink ${escapeHtml(cross.chainlinkOutcome)}`
-    : '';
-
-  const brAfter = mg.bankroll;
-  const haltNote = halted
-    ? `\n⚠️ <b>马丁连亏止损</b> — 等待通道外实体后再检测；连败计数已清零` +
-      `\n本金/净胜负保持` +
-      (brAfter?.principal != null ? ` P=$${Number(brAfter.principal).toFixed(2)}` : '') +
-      (brAfter?.netCount != null ? ` · N=${brAfter.netCount}` : '')
-    : won
-      ? `\n⏹ <b>链路结束</b> — 等待通道外实体后再检测`
-      : '';
-
-  const priceLine = usesChainlinkSettlement()
-    ? `目标价: $${targetPrice.toFixed(2)} → 收盘价: $${closePrice.toFixed(2)}\n`
-    : `开盘: $${targetPrice.toFixed(2)} → 收盘: $${closePrice.toFixed(2)}\n`;
-
-  // Telegram after MG_CONT so settle→order latency is not inflated by TG retries.
-  trackWork((async () => {
-    const balanceLine = await formatBalanceTelegramLine();
-    await notifyTelegram(
-      `${tgHead(`${resultEmoji} <b>结算${resultText}</b> (${sourceLabel})`)}\n` +
-      `窗口: ${windowLabel}\n` +
-      `周期: ${config.timeframe}\n` +
-      `方向: ${side}\n` +
-      formatSettlementTradeLines({
-        entryPrice: price,
-        actualBet,
-        pnlUsd,
-        feeUsd,
-        formatPnl: stats.formatPnlUsd,
-      }) +
-      `本链路盈亏: <b>${stats.formatPnlUsd(chainPnlUsd)}</b>\n` +
-      priceLine +
-      `结果: <b>${winningOutcome}</b> (Δ ${settleDelta >= 0 ? '+' : ''}${settleDelta.toFixed(2)})\n` +
-      mismatchNote + haltNote +
-      `连败: ${mg.consecutiveLosses} · 默认首注 $${config.tradeBudgetUsd}\n` +
-      formatBankrollTelegramLines() +
-      buttonSequence.formatTelegramLines() +
-      `今日亏损: $${getDailyLossUsd().toFixed(2)} / $${config.maxDailyLossUsd}\n` +
-      balanceLine +
-      formatStatsTelegramBlock()
-    );
-  })().catch((err) => {
-    logger.warn('[main] 结算 Telegram 推送失败', { error: err?.message });
-  }));
 
   return true;
 }
