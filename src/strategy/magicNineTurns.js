@@ -1,33 +1,89 @@
 /**
  * TD Sequential "Magic Nine Turns" (神奇九转) setup detection.
  *
- * Buy Setup:  9 consecutive closes < close 4 bars ago → trade UP on the next bar
- * Sell Setup: 9 consecutive closes > close 4 bars ago → trade DOWN on the next bar
+ * Buy Setup:  close[i] < close[i-4] → count+1, else reset
+ * Sell Setup: close[i] > close[i-4] → count+1, else reset
+ * When count hits 9 on bar i → setup complete; counter resets to 0 so the
+ * next bar (if still valid) starts from 1 again (no Perfect / TD13).
  *
- * Evaluation uses the latest *closed* candle as setup bar N. When that bar
- * completes count===9, the current cycle is the "next bar" entry.
+ * Open on the following Polymarket cycle (bar i+1): Buy→UP, Sell→DOWN.
+ * Buy and Sell both complete on the same bar → skip.
  */
 
 export const MIN_SIGNAL_CANDLES = 13; // 9 setup + 4 lookback
 
 /**
- * Consecutive setup count ending at index `idx`.
+ * Forward TD Setup scan through candles[4..endIdx].
+ * After each completion of 9, that side's counter resets to 0.
+ *
  * @param {Array<{ close: number }>} candles
- * @param {number} idx
- * @param {'buy'|'sell'} dir
+ * @param {number} endIdx inclusive
+ * @returns {{
+ *   buyCount: number,
+ *   sellCount: number,
+ *   completedBuy: boolean,
+ *   completedSell: boolean,
+ * }}
  */
-export function countSetupEndingAt(candles, idx, dir) {
-  if (!Array.isArray(candles) || idx < 4) return 0;
-  let count = 0;
-  for (let i = idx; i >= 4; i -= 1) {
+export function scanSetupThrough(candles, endIdx) {
+  let buyCount = 0;
+  let sellCount = 0;
+  let completedBuy = false;
+  let completedSell = false;
+
+  if (!Array.isArray(candles) || endIdx < 4) {
+    return { buyCount: 0, sellCount: 0, completedBuy: false, completedSell: false };
+  }
+
+  for (let i = 4; i <= endIdx; i += 1) {
     const c = Number(candles[i]?.close);
     const c4 = Number(candles[i - 4]?.close);
-    if (!Number.isFinite(c) || !Number.isFinite(c4)) break;
-    const ok = dir === 'buy' ? c < c4 : c > c4;
-    if (!ok) break;
-    count += 1;
+    if (!Number.isFinite(c) || !Number.isFinite(c4)) {
+      buyCount = 0;
+      sellCount = 0;
+      completedBuy = false;
+      completedSell = false;
+      continue;
+    }
+
+    if (c < c4) {
+      buyCount += 1;
+      sellCount = 0;
+    } else if (c > c4) {
+      sellCount += 1;
+      buyCount = 0;
+    } else {
+      buyCount = 0;
+      sellCount = 0;
+    }
+
+    completedBuy = false;
+    completedSell = false;
+
+    if (buyCount === 9) {
+      completedBuy = true;
+      buyCount = 0; // 满 9 清零，下一根从 1 再起算
+    }
+    if (sellCount === 9) {
+      completedSell = true;
+      sellCount = 0;
+    }
   }
-  return count;
+
+  return { buyCount, sellCount, completedBuy, completedSell };
+}
+
+/**
+ * Consecutive setup count ending at index (debug / display only).
+ * Prefer scanSetupThrough for live signals — that resets after each 9.
+ */
+export function countSetupEndingAt(candles, idx, dir) {
+  const scan = scanSetupThrough(candles, idx);
+  // After a completion on idx, counters are already 0; report 9 if just completed.
+  if (dir === 'buy') {
+    return scan.completedBuy ? 9 : scan.buyCount;
+  }
+  return scan.completedSell ? 9 : scan.sellCount;
 }
 
 /**
@@ -36,25 +92,38 @@ export function countSetupEndingAt(candles, idx, dir) {
  * @returns {{ signal: 'UP'|'DOWN'|'NONE', signalId: string|null, reason: string, buyCount: number, sellCount: number }}
  */
 export function evaluateMagicNineAt(candles, idx) {
-  const buyCount = countSetupEndingAt(candles, idx, 'buy');
-  const sellCount = countSetupEndingAt(candles, idx, 'sell');
+  const { buyCount, sellCount, completedBuy, completedSell } = scanSetupThrough(
+    candles,
+    idx,
+  );
 
-  if (buyCount === 9) {
+  // Dual completion on same bar (theoretical) → skip
+  if (completedBuy && completedSell) {
+    return {
+      signal: 'NONE',
+      signalId: null,
+      reason: '九转 Buy/Sell 同时完成 — 跳过',
+      buyCount: 9,
+      sellCount: 9,
+    };
+  }
+
+  if (completedBuy) {
     return {
       signal: 'UP',
       signalId: 'JZ_UP',
-      reason: `Buy Setup 九转: 连续9根收盘 < 4根前收盘 → 本周期买涨(反转)`,
-      buyCount,
+      reason: 'Buy Setup 九转: 连续9根收盘 < 4根前收盘 → 本周期买涨(反转)；计数已清零',
+      buyCount: 9,
       sellCount,
     };
   }
-  if (sellCount === 9) {
+  if (completedSell) {
     return {
       signal: 'DOWN',
       signalId: 'JZ_DOWN',
-      reason: `Sell Setup 九转: 连续9根收盘 > 4根前收盘 → 本周期买跌(反转)`,
+      reason: 'Sell Setup 九转: 连续9根收盘 > 4根前收盘 → 本周期买跌(反转)；计数已清零',
       buyCount,
-      sellCount,
+      sellCount: 9,
     };
   }
 
