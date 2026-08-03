@@ -21,6 +21,10 @@ const PM2_OWNED_KEYS = [
   'NODE_ENV',
   /** Per-instance Telegram forum topic (injected by ecosystem from TELEGRAM_THREAD_*). */
   'TELEGRAM_MESSAGE_THREAD_ID',
+  /** Strategy + bankroll isolation (vegas | jz) */
+  'STRATEGY',
+  'BANKROLL_SCOPE',
+  'MARTINGALE_MAX_LOSSES',
 ];
 
 const pm2Owned = {};
@@ -68,6 +72,12 @@ function timeframeToMinutes(tf) {
 
 const timeframe = optional('CANDLE_TIMEFRAME', '5m');
 const derivedCycleMinutes = timeframeToMinutes(timeframe) ?? 5;
+/** vegas = 维加斯通道；jz = 神奇九转（独立账本 / 补队列） */
+const strategy = optional('STRATEGY', 'vegas').toLowerCase();
+const bankrollScope = optional(
+  'BANKROLL_SCOPE',
+  strategy === 'jz' ? 'jz' : 'vegas',
+).toLowerCase();
 
 const config = {
   // Polymarket
@@ -209,9 +219,13 @@ const config = {
   dryRun: bool('DRY_RUN', false),
   logLevel: optional('LOG_LEVEL', 'INFO'),
 
-  // Martingale
+  /** vegas | jz — selects signal engine + TG tag; jz uses separate bankroll file */
+  strategy,
+  bankrollScope,
+
+  // Martingale — jz defaults to 2 (entry + 1 same-dir lock then halt)
   martingaleMultiplier: num('MARTINGALE_MULTIPLIER', 1),
-  martingaleMaxLosses: num('MARTINGALE_MAX_LOSSES', 5),
+  martingaleMaxLosses: num('MARTINGALE_MAX_LOSSES', strategy === 'jz' ? 2 : 5),
 
   // Telegram notifications (one forum group + per-instance topic thread)
   telegram: {

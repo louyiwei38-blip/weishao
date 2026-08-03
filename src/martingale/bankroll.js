@@ -23,7 +23,18 @@ import logger from '../utils/logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOGS_DIR = join(__dirname, '..', '..', 'logs');
-const STATE_FILE = join(LOGS_DIR, 'bankroll-state.json');
+
+/** vegas keeps legacy bankroll-state.json; jz → bankroll-state-jz.json */
+function bankrollStateFile() {
+  const scope = String(config.bankrollScope || 'vegas').toLowerCase();
+  if (!scope || scope === 'vegas' || scope === 'default') {
+    return join(LOGS_DIR, 'bankroll-state.json');
+  }
+  const safe = scope.replace(/[^a-zA-Z0-9_-]/g, '') || 'vegas';
+  return join(LOGS_DIR, `bankroll-state-${safe}.json`);
+}
+
+const STATE_FILE = bankrollStateFile();
 const LOCK_FILE = `${STATE_FILE}.lock`;
 
 /** Ignore dust below one cent when comparing / registering layers */
@@ -92,13 +103,21 @@ function round2(n) {
   return Math.round(Number(n) * 100) / 100;
 }
 
-/** Sum total.pnlUsd from all per-instance stats-state*.json (bootstrap shared ledger). */
+/** Sum total.pnlUsd from stats-state*.json matching this bankroll scope. */
+function statsFileMatchesScope(name) {
+  const scope = String(config.bankrollScope || 'vegas').toLowerCase();
+  const isJz = /-jz\.json$/i.test(name);
+  if (scope === 'jz') return isJz;
+  return !isJz;
+}
+
 function sumStatsPnlFromDisk() {
   if (!existsSync(LOGS_DIR)) return 0;
   let total = 0;
   try {
     for (const name of readdirSync(LOGS_DIR)) {
       if (!/^stats-state(-[\w.-]+)?\.json$/i.test(name)) continue;
+      if (!statsFileMatchesScope(name)) continue;
       try {
         const raw = JSON.parse(readFileSync(join(LOGS_DIR, name), 'utf8'));
         const pnl = Number(raw?.total?.pnlUsd);
@@ -254,7 +273,12 @@ export function init() {
         /* ignore */
       }
     }
-    logger.info('[bankroll] loaded', { ...cache, file: STATE_FILE });
+    logger.info('[bankroll] loaded', {
+      ...cache,
+      file: STATE_FILE,
+      scope: config.bankrollScope,
+      strategy: config.strategy,
+    });
   });
 }
 

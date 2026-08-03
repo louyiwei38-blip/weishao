@@ -70,20 +70,45 @@ function parseCandleTimeframes(env = process.env) {
   return out.length ? out : [['5m', 5]];
 }
 
-/** @returns {{ id: string, name: string, base: string, tf: string, minutes: number }[]} */
+/**
+ * Strategies to run as separate PM2 processes (same symbols × timeframes).
+ * STRATEGIES=vegas,jz  (default: vegas only)
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string[]} e.g. ['vegas'] | ['vegas','jz']
+ */
+function parseStrategies(env = process.env) {
+  const raw = env.STRATEGIES || env.STRATEGY_LIST || 'vegas';
+  const out = [];
+  const seen = new Set();
+  for (const tok of splitList(raw)) {
+    const s = String(tok).trim().toLowerCase();
+    if (s !== 'vegas' && s !== 'jz') continue;
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out.length ? out : ['vegas'];
+}
+
+/** @returns {{ id: string, name: string, base: string, tf: string, minutes: number, strategy: string }[]} */
 function buildInstances(env = process.env) {
   const bases = parseTradingSymbolBases(env);
   const tfs = parseCandleTimeframes(env);
+  const strategies = parseStrategies(env);
   const instances = [];
-  for (const base of bases) {
-    for (const [tf, minutes] of tfs) {
-      instances.push({
-        id: `${base.toLowerCase()}-${tf}`,
-        name: `${base} ${tf}`,
-        base,
-        tf,
-        minutes,
-      });
+  for (const strategy of strategies) {
+    for (const base of bases) {
+      for (const [tf, minutes] of tfs) {
+        const suffix = strategy === 'jz' ? '-jz' : '';
+        instances.push({
+          id: `${base.toLowerCase()}-${tf}${suffix}`,
+          name: `${base} ${tf}${strategy === 'jz' ? ' 九转' : ''}`,
+          base,
+          tf,
+          minutes,
+          strategy,
+        });
+      }
     }
   }
   return instances;
@@ -94,5 +119,6 @@ module.exports = {
   toBase,
   parseTradingSymbolBases,
   parseCandleTimeframes,
+  parseStrategies,
   buildInstances,
 };

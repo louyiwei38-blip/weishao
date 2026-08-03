@@ -4,6 +4,7 @@
  * Only edit .env:
  *   TRADING_SYMBOLS=BTC,ETH
  *   CANDLE_TIMEFRAMES=5m,15m,1h
+ *   STRATEGIES=vegas,jz     # 可选：同时跑维加斯+神奇九转（独立账本）
  *   PM2_NAME_PREFIX=V3          # 第二钱包同机部署时用 W2（见 ecosystem.wallet2.config.cjs）
  *
  * 模拟盘: npm run pm2:dry

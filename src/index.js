@@ -1,7 +1,7 @@
 /**
- * Polymarket Vegas Channel Bot — entry point
- * OKX OHLCV | EMA144/169 Vegas cross-entry | Same-dir Martingale ×1 / 5-loss stop
- * Multi-instance: BOT_INSTANCE + CANDLE_TIMEFRAME (PM2: 15m + 5m)
+ * Polymarket bot — entry point
+ * Strategies: Vegas EMA144/169 | Magic Nine (STRATEGY=jz)
+ * Multi-instance: BOT_INSTANCE + CANDLE_TIMEFRAME (+ optional -jz)
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
@@ -37,8 +37,8 @@ import {
   usesChainlinkSettlement,
   settleSourceLabel,
 } from './trader/chainlinkSettle.js';
-import * as vegasState from './strategy/vegasState.js';
-import { MIN_SIGNAL_CANDLES } from './strategy/vegasChannel.js';
+import * as strategyState from './strategy/activeStrategy.js';
+import { MIN_SIGNAL_CANDLES } from './strategy/activeStrategy.js';
 import { findCurrentCycleMarket, resolveOrderPricePolicy } from './market/polymarket.js';
 import {
   getBalanceBreakdown,
@@ -89,10 +89,10 @@ const SETTLE_LOG  = scopedLogPath(LOGS_DIR, 'settlements.jsonl');
 const PENDING_FILE = scopedLogPath(LOGS_DIR, 'pending-bet.json');
 
 const CYCLE_MS = config.cycleMinutes * 60 * 1000;
-const TF_TAG = `[${String(config.symbol || '').split('/')[0] || '?'}·${config.timeframe}]`;
-
 function tgHead(titleHtml) {
-  return `${TF_TAG} ${titleHtml}`;
+  const base = String(config.symbol || '').split('/')[0] || '?';
+  const strat = config.strategy === 'jz' ? '·九转' : '';
+  return `[${base}·${config.timeframe}${strat}] ${titleHtml}`;
 }
 
 // Pending bet awaiting settlement. Shape:
@@ -751,7 +751,7 @@ async function maybeButtonSeqFastPath(settledCycleStartTs) {
   }
 
   const btn = buttonSequence.getState();
-  const vg = vegasState.getState();
+  const vg = strategyState.getState();
   const projectDir = vg.phase === 'in_chain' ? vg.lockedSignal : null;
 
   if (projectDir && projectDir !== btn.direction) {
@@ -825,7 +825,7 @@ async function maybeButtonSeqFastPath(settledCycleStartTs) {
  * After loss settlement (not halted): immediately bet the next cycle window.
  */
 async function maybeMgContFastPath(settledCycleStartTs) {
-  const vg = vegasState.getState();
+  const vg = strategyState.getState();
   if (!shouldMgContFastPath({
     enabled: config.mgContFastPath,
     won: false,
@@ -983,7 +983,7 @@ async function runCycle(cycleStartTs) {
       }
     }
 
-    const vgEarly = vegasState.getState();
+    const vgEarly = strategyState.getState();
     const inChainCont =
       vgEarly.phase === 'in_chain' &&
       (vgEarly.lockedSignal === 'UP' || vgEarly.lockedSignal === 'DOWN');
@@ -1084,7 +1084,7 @@ async function runCycle(cycleStartTs) {
         continue;
       }
 
-      signalObj = await vegasState.resolveSignal(candles);
+      signalObj = await strategyState.resolveSignal(candles);
 
       if (isSignalDataNotReady(signalObj.reason, signalObj.retryable)) {
         logger.warn('[main] 信号数据未就绪（EMA/对齐）— 周期内重试', {
@@ -1119,7 +1119,7 @@ async function runCycle(cycleStartTs) {
             retryMs: config.signalDataRetryMs,
             deadlineInMs: dataDeadline - Date.now(),
           });
-          vegasState.abortEntryLock('candle_misaligned_retry');
+          strategyState.abortEntryLock('candle_misaligned_retry');
           signalObj = null;
           await sleepUntilShutdown(config.signalDataRetryMs);
           continue;
@@ -1158,7 +1158,7 @@ async function runCycle(cycleStartTs) {
     lastSignal = signalObj.signal;
     writeSignalLog(signalObj);
 
-    const vg = vegasState.getState();
+    const vg = strategyState.getState();
     logger.info('[main] 信号', {
       signal: signalObj.signal,
       signalId: signalObj.signalId,
@@ -1226,7 +1226,7 @@ async function runCycle(cycleStartTs) {
           catchUpQueue: mg.bankroll?.catchUpQueue ?? [],
         },
       },
-      vegas: vegasState.getState(),
+      strategyState: strategyState.getState(),
       dailyLossUsd: getDailyLossUsd(),
       ...stats.formatLogFields(),
       error: cycleError,
@@ -1532,7 +1532,7 @@ async function applySettlement(pending, { candles } = {}) {
     const mgResult = martingale.onSettled(won, pnlUsd, settleEquity);
     halted = mgResult.halted;
     chainPnlUsd = mgResult.chainPnlUsd;
-    vegasState.onSettled(won, halted);
+    strategyState.onSettled(won, halted);
   } else {
     martingale.bankroll.onSettled(won, settleEquity, pnlUsd);
   }
@@ -1663,8 +1663,8 @@ async function applySettlement(pending, { candles } = {}) {
     enabled: config.mgContFastPath,
     won,
     halted,
-    phase: vegasState.getState().phase,
-    lockedSignal: vegasState.getState().lockedSignal,
+    phase: strategyState.getState().phase,
+    lockedSignal: strategyState.getState().lockedSignal,
   })) {
     const t0 = Date.now();
     const fastPromise = trackWork(
@@ -1730,7 +1730,7 @@ async function scheduler() {
   const signalOhlcv = describeOhlcvSource();
 
   martingale.init();
-  vegasState.init();
+  strategyState.init();
   stats.init();
   buttonSequence.init();
   initDailyLoss();
@@ -1756,7 +1756,9 @@ async function scheduler() {
     symbol: config.symbol,
     timeframe: config.timeframe,
     instanceId: config.instanceId,
-    strategy: 'vegas_channel_okx_ema144_169',
+    strategy: strategyState.strategyLogId(),
+    strategyScope: config.strategy,
+    bankrollScope: config.bankrollScope,
     signalOhlcv: {
       exchange: signalOhlcv.exchange,
       market: signalOhlcv.label,
@@ -1784,7 +1786,7 @@ async function scheduler() {
     orderRetryDelayMs: config.orderRetryDelayMs,
     orderPriceCap: config.orderPriceCap,
     envFile: existsSync(join(__dirname, '..', '.env')) ? '.env loaded (override)' : '.env missing',
-    vegas: vegasState.getState(),
+    strategyState: strategyState.getState(),
     ...stats.formatLogFields(),
   });
 
@@ -1816,12 +1818,16 @@ async function scheduler() {
 
   await notifyTelegram(
     `${tgHead('▶ <b>机器人启动</b>')}\n` +
+    `策略: <b>${escapeHtml(strategyState.strategyLabel())}</b>\n` +
     `标的: ${config.symbol}\n` +
     `周期: ${config.timeframe} (${config.cycleMinutes}m)\n` +
     `实例: ${config.instanceId}\n` +
     `模式: ${config.dryRun ? 'DRY_RUN' : 'LIVE'}\n` +
     `结算: <b>${escapeHtml(settleSourceLabel())}</b> (${escapeHtml(config.settleSource)})\n` +
-    `马丁: 默认$${config.tradeBudgetUsd} ×${config.martingaleMultiplier} / 连亏${config.martingaleMaxLosses}\n` +
+    `马丁: 默认$${config.tradeBudgetUsd} ×${config.martingaleMultiplier} / 连亏${config.martingaleMaxLosses}` +
+    (config.strategy === 'jz' ? ' (胜结束·输锁1次)' : '') +
+    `\n` +
+    `账本: ${escapeHtml(config.bankrollScope)}\n` +
     formatBankrollTelegramLines() +
     (startupBalance != null
       ? `启动 Portfolio: $${Number(startupBalance).toFixed(2)}` +
@@ -1982,7 +1988,7 @@ async function scheduler() {
 
     await drainCommandQueue(handleTelegramCommand);
 
-    const vg = vegasState.getState();
+    const vg = strategyState.getState();
     const btnForDelay = buttonSequence.getState();
     const delayMs = resolveCycleSignalDelayMs({
       phase: vg.phase,
