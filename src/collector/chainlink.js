@@ -26,6 +26,9 @@ let ws = null;
 let reconnectTimer = null;
 let started = false;
 let subscribedSymbols = [];
+/** Wall-clock ms of last successful RTDS ingest (any symbol). */
+let lastIngestWallMs = 0;
+let rtdsConnected = false;
 
 function symbolToCl(symbol) {
   return SYMBOL_CHAINLINK[symbol] || null;
@@ -61,6 +64,9 @@ function ingestPoints(clSymbol, points) {
     .sort((a, b) => a.timestamp - b.timestamp);
 
   tickBuffers.set(clSymbol, merged.slice(-maxBufferTicks()));
+  if (added > 0 || merged.length) {
+    lastIngestWallMs = Date.now();
+  }
   return added > 0;
 }
 
@@ -99,6 +105,7 @@ function connectRtds() {
 
   bindSocket(ws, flavor, {
     onOpen: () => {
+      rtdsConnected = true;
       logger.info(
         `[chainlink] RTDS 已连接 (${flavor})，已订阅: ${subscribedSymbols.join(', ')}`
       );
@@ -141,6 +148,7 @@ function connectRtds() {
       }
     },
     onClose: () => {
+      rtdsConnected = false;
       ws = null;
       if (!started) return;
       logger.warn('[chainlink] RTDS 断开，5 秒后重连...');
@@ -192,6 +200,7 @@ export async function startRtdsBuffer(symbols = [config.symbol]) {
 
 export function stopRtdsBuffer() {
   started = false;
+  rtdsConnected = false;
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -200,6 +209,78 @@ export function stopRtdsBuffer() {
     try { ws.close(); } catch { /* ignore */ }
     ws = null;
   }
+}
+
+/**
+ * Whether RTDS has a usable recent tick for trading / settlement target capture.
+ * @param {string} [symbol]
+ * @param {{ maxStaleMs?: number }} [opts]
+ */
+export function isChainlinkFeedHealthy(symbol = config.symbol, opts = {}) {
+  const maxStaleMs = Number.isFinite(opts.maxStaleMs)
+    ? opts.maxStaleMs
+    : config.chainlink.requireFreshMs;
+  const latest = getLatestPrice(symbol);
+  if (!latest) {
+    return {
+      ok: false,
+      reason: 'no_ticks',
+      connected: rtdsConnected,
+      tickAgeMs: null,
+      lastIngestWallMs: lastIngestWallMs || null,
+    };
+  }
+
+  const tickAgeMs = Math.max(0, Date.now() - Number(latest.ts));
+  const ingestAgeMs = lastIngestWallMs
+    ? Math.max(0, Date.now() - lastIngestWallMs)
+    : null;
+  // Fresh if we recently ingested OR the latest tick itself is recent (quiet market).
+  const freshByTick = tickAgeMs <= maxStaleMs;
+  const freshByIngest = ingestAgeMs != null && ingestAgeMs <= maxStaleMs;
+  if (!freshByTick && !freshByIngest) {
+    return {
+      ok: false,
+      reason: 'stale',
+      connected: rtdsConnected,
+      tickAgeMs,
+      lastIngestWallMs: lastIngestWallMs || null,
+      price: latest.price,
+    };
+  }
+
+  return {
+    ok: true,
+    reason: 'ok',
+    connected: rtdsConnected,
+    tickAgeMs,
+    lastIngestWallMs: lastIngestWallMs || null,
+    price: latest.price,
+  };
+}
+
+/**
+ * Snapshot cycle open (target) price for pending-bet persistence.
+ * Prefers official open-window tick; falls back to last tick ≤ cycleStart.
+ */
+export function captureCycleTargetPrice(symbol, cycleStartMs) {
+  const open = getChainlinkOpenPrice(symbol, cycleStartMs);
+  if (open && Number.isFinite(open.price)) {
+    return {
+      targetPrice: open.price,
+      targetKind: open.kind,
+      targetTs: open.ts,
+    };
+  }
+  const atOpen = getChainlinkPriceAt(symbol, cycleStartMs);
+  if (atOpen && Number.isFinite(atOpen.price)) {
+    return {
+      targetPrice: atOpen.price,
+      targetKind: 'at-or-before-open',
+      targetTs: atOpen.ts,
+    };
+  }
+  return null;
 }
 
 export function getLatestPrice(symbol) {

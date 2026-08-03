@@ -22,6 +22,8 @@ import {
 import {
   startRtdsBuffer,
   stopRtdsBuffer,
+  isChainlinkFeedHealthy,
+  captureCycleTargetPrice,
 } from './collector/chainlink.js';
 import {
   initChainlinkSettler,
@@ -108,6 +110,8 @@ const orderedCycleTs = new Set();
 /** Cycles already settled or voided — ignore late fillWatch callbacks. */
 const closedCycleTs = new Set();
 let placingForCycle = null;
+/** Avoid spamming TG for the same stuck pending cycle. */
+let lastStuckSettleNotifyKey = null;
 
 function trackWork(promise) {
   const wrapped = Promise.resolve(promise).finally(() => {
@@ -452,6 +456,26 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle', sources
       minRemainingMs: config.minTradeRemainingMs,
     });
     return { status: 'too_late' };
+  }
+
+  // Chainlink settle mode: never open blind when oracle feed is down/stale
+  if (usesChainlinkSettlement() && config.chainlink.requireForOpen) {
+    const feed = isChainlinkFeedHealthy(config.symbol);
+    if (!feed.ok) {
+      logger.warn('[main] Chainlink 未就绪 — 跳过下单（避免无法结算导致账本缺口）', {
+        cycle: formatBeijingTime(cycleStartTs),
+        source,
+        reason: feed.reason,
+        connected: feed.connected,
+        tickAgeMs: feed.tickAgeMs,
+        requireFreshMs: config.chainlink.requireFreshMs,
+      });
+      return {
+        status: 'chainlink_unavailable',
+        signal: signalObj.signal,
+        signalId: signalObj.signalId,
+      };
+    }
   }
 
   if (isDailyLossExceeded()) {
@@ -1226,6 +1250,21 @@ function registerPendingBet({
   sources = ['project'],
   signalId = null,
 }) {
+  // Persist cycle open target so settlement still works after RTDS buffer rolls off
+  let targetPrice = null;
+  let targetKind = null;
+  if (usesChainlinkSettlement()) {
+    const snap = captureCycleTargetPrice(config.symbol, cycleStartTs);
+    if (snap) {
+      targetPrice = snap.targetPrice;
+      targetKind = snap.targetKind;
+    } else {
+      logger.warn('[main] 开单时未能锁定 Chainlink 开盘价 — 结算将依赖 OKX 回退', {
+        cycle: formatBeijingTime(cycleStartTs),
+      });
+    }
+  }
+
   pendingBet = {
     cycleStartTs,
     signal,
@@ -1237,6 +1276,8 @@ function registerPendingBet({
     companionOrderIds: companionOrderIds.filter(Boolean),
     sources,
     signalId,
+    targetPrice,
+    targetKind,
   };
   markCycleOrdered(cycleStartTs);
   savePending();
@@ -1256,6 +1297,8 @@ function registerPendingBet({
     signal,
     actualBet,
     orderId,
+    targetPrice,
+    targetKind,
   });
 }
 
@@ -1372,15 +1415,60 @@ function writeSettlementLog(entry) {
 async function applySettlement(pending, { candles } = {}) {
   if (!pending || pending !== pendingBet) return false;
 
+  // Late-fill target capture if open missed storing it
+  if (
+    usesChainlinkSettlement() &&
+    !Number.isFinite(Number(pending.targetPrice))
+  ) {
+    const snap = captureCycleTargetPrice(config.symbol, pending.cycleStartTs);
+    if (snap) {
+      pending.targetPrice = snap.targetPrice;
+      pending.targetKind = snap.targetKind;
+      savePending();
+      logger.info('[settle] 已补录 Chainlink 开盘价', {
+        window: formatBeijingTime(pending.cycleStartTs),
+        targetPrice: snap.targetPrice,
+        targetKind: snap.targetKind,
+      });
+    }
+  }
+
   const result = await computeSettlement(pending, { candles });
   if (!result.ready) {
     const cycleEnd = pending.cycleStartTs + CYCLE_MS;
-    const log = Date.now() > cycleEnd + CYCLE_MS ? logger.warn : logger.debug;
+    const overdueMs = Date.now() - (cycleEnd + config.chainlink.settleBufferMs);
+    const log = overdueMs > CYCLE_MS ? logger.warn : logger.debug;
     log('[settle] 结算尚未就绪', {
       window: formatBeijingTime(pending.cycleStartTs),
       reason: result.reason,
+      chainlinkReason: result.chainlinkReason,
       source: config.settleSource,
+      overdueMs,
     });
+
+    // Alert once when stuck past one cycle — ledger gap risk
+    if (overdueMs >= CYCLE_MS) {
+      const key = `${pending.cycleStartTs}:${result.reason}`;
+      if (lastStuckSettleNotifyKey !== key) {
+        lastStuckSettleNotifyKey = key;
+        trackWork((async () => {
+          await notifyTelegram(
+            `${tgHead('⚠️ <b>结算卡住</b>')}\n` +
+            `窗口: ${formatBeijingTime(pending.cycleStartTs)}\n` +
+            `方向: ${pending.signal === 'UP' ? '📈 UP' : '📉 DOWN'}\n` +
+            `原因: <code>${escapeHtml(String(result.reason || 'unknown'))}</code>\n` +
+            (result.chainlinkReason
+              ? `Chainlink: <code>${escapeHtml(String(result.chainlinkReason))}</code>\n`
+              : '') +
+            `已超时: ${Math.round(overdueMs / 1000)}s\n` +
+            `将继续重试（含 OKX 回退）— 账本待结算完成后才入账\n` +
+            `周期: ${config.timeframe}`,
+          );
+        })().catch((err) => {
+          logger.warn('[settle] 卡住通知 Telegram 失败', { error: err?.message });
+        }));
+      }
+    }
     return false;
   }
 
@@ -1479,6 +1567,7 @@ async function applySettlement(pending, { candles } = {}) {
 
   pendingBet = null;
   savePending();
+  lastStuckSettleNotifyKey = null;
   unmarkCycleOrdered(cycleStartTs);
   markCycleClosed(cycleStartTs);
   // Prior GTC watch must not block MG_CONT / next-cycle placeOrder

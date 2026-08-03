@@ -166,7 +166,7 @@ const config = {
   // Bot — MARKET_CYCLE_MINUTES defaults from CANDLE_TIMEFRAME (5m→5, 1h→60)
   cycleMinutes: num('MARKET_CYCLE_MINUTES', derivedCycleMinutes),
   /** Default stake when bankroll is on/ahead of target line */
-  tradeBudgetUsd: num('TRADE_BUDGET_USD', 10),
+  tradeBudgetUsd: num('TRADE_BUDGET_USD', 5),
   maxDailyLossUsd: num('MAX_DAILY_LOSS_USD', 10000),
   minBalanceUsd: num('MIN_BALANCE_USD', 0),
   maxBetUsd: num('MAX_BET_USD', 30),
@@ -315,6 +315,15 @@ const config = {
     openWindowMs: num('CHAINLINK_OPEN_WINDOW_MS', 5000),
     bufferMinutes: num('CHAINLINK_BUFFER_MINUTES', 30),
     safetyIntervalMs: num('CHAINLINK_SAFETY_INTERVAL_MS', 60_000),
+    /** Skip new orders when settleSource=chainlink and RTDS ticks are missing/stale */
+    requireForOpen: bool('CHAINLINK_REQUIRE_FOR_OPEN', true),
+    /** Max age of latest Chainlink tick / ingest before open is blocked */
+    requireFreshMs: num('CHAINLINK_REQUIRE_FRESH_MS', 45_000),
+    /**
+     * After cycle end + this grace, force OKX candle settle if Chainlink still not ready
+     * (prevents pending forever → ledger gap). Default: 1 cycle length.
+     */
+    forceOkxAfterMs: num('CHAINLINK_FORCE_OKX_AFTER_MS', 0),
   },
 };
 

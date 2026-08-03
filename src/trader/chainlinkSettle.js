@@ -126,12 +126,25 @@ async function resolveCandleForCycle(cycleStartTs, candles) {
   return null;
 }
 
-const CHAINLINK_FALLBACK_REASONS = new Set(['no_target_price', 'no_close_price']);
+const CHAINLINK_FALLBACK_REASONS = new Set(['no_target_price', 'no_close_price', 'invalid_prices']);
+
+function forceOkxGraceMs() {
+  const configured = Number(config.chainlink.forceOkxAfterMs);
+  if (Number.isFinite(configured) && configured > 0) return configured;
+  // Default: one full cycle after wake — don't leave pending forever (ledger gap).
+  return config.cycleMinutes * 60 * 1000;
+}
 
 function canFallbackToOkx(chainlinkResult, cycleStartTs) {
   if (!chainlinkResult || chainlinkResult.ready) return false;
-  if (!CHAINLINK_FALLBACK_REASONS.has(chainlinkResult.reason)) return false;
-  return Date.now() >= settleWakeMs(cycleStartTs);
+  if (chainlinkResult.reason === 'cycle_not_ended') return false;
+  if (Date.now() < settleWakeMs(cycleStartTs)) return false;
+
+  if (CHAINLINK_FALLBACK_REASONS.has(chainlinkResult.reason)) return true;
+
+  // Any other stuck reason past grace → force OKX so ledger can advance
+  const overdueMs = Date.now() - settleWakeMs(cycleStartTs);
+  return overdueMs >= forceOkxGraceMs();
 }
 
 /**
@@ -174,8 +187,8 @@ export async function computeOkxSettlement(pendingBet, { candles } = {}) {
 
 /**
  * Route settlement to the configured source.
- * Chainlink mode falls back to OKX candles when RTDS buffer lacks old ticks
- * (e.g. pending bet restored after restart hours later).
+ * Chainlink mode falls back to OKX candles when RTDS buffer lacks ticks
+ * (or after forceOkx grace so pending cannot block ledger forever).
  */
 export async function computeSettlement(pendingBet, ctx = {}) {
   if (usesOkxSettlement()) {
@@ -194,15 +207,19 @@ export async function computeSettlement(pendingBet, ctx = {}) {
 
   const okxResult = await computeOkxSettlement(pendingBet, ctx);
   if (!okxResult.ready) {
-    return okxResult;
+    return {
+      ...okxResult,
+      chainlinkReason: chainlinkResult.reason,
+    };
   }
 
   logger.warn('[settle] Chainlink 数据不可用，已回退 OKX K 线结算', {
     window: formatBeijingTime(cycleStartTs),
     chainlinkReason: chainlinkResult.reason,
+    overdueMs: Date.now() - settleWakeMs(cycleStartTs),
   });
 
-  return { ...okxResult, sourceUsed: 'okx_fallback' };
+  return { ...okxResult, sourceUsed: 'okx_fallback', chainlinkReason: chainlinkResult.reason };
 }
 
 /**
@@ -311,7 +328,22 @@ export async function settleAllDuePending(ctx = {}) {
   if (!pending) return false;
 
   if (Date.now() < settleWakeMs(pending.cycleStartTs)) return false;
-  return settleOnce(pending, ctx);
+
+  // Prefetch OKX candle when Chainlink may need fallback (restart / buffer miss)
+  let settleCtx = ctx;
+  if (usesChainlinkSettlement() && !ctx.candles) {
+    try {
+      const { fetchClosedCandles } = await import('../collector/binance.js');
+      const candles = await fetchClosedCandles(Math.max(12, config.candleLimit || 50));
+      settleCtx = { ...ctx, candles };
+    } catch (err) {
+      logger.debug('[settle] 兜底结算预拉 K 线失败（仍尝试结算）', {
+        error: err?.message,
+      });
+    }
+  }
+
+  return settleOnce(pending, settleCtx);
 }
 
 export function startChainlinkSettler() {
