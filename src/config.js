@@ -315,8 +315,8 @@ const config = {
     openWindowMs: num('CHAINLINK_OPEN_WINDOW_MS', 5000),
     bufferMinutes: num('CHAINLINK_BUFFER_MINUTES', 30),
     safetyIntervalMs: num('CHAINLINK_SAFETY_INTERVAL_MS', 60_000),
-    /** Skip new orders when settleSource=chainlink and RTDS ticks are missing/stale */
-    requireForOpen: bool('CHAINLINK_REQUIRE_FOR_OPEN', true),
+    /** Skip new orders when settleSource=chainlink and RTDS ticks are missing/stale (default off: open on signal) */
+    requireForOpen: bool('CHAINLINK_REQUIRE_FOR_OPEN', false),
     /** Max age of latest Chainlink tick / ingest before open is blocked */
     requireFreshMs: num('CHAINLINK_REQUIRE_FRESH_MS', 45_000),
     /**

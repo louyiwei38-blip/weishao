@@ -458,11 +458,12 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle', sources
     return { status: 'too_late' };
   }
 
-  // Chainlink settle mode: never open blind when oracle feed is down/stale
+  // Optional: block opens when Chainlink RTDS is down (CHAINLINK_REQUIRE_FOR_OPEN=true).
+  // Default false — open on signal; settlement still falls back to OKX so ledger can advance.
   if (usesChainlinkSettlement() && config.chainlink.requireForOpen) {
     const feed = isChainlinkFeedHealthy(config.symbol);
     if (!feed.ok) {
-      logger.warn('[main] Chainlink 未就绪 — 跳过下单（避免无法结算导致账本缺口）', {
+      logger.warn('[main] Chainlink 未就绪 — 跳过下单（CHAINLINK_REQUIRE_FOR_OPEN=true）', {
         cycle: formatBeijingTime(cycleStartTs),
         source,
         reason: feed.reason,

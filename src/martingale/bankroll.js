@@ -11,9 +11,9 @@
  * Catch-up queue (补1, 补2, …):
  *   - No gap & empty queue → stake = defaultBet (TRADE_BUDGET_USD)
  *   - Else play front layer L; win profit T = L + step; stake = T × p/(1−p)
- *   - Loss: keep playing same layer; append 补N = gap − Σ(uncleared)
- *   - Win on layer: clear that layer; advance to next; empty+gap→ new 补1; empty+no gap→ default
- *   - Sync never merges layers into a single 补1 — only shrink front / trim tail
+ *   - Loss: keep playing same layer; if gap grew, append 补N then **even-split gap across all layers**
+ *   - Win on layer: clear that layer; remaining layers **even-split** current gap; empty+gap→ new 补1
+ *   - Sync: multi-layer queues redistribute total gap evenly (no uneven front/tail leftovers)
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, closeSync, unlinkSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
@@ -195,6 +195,36 @@ function makeLayer(usd, nextLayerId) {
   return { layer: { id, usd: round2(usd) }, nextLayerId: id + 1 };
 }
 
+/**
+ * Keep layer ids/count; set each layer.usd so amounts sum to totalUsd (even split).
+ * Last layer absorbs cent rounding remainder.
+ * @param {CatchUpLayer[]} queue
+ * @param {number} totalUsd
+ * @returns {CatchUpLayer[]}
+ */
+function evenSplitAcrossLayers(queue, totalUsd) {
+  const q = normalizeQueue(queue);
+  const total = round2(Math.max(0, Number(totalUsd) || 0));
+  if (!q.length || total < GAP_EPS) return [];
+  if (q.length === 1) {
+    return [{ ...q[0], usd: total }];
+  }
+
+  const n = q.length;
+  const eachCents = Math.floor(Math.round(total * 100) / n);
+  let allocatedCents = 0;
+  return q.map((layer, i) => {
+    let cents;
+    if (i === n - 1) {
+      cents = Math.round(total * 100) - allocatedCents;
+    } else {
+      cents = eachCents;
+      allocatedCents += cents;
+    }
+    return { ...layer, usd: round2(cents / 100) };
+  });
+}
+
 function targetOf(P, N) {
   if (P == null) return null;
   return P + N * config.bankroll.stepUsd;
@@ -273,11 +303,10 @@ export function getState() {
 }
 
 /**
- * Align queue to live gap without destroying layer structure:
+ * Align queue to live gap:
  * - gap≈0 → clear queue
- * - gap>0 & empty → open next 补N = gap
- * - front > gap → shrink front amount only (keep 补N id)
- * - sum > gap → trim from tail (never merge all into 补1)
+ * - gap>0 & empty → open 补N = gap
+ * - gap>0 & layers → keep layer count/ids, even-split gap across remaining layers
  * @param {number} balance
  */
 function syncCatchUpQueue(balance) {
@@ -287,37 +316,28 @@ function syncCatchUpQueue(balance) {
     let queue = normalizeQueue(cache.catchUpQueue);
     let nextLayerId = nextIdFromQueue(queue, cache.nextLayerId);
     let changed = false;
-    const reasons = [];
+    let reason = null;
 
     if (gap < GAP_EPS) {
       if (queue.length) {
         queue = [];
         nextLayerId = 1;
         changed = true;
-        reasons.push('gap_cleared');
+        reason = 'gap_cleared';
       }
     } else if (queue.length === 0) {
       const made = makeLayer(gap, nextLayerId);
       queue = [made.layer];
       nextLayerId = made.nextLayerId;
       changed = true;
-      reasons.push('open_补');
+      reason = 'open_补';
     } else {
-      if (queue[0].usd - gap > GAP_EPS) {
-        queue = [{ ...queue[0], usd: round2(gap) }, ...queue.slice(1)];
+      const before = queue.map((x) => `${x.id}:${x.usd}`).join(',');
+      queue = evenSplitAcrossLayers(queue, gap);
+      const after = queue.map((x) => `${x.id}:${x.usd}`).join(',');
+      if (before !== after) {
         changed = true;
-        reasons.push('shrink_front');
-      }
-      while (queue.length > 1 && queueSum(queue) - gap > GAP_EPS) {
-        queue = queue.slice(0, -1);
-        changed = true;
-        reasons.push('trim_tail');
-      }
-      // Single remaining layer still larger than gap → shrink only
-      if (queue.length === 1 && queue[0].usd - gap > GAP_EPS) {
-        queue = [{ ...queue[0], usd: round2(gap) }];
-        changed = true;
-        reasons.push('shrink_front');
+        reason = queue.length > 1 ? 'even_split' : 'shrink_front';
       }
     }
 
@@ -326,7 +346,7 @@ function syncCatchUpQueue(balance) {
       cache.nextLayerId = nextLayerId;
       writeDisk(cache);
       logger.info('[bankroll] catch-up queue synced', {
-        reason: reasons.join('+'),
+        reason,
         gapUsd: gap,
         catchUpQueue: queue,
         netCount: cache.netCount,
@@ -338,7 +358,7 @@ function syncCatchUpQueue(balance) {
   });
 }
 
-/** After settle: keep layer ids, shrink/trim if sum exceeds new gap. */
+/** After settle: keep layer ids/count; even-split total gap across remaining layers. */
 function reconcileQueueToGap(queue, gap, nextLayerId) {
   let q = normalizeQueue(queue);
   let nextId = nextIdFromQueue(q, nextLayerId);
@@ -349,16 +369,10 @@ function reconcileQueueToGap(queue, gap, nextLayerId) {
     const made = makeLayer(gap, nextId);
     return { queue: [made.layer], nextLayerId: made.nextLayerId };
   }
-  if (q[0].usd - gap > GAP_EPS) {
-    q = [{ ...q[0], usd: round2(gap) }, ...q.slice(1)];
-  }
-  while (q.length > 1 && queueSum(q) - gap > GAP_EPS) {
-    q = q.slice(0, -1);
-  }
-  if (q.length === 1 && q[0].usd - gap > GAP_EPS) {
-    q = [{ ...q[0], usd: round2(gap) }];
-  }
-  return { queue: q, nextLayerId: nextIdFromQueue(q, nextId) };
+  return {
+    queue: evenSplitAcrossLayers(q, gap),
+    nextLayerId: nextIdFromQueue(q, nextId),
+  };
 }
 
 /**
@@ -612,16 +626,19 @@ export function onSettled(won, equityBalance = null, pnlUsd = null) {
           nextLayerId = made.nextLayerId;
         }
       } else {
+        // Loss while in catch-up: if gap grew, append a new layer, then even-split
+        // total gap across all remaining layers (incl. the new one).
         const next = round2(gap - queueSum(queue));
         if (next >= GAP_EPS) {
           const made = makeLayer(next, nextLayerId);
           queue = [...queue, made.layer];
           nextLayerId = made.nextLayerId;
-        } else if (gap >= GAP_EPS) {
-          // gap shrank vs queue (fees / multi-instance) — shrink/trim, keep layers
-          const reconciled = reconcileQueueToGap(queue, gap, nextLayerId);
-          queue = reconciled.queue;
-          nextLayerId = reconciled.nextLayerId;
+        }
+        if (gap >= GAP_EPS) {
+          queue = evenSplitAcrossLayers(queue, gap);
+        } else {
+          queue = [];
+          nextLayerId = 1;
         }
       }
     }
