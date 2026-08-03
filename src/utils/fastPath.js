@@ -62,9 +62,11 @@ export function firstButtonCycleStartTs(nowMs, cycleMs, minRemainingMs = 15_000)
 
 /**
  * Delay after UTC boundary before runCycle.
- * - pending unsettled: wait at least settle buffer so wake aligns with oracle
+ * - pending unsettled OR resting GTC watch: wait at least settle buffer so wake aligns with oracle
  * - in_chain continuation: use short delay (candle/EMA not needed)
  * - new signal: full SIGNAL_DELAY_MS (candle must close)
+ *
+ * Callers should pass hasPending=true when prior pendingBet OR any resting fill watch is active.
  */
 export function resolveCycleSignalDelayMs({
   phase,

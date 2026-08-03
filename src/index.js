@@ -55,7 +55,11 @@ import {
   initRestingFillWatcher,
   scheduleRestingFillWatch,
   stopAllRestingFillWatchers,
+  stopRestingFillWatch,
+  stopRestingFillWatchesForCycle,
+  stopRestingFillWatchesForOrders,
   hasActiveRestingFillWatch,
+  hasActiveRestingFillWatchForCycle,
 } from './trader/restingFillWatcher.js';
 import * as martingale from './martingale/manager.js';
 import { formatBankrollTelegramLines } from './martingale/bankroll.js';
@@ -101,6 +105,8 @@ const inFlightWork = new Set();
 let tradeLock = Promise.resolve();
 /** Cycle starts that already have a live fill / resting watch. */
 const orderedCycleTs = new Set();
+/** Cycles already settled or voided — ignore late fillWatch callbacks. */
+const closedCycleTs = new Set();
 let placingForCycle = null;
 
 function trackWork(promise) {
@@ -228,6 +234,9 @@ function pruneOrderedCycles(nowMs = Date.now()) {
   for (const ts of orderedCycleTs) {
     if (ts < cutoff) orderedCycleTs.delete(ts);
   }
+  for (const ts of closedCycleTs) {
+    if (ts < cutoff) closedCycleTs.delete(ts);
+  }
 }
 
 function markCycleOrdered(cycleStartTs) {
@@ -237,6 +246,15 @@ function markCycleOrdered(cycleStartTs) {
 
 function unmarkCycleOrdered(cycleStartTs) {
   orderedCycleTs.delete(cycleStartTs);
+}
+
+function markCycleClosed(cycleStartTs) {
+  pruneOrderedCycles();
+  closedCycleTs.add(cycleStartTs);
+}
+
+function isCycleClosed(cycleStartTs) {
+  return closedCycleTs.has(cycleStartTs);
 }
 
 function isCycleOrdered(cycleStartTs) {
@@ -259,7 +277,10 @@ async function withTradeLock(cycleStartTs, fn) {
   try {
     if (shutdownRequested) return { status: 'shutdown' };
     if (pendingBet) return { status: 'pending_unsettled' };
-    if (hasActiveRestingFillWatch()) return { status: 'resting_fill_pending' };
+    // Only block if THIS cycle still has an open GTC watch — prior-cycle watches must not block MG_CONT
+    if (hasActiveRestingFillWatchForCycle(cycleStartTs)) {
+      return { status: 'resting_fill_pending' };
+    }
     if (isCycleOrdered(cycleStartTs)) return { status: 'already_ordered' };
     placingForCycle = cycleStartTs;
     return await fn();
@@ -902,9 +923,11 @@ async function runCycle(cycleStartTs) {
       return;
     }
 
-    if (hasActiveRestingFillWatch()) {
+    if (hasActiveRestingFillWatchForCycle(cycleStartTs)) {
       cycleStatus = 'resting_fill_pending';
-      logger.warn('[main] 仍有 GTC 挂单监视中 — 跳过本周期下单');
+      logger.warn('[main] 本周期 GTC 挂单仍在监视 — 跳过重复下单', {
+        cycle: formatBeijingTime(cycleStartTs),
+      });
       return;
     }
 
@@ -1301,7 +1324,14 @@ async function confirmOrderFilled(pending) {
     logger.warn('[settle] 结算时订单未成交 — 作废待结算注单', {
       orderId: pending.orderId,
     });
+    const voidOrderIds = [
+      pending.orderId,
+      ...(pending.companionOrderIds || []),
+    ].filter(Boolean);
     unmarkCycleOrdered(pending.cycleStartTs);
+    markCycleClosed(pending.cycleStartTs);
+    stopRestingFillWatchesForOrders(voidOrderIds);
+    stopRestingFillWatchesForCycle(pending.cycleStartTs);
     pendingBet = null;
     savePending();
     trackWork((async () => {
@@ -1442,8 +1472,18 @@ async function applySettlement(pending, { candles } = {}) {
     ...stats.formatLogFields(),
   });
 
+  const settledOrderIds = [
+    pending.orderId,
+    ...(pending.companionOrderIds || []),
+  ].filter(Boolean);
+
   pendingBet = null;
   savePending();
+  unmarkCycleOrdered(cycleStartTs);
+  markCycleClosed(cycleStartTs);
+  // Prior GTC watch must not block MG_CONT / next-cycle placeOrder
+  stopRestingFillWatchesForOrders(settledOrderIds);
+  stopRestingFillWatchesForCycle(cycleStartTs);
 
   writeSettlementLog({
     ts: new Date().toISOString(),
@@ -1708,6 +1748,13 @@ async function scheduler() {
   });
 
   initRestingFillWatcher(async (ctx) => {
+    if (isCycleClosed(ctx.cycleStartTs)) {
+      logger.debug('[fillWatch] 周期已结算/作废 — 忽略迟到成交回调', {
+        cycle: formatBeijingTime(ctx.cycleStartTs),
+      });
+      return;
+    }
+
     const companionOrderIds = ctx.companionOrderIds || (
       ctx.topUpOrderId ? [ctx.topUpOrderId] : []
     );
@@ -1759,6 +1806,16 @@ async function scheduler() {
       await formatBalanceTelegramLine() +
       formatStatsTelegramBlock()
     );
+  }, {
+    onEnded: ({ cycleStartTs, registered, aborted }) => {
+      // Unfilled GTC watch ended without pending — clear already_ordered so future logic stays clean
+      if (!registered && !aborted && Number.isFinite(Number(cycleStartTs))) {
+        unmarkCycleOrdered(cycleStartTs);
+        logger.info('[fillWatch] 未成交监视结束 — 已清除周期下单标记', {
+          cycle: formatBeijingTime(cycleStartTs),
+        });
+      }
+    },
   });
 
   if (usesChainlinkSettlement()) {
@@ -1837,21 +1894,23 @@ async function scheduler() {
 
     const vg = vegasState.getState();
     const btnForDelay = buttonSequence.getState();
-    const delayMs = btnForDelay.pendingStart
-      ? Math.min(config.signalDelayMs, config.inChainSignalDelayMs)
-      : resolveCycleSignalDelayMs({
-        phase: vg.phase,
-        lockedSignal: vg.lockedSignal,
-        hasPending: Boolean(pendingBet),
-        signalDelayMs: config.signalDelayMs,
-        inChainSignalDelayMs: config.inChainSignalDelayMs,
-        settleBufferMs: config.chainlink.settleBufferMs,
-      });
+    const delayMs = resolveCycleSignalDelayMs({
+      phase: vg.phase,
+      lockedSignal: vg.lockedSignal,
+      // Wait for settle wake when prior bet OR prior GTC watch is still alive
+      hasPending: Boolean(pendingBet) || hasActiveRestingFillWatch(),
+      signalDelayMs: config.signalDelayMs,
+      inChainSignalDelayMs: btnForDelay.pendingStart
+        ? Math.min(config.signalDelayMs, config.inChainSignalDelayMs)
+        : config.inChainSignalDelayMs,
+      settleBufferMs: config.chainlink.settleBufferMs,
+    });
 
     logger.debug('[scheduler] 边界后信号延迟', {
       delayMs,
       phase: vg.phase,
       hasPending: Boolean(pendingBet),
+      hasRestingWatch: hasActiveRestingFillWatch(),
       buttonPendingStart: btnForDelay.pendingStart,
     });
 

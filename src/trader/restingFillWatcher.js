@@ -1,6 +1,8 @@
 /**
  * GTC resting orders: after short fillSync, keep polling getOrder until cycle end + grace.
  * On fill → callback to open pending bet + schedule settlement.
+ *
+ * Watches are scoped by cycleStartTs so a prior cycle's watch cannot block the next cycle's order.
  */
 
 import config from '../config.js';
@@ -10,11 +12,14 @@ import { formatBeijingTime } from '../utils/datetime.js';
 import { getClobClient, clobHasL2Creds } from './executor.js';
 import { fetchFillFromOrder } from './fillSync.js';
 
-/** @type {Map<string, { abort: boolean }>} */
+/** @type {Map<string, { abort: boolean, orderId: string, cycleEndMs: number, watchUntilMs: number, ctx: object }>} */
 const active = new Map();
 
 /** @type {(ctx: object) => Promise<void>|void} */
 let onOrderFilled = null;
+
+/** @type {(ctx: { orderId: string, cycleStartTs?: number, registered: boolean }) => void} */
+let onWatchEnded = null;
 
 /** Extra watch after cycle end so late GTC fills still register pending + settle. */
 function watchGraceMs() {
@@ -22,8 +27,9 @@ function watchGraceMs() {
   return buffer + 90_000;
 }
 
-export function initRestingFillWatcher(handler) {
+export function initRestingFillWatcher(handler, { onEnded } = {}) {
   onOrderFilled = handler;
+  onWatchEnded = typeof onEnded === 'function' ? onEnded : null;
 }
 
 async function pollUntilFilledOrCycleEnd(entry) {
@@ -102,6 +108,19 @@ async function pollUntilFilledOrCycleEnd(entry) {
       logger.info(`[fillWatch] 监视窗口结束仍未成交，停止监视 orderId=${orderId}`);
     }
   }
+
+  if (onWatchEnded) {
+    try {
+      onWatchEnded({
+        orderId,
+        cycleStartTs: ctx.cycleStartTs,
+        registered,
+        aborted: Boolean(entry.abort),
+      });
+    } catch (err) {
+      logger.warn('[fillWatch] onWatchEnded 失败', { error: err?.message });
+    }
+  }
 }
 
 /**
@@ -145,6 +164,24 @@ export function stopRestingFillWatch(orderId) {
   }
 }
 
+/** Stop all watches for a cycle (e.g. after that cycle has settled). */
+export function stopRestingFillWatchesForCycle(cycleStartTs) {
+  const ts = Number(cycleStartTs);
+  if (!Number.isFinite(ts)) return;
+  for (const [id, entry] of active.entries()) {
+    if (Number(entry.ctx?.cycleStartTs) === ts) {
+      entry.abort = true;
+      active.delete(id);
+    }
+  }
+}
+
+export function stopRestingFillWatchesForOrders(orderIds) {
+  for (const id of (orderIds || []).filter(Boolean)) {
+    stopRestingFillWatch(id);
+  }
+}
+
 export function stopAllRestingFillWatchers() {
   for (const entry of active.values()) entry.abort = true;
   active.clear();
@@ -153,4 +190,14 @@ export function stopAllRestingFillWatchers() {
 /** True while any GTC resting order is still being polled. */
 export function hasActiveRestingFillWatch() {
   return active.size > 0;
+}
+
+/** True only if a watch belongs to this cycle window (do not block next cycle). */
+export function hasActiveRestingFillWatchForCycle(cycleStartTs) {
+  const ts = Number(cycleStartTs);
+  if (!Number.isFinite(ts)) return false;
+  for (const entry of active.values()) {
+    if (Number(entry.ctx?.cycleStartTs) === ts) return true;
+  }
+  return false;
 }
