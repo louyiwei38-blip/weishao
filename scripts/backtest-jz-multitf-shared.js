@@ -531,34 +531,44 @@ async function runSymbol(symbol) {
   return { symbol, base, summary };
 }
 
-async function main() {
+function resolveSymbols() {
+  const listRaw = argStr('symbols');
+  if (listRaw) {
+    return listRaw
+      .split(/[,;\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => (s.includes('/') ? s.toUpperCase() : `${s.toUpperCase()}/USDT`));
+  }
   const all = process.argv.includes('--all') || !argStr('symbol');
-  const symbols = all
-    ? ['BTC/USDT', 'ETH/USDT']
-    : [
-        argStr('symbol', 'BTC/USDT').includes('/')
-          ? argStr('symbol', 'BTC/USDT')
-          : `${argStr('symbol')}/USDT`,
-      ];
+  if (all) return ['BTC/USDT', 'ETH/USDT'];
+  const one = argStr('symbol', 'BTC/USDT');
+  return [one.includes('/') ? one : `${one}/USDT`];
+}
+
+async function main() {
+  const symbols = resolveSymbols();
 
   console.log('=== 神奇九转 · 多周期共用账本 (5m+15m+1h) · ml=2 无上限 ===');
   console.log(
     `Period ${new Date(FROM_MS).toISOString().slice(0, 10)} → ${new Date(TO_MS).toISOString().slice(0, 10)}` +
       ` · step=$${STEP} · entry ${ENTRY_LO}-${ENTRY_HI} seed=${SEED}`,
   );
+  console.log(`Symbols: ${symbols.join(', ')}`);
 
   const results = [];
   for (const sym of symbols) {
     results.push(await runSymbol(sym));
   }
 
-  const bundlePath = join(OUT_DIR, 'backtest-jz-sharedtf-btc-eth-5m15m1h-from2020-ml2.json');
+  const tag = results.map((r) => r.base).join('-') || 'run';
+  const bundlePath = join(OUT_DIR, `backtest-jz-sharedtf-${tag}-5m15m1h-from2020-ml2.json`);
   writeFileSync(
     bundlePath,
     JSON.stringify(
       {
         generatedAt: new Date().toISOString(),
-        note: 'JZ ml=2; BTC/ETH each share one book across 5m+15m+1h; order by signalBarT then 5m→15m→1h',
+        note: 'JZ ml=2; each symbol shares one book across 5m+15m+1h; order by signalBarT then 5m→15m→1h',
         params: results[0]?.summary.params,
         symbols: results.map((r) => ({
           symbol: r.symbol,
