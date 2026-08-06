@@ -1,9 +1,10 @@
 /**
  * Shared trading-universe parser for PM2 ecosystem + tooling.
- * Configure via .env only:
- *   TRADING_SYMBOLS=BTC              (single-symbol default; comma-list still supported)
- *   CANDLE_TIMEFRAMES=5m             (single-timeframe default)
+ * Configure via .env:
+ *   TRADING_SYMBOLS=BTC,ETH
+ *   CANDLE_TIMEFRAMES=5m,15m,1h
  *
+ * Live strategy is always 神奇九转 (jz). All instances share BANKROLL_SCOPE=jz.
  * Fallback: TRADING_SYMBOL (single) when TRADING_SYMBOLS is empty.
  */
 'use strict';
@@ -57,7 +58,7 @@ function parseTradingSymbolBases(env = process.env) {
  * @returns {Array<[string, number]>} e.g. [['5m',5],['15m',15],['1h',60]]
  */
 function parseCandleTimeframes(env = process.env) {
-  const raw = env.CANDLE_TIMEFRAMES || '5m';
+  const raw = env.CANDLE_TIMEFRAMES || '5m,15m,1h';
   const out = [];
   const seen = new Set();
   for (const tok of splitList(raw)) {
@@ -67,48 +68,32 @@ function parseCandleTimeframes(env = process.env) {
     seen.add(tf);
     out.push([tf, minutes]);
   }
-  return out.length ? out : [['5m', 5]];
+  return out.length ? out : [['5m', 5], ['15m', 15], ['1h', 60]];
 }
 
 /**
- * Strategies to run as separate PM2 processes (same symbols × timeframes).
- * STRATEGIES=vegas,jz  (default: vegas only)
- * @param {NodeJS.ProcessEnv} [env]
- * @returns {string[]} e.g. ['vegas'] | ['vegas','jz']
+ * Live strategy list — always 神奇九转.
+ * @returns {string[]} always ['jz']
  */
-function parseStrategies(env = process.env) {
-  const raw = env.STRATEGIES || env.STRATEGY_LIST || 'vegas';
-  const out = [];
-  const seen = new Set();
-  for (const tok of splitList(raw)) {
-    const s = String(tok).trim().toLowerCase();
-    if (s !== 'vegas' && s !== 'jz') continue;
-    if (seen.has(s)) continue;
-    seen.add(s);
-    out.push(s);
-  }
-  return out.length ? out : ['vegas'];
+function parseStrategies(_env = process.env) {
+  return ['jz'];
 }
 
 /** @returns {{ id: string, name: string, base: string, tf: string, minutes: number, strategy: string }[]} */
 function buildInstances(env = process.env) {
   const bases = parseTradingSymbolBases(env);
   const tfs = parseCandleTimeframes(env);
-  const strategies = parseStrategies(env);
   const instances = [];
-  for (const strategy of strategies) {
-    for (const base of bases) {
-      for (const [tf, minutes] of tfs) {
-        const suffix = strategy === 'jz' ? '-jz' : '';
-        instances.push({
-          id: `${base.toLowerCase()}-${tf}${suffix}`,
-          name: `${base} ${tf}${strategy === 'jz' ? ' 九转' : ''}`,
-          base,
-          tf,
-          minutes,
-          strategy,
-        });
-      }
+  for (const base of bases) {
+    for (const [tf, minutes] of tfs) {
+      instances.push({
+        id: `${base.toLowerCase()}-${tf}`,
+        name: `${base} ${tf} 九转`,
+        base,
+        tf,
+        minutes,
+        strategy: 'jz',
+      });
     }
   }
   return instances;

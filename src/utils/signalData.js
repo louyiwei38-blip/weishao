@@ -4,7 +4,7 @@
  */
 
 const RETRYABLE_REASON_RE =
-  /未对齐|拉取失败|K 线不足|K 线索引无效|EMA 通道尚未对齐|信号数据未就绪/i;
+  /未对齐|拉取失败|K 线不足|K 线索引无效|EMA 通道尚未对齐|EMA 尚未就绪|信号数据未就绪/i;
 
 /**
  * @param {string|null|undefined} reason

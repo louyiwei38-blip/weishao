@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import config from '../config.js';
+import config, { resolveUsdCap } from '../config.js';
 import logger from '../utils/logger.js';
 import { scopedLogPath } from '../utils/instancePaths.js';
 import * as bankroll from './bankroll.js';
@@ -123,7 +123,7 @@ export function prepareOrder(portfolioBalance, entryPrice = null, cashBalance = 
 
   const actualBet = Math.min(
     sizing.stakeUsd,
-    config.maxBetUsd,
+    resolveUsdCap(config.maxBetUsd),
     Math.max(0, spendable),
   );
 

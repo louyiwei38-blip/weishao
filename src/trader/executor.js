@@ -686,7 +686,9 @@ async function submitLimitOrder(client, params, exec) {
 
     if (minSize > 0 && size < minSize) {
       const minCost = minSize * price;
-      if (minCost > config.maxBetUsd) {
+      // maxBetUsd ≤ 0 means uncapped
+      const maxBetCap = Number(config.maxBetUsd);
+      if (Number.isFinite(maxBetCap) && maxBetCap > 0 && minCost > maxBetCap) {
         return {
           ok: false,
           skipped: true,

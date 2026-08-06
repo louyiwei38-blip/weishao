@@ -209,21 +209,21 @@ check('martingaleMaxLosses >= 1', () => {
 });
 
 console.log('\n[6] signal data readiness (in-cycle retry)');
-check('EMA 未对齐 → retryable', () => {
-  assert.equal(isSignalDataNotReady('OKX EMA 未对齐到当前 K 线', true), true);
+check('K线未齐 → retryable', () => {
+  assert.equal(isSignalDataNotReady('等待新鲜已收盘 K 线', true), true);
 });
 check('拉取失败 → retryable by reason', () => {
-  assert.equal(isSignalDataNotReady('OKX EMA 拉取失败: timeout'), true);
+  assert.equal(isSignalDataNotReady('OHLCV 拉取失败: timeout'), true);
 });
-check('真实无穿越 → not retryable', () => {
+check('真实无九转 → not retryable', () => {
   assert.equal(
-    isSignalDataNotReady('无穿越入场（上一根实体在上方，本根影线未入通道）', false),
+    isSignalDataNotReady('无九转 Setup 完成', false),
     false,
   );
 });
-check('等待通道外 → not retryable', () => {
+check('idle 等待 → not retryable', () => {
   assert.equal(
-    isSignalDataNotReady('等待至少一根 K 线实体完全在维加斯通道外', false),
+    isSignalDataNotReady('等待下一次九转 Setup', false),
     false,
   );
 });

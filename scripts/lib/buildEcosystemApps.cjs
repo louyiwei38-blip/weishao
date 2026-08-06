@@ -21,6 +21,10 @@ function threadIdFor(instanceId, env) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+/**
+ * Build PM2 apps: symbols × timeframes × 神奇九转.
+ * All apps share BANKROLL_SCOPE=jz (one P/N/补队列 across BTC/ETH × 5m/15m/1h).
+ */
 function buildEcosystemApps(env, opts) {
   const cwd = opts.cwd;
   const prefix = opts.prefix !== undefined ? opts.prefix : env.PM2_NAME_PREFIX;
@@ -36,9 +40,8 @@ function buildEcosystemApps(env, opts) {
     time: true,
   };
 
-  function app(base, tf, minutes, strategy) {
-    const suffix = strategy === 'jz' ? '-jz' : '';
-    const id = base.toLowerCase() + '-' + tf + suffix;
+  function app(base, tf, minutes) {
+    const id = base.toLowerCase() + '-' + tf;
     const threadId = threadIdFor(id, env);
     const pm2Name = pm2Prefix + '-' + id;
     const instanceEnv = {
@@ -46,13 +49,11 @@ function buildEcosystemApps(env, opts) {
       CANDLE_TIMEFRAME: tf,
       MARKET_CYCLE_MINUTES: String(minutes),
       TRADING_SYMBOL: base + '/USDT',
-      STRATEGY: strategy,
-      BANKROLL_SCOPE: strategy === 'jz' ? 'jz' : 'vegas',
-    };
-    if (strategy === 'jz') {
+      STRATEGY: 'jz',
+      BANKROLL_SCOPE: 'jz',
       // Entry + 1 same-direction lock, then halt
-      instanceEnv.MARTINGALE_MAX_LOSSES = '2';
-    }
+      MARTINGALE_MAX_LOSSES: '2',
+    };
     if (threadId != null) instanceEnv.TELEGRAM_MESSAGE_THREAD_ID = String(threadId);
     return {
       ...shared,
@@ -66,11 +67,9 @@ function buildEcosystemApps(env, opts) {
 
   const symbols = parseTradingSymbolBases(env);
   const timeframes = parseCandleTimeframes(env);
-  const strategies = parseStrategies(env);
-  const apps = strategies.flatMap((strategy) =>
-    symbols.flatMap((base) =>
-      timeframes.map(([tf, minutes]) => app(base, tf, minutes, strategy)),
-    ),
+  const strategies = parseStrategies(env); // always ['jz']
+  const apps = symbols.flatMap((base) =>
+    timeframes.map(([tf, minutes]) => app(base, tf, minutes)),
   );
   return { apps, prefix: pm2Prefix, symbols, timeframes, strategies };
 }

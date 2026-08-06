@@ -218,7 +218,8 @@ pm2 save
 | `logs/pending-bet-15m.json` 等 | 待结算注单 |
 | `logs/heartbeat-15m.json` 等 | 心跳 |
 | `logs/martingale-state.json` | 马丁（内部按 `symbol:timeframe` 分轨） |
-| `logs/vegas-state.json` | 维加斯相位（同上分轨） |
+| `logs/jz-state-*.json` | 九转相位（按实例） |
+| `logs/bankroll-state-jz.json` | 共用账本 P/N/补队列 |
 | `logs/martingale-state.json` | 马丁状态 |
 | `logs/daily-loss.json` | 当日 UTC 累计亏损 |
 | `logs/heartbeat.json` | 最近一轮快照 |
@@ -263,7 +264,7 @@ grep chainlink logs/bot.log | tail -20
 | `[chainlink] RTDS disconnected` | 检查到 `ws-live-data.polymarket.com` 的网络；会自动重连 |
 | `pUSD balance below minimum` | 充值或降低 `MIN_BALANCE_USD` |
 | `no BTC 1h market found` / `market_not_found` | 检查 `TRADING_SYMBOL` 与 Polymarket 是否有对应 1h 盘口；等下一周期 |
-| 信号方向与预期不符 | 维加斯穿越：上穿入→买涨、下穿入→买跌；见 README 策略表 |
+| 信号方向与预期不符 | 九转：Buy Setup9→买涨、Sell Setup9→买跌；见 README 策略表 |
 | 盘口超阈值未成交 | 按 `ORDER_PRICE_CAP` 限价挂单，等价格回落；周期内未成交马丁不变 |
 | 限价挂单未成交 | 正常；周期结束未成交不计马丁；可调 `LIMIT_PRICE_OFFSET_TICKS` |
 | `Chainlink vs exchange OHLCV mismatch` | 告警 only；结算以 Chainlink 为准 |

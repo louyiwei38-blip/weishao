@@ -6,7 +6,7 @@
 
 import 'dotenv/config';
 import { fetchClosedCandles } from '../src/collector/binance.js';
-import * as vegasState from '../src/strategy/vegasState.js';
+import * as strategyState from '../src/strategy/activeStrategy.js';
 import { findCurrentCycleMarket, resolveOrderPricePolicy } from '../src/market/polymarket.js';
 import { placeOrder } from '../src/trader/executor.js';
 import * as martingale from '../src/martingale/manager.js';
@@ -15,21 +15,21 @@ import config from '../src/config.js';
 const CYCLE_MS = config.cycleMinutes * 60 * 1000;
 
 async function main() {
-  console.log('=== Dry-run cycle test (Vegas 1h) ===');
+  console.log('=== Dry-run cycle test (神奇九转) ===');
   console.log('DRY_RUN:', config.dryRun);
   console.log('timeframe:', config.timeframe, 'cycleMinutes:', config.cycleMinutes);
 
   const cycleStartTs = Math.floor(Date.now() / CYCLE_MS) * CYCLE_MS;
 
   martingale.init();
-  vegasState.init();
+  strategyState.init();
 
   const candles = await fetchClosedCandles(config.candleLimit);
   console.log('candles:', candles.length, 'last:', candles.at(-1)?.t);
 
-  const signalObj = await vegasState.resolveSignal(candles);
-  const vg = vegasState.getState();
-  console.log('\n[1] Phase:', vg.phase, 'locked:', vg.lockedSignal);
+  const signalObj = await strategyState.resolveSignal(candles);
+  const st = strategyState.getState();
+  console.log('\n[1] Phase:', st.phase, 'locked:', st.lockedSignal);
   console.log('    Signal:', signalObj.signal, signalObj.signalId, '-', signalObj.reason);
 
   if (signalObj.signal === 'NONE') {
@@ -78,9 +78,7 @@ async function main() {
     skipReason: orderResult.skipReason,
     orderId: orderResult.orderId,
     usdcSpent: orderResult.usdcSpent,
-    resting: orderResult.resting,
   });
-  console.log('\n=== Done ===');
 }
 
 main().catch((err) => {

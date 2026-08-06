@@ -18,19 +18,19 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, closeSync, unlinkSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import config from '../config.js';
+import config, { resolveUsdCap } from '../config.js';
 import logger from '../utils/logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOGS_DIR = join(__dirname, '..', '..', 'logs');
 
-/** vegas keeps legacy bankroll-state.json; jz → bankroll-state-jz.json */
+/**
+ * Shared ledger across all symbol×TF processes.
+ * Default scope `jz` → logs/bankroll-state-jz.json
+ */
 function bankrollStateFile() {
-  const scope = String(config.bankrollScope || 'vegas').toLowerCase();
-  if (!scope || scope === 'vegas' || scope === 'default') {
-    return join(LOGS_DIR, 'bankroll-state.json');
-  }
-  const safe = scope.replace(/[^a-zA-Z0-9_-]/g, '') || 'vegas';
+  const scope = String(config.bankrollScope || 'jz').toLowerCase();
+  const safe = scope.replace(/[^a-zA-Z0-9_-]/g, '') || 'jz';
   return join(LOGS_DIR, `bankroll-state-${safe}.json`);
 }
 
@@ -103,12 +103,10 @@ function round2(n) {
   return Math.round(Number(n) * 100) / 100;
 }
 
-/** Sum total.pnlUsd from stats-state*.json matching this bankroll scope. */
+/** Sum total.pnlUsd from stats-state*.json (all live instances share one jz ledger). */
 function statsFileMatchesScope(name) {
-  const scope = String(config.bankrollScope || 'vegas').toLowerCase();
-  const isJz = /-jz\.json$/i.test(name);
-  if (scope === 'jz') return isJz;
-  return !isJz;
+  if (!/^stats-state(-[\w.-]+)?\.json$/i.test(name)) return false;
+  return true;
 }
 
 function sumStatsPnlFromDisk() {
@@ -407,8 +405,11 @@ function reconcileQueueToGap(queue, gap, nextLayerId) {
 export function computeStake({ balance, entryPrice, spendCap }) {
   const step = config.bankroll.stepUsd;
   const defaultBet = config.tradeBudgetUsd;
-  const tCap = config.bankroll.catchUpProfitCapUsd;
-  const stakeMax = Math.min(config.bankroll.stakeMaxUsd, config.maxBetUsd);
+  const tCap = resolveUsdCap(config.bankroll.catchUpProfitCapUsd);
+  const stakeMax = Math.min(
+    resolveUsdCap(config.bankroll.stakeMaxUsd),
+    resolveUsdCap(config.maxBetUsd),
+  );
   const bal = Number(balance);
   const p = Number(entryPrice);
   const cap = Number.isFinite(Number(spendCap)) ? Number(spendCap) : bal;
@@ -422,7 +423,7 @@ export function computeStake({ balance, entryPrice, spendCap }) {
 
   const clampStake = (raw) => {
     let s = Math.max(0, Number(raw) || 0);
-    s = Math.min(s, stakeMax);
+    if (Number.isFinite(stakeMax)) s = Math.min(s, stakeMax);
     if (Number.isFinite(cap) && cap >= 0) s = Math.min(s, cap);
     return round2(s);
   };
@@ -473,7 +474,7 @@ export function computeStake({ balance, entryPrice, spendCap }) {
   const layerUsd = round2(front.usd);
   const layerIndex = front.id;
   let T = round2(layerUsd + step);
-  if (Number.isFinite(tCap) && tCap > 0) T = Math.min(T, tCap);
+  if (Number.isFinite(tCap)) T = Math.min(T, tCap);
   T = round2(T);
 
   if (!(T > 0) || !(p > 0 && p < 1)) {
@@ -519,14 +520,17 @@ function stakeFromTargetProfit({ targetProfitUsd, entryPrice, balance = Infinity
   const T = Number(targetProfitUsd);
   const p = Number(entryPrice);
   const bal = Number(balance);
-  const stakeMax = Math.min(config.bankroll.stakeMaxUsd, config.maxBetUsd);
+  const stakeMax = Math.min(
+    resolveUsdCap(config.bankroll.stakeMaxUsd),
+    resolveUsdCap(config.maxBetUsd),
+  );
 
   if (!(T > 0) || !(p > 0 && p < 1)) {
     return { stakeUsd: 0, shares: null, targetProfitUsd: T || null };
   }
 
   let stakeUsd = T * (p / (1 - p));
-  stakeUsd = Math.min(stakeUsd, stakeMax);
+  if (Number.isFinite(stakeMax)) stakeUsd = Math.min(stakeUsd, stakeMax);
   if (Number.isFinite(bal) && bal >= 0) stakeUsd = Math.min(stakeUsd, bal);
   stakeUsd = round2(stakeUsd);
   const shares = Math.round((stakeUsd / p) * 1e6) / 1e6;

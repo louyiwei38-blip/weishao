@@ -60,7 +60,7 @@ export function buildMinOpenTracks(activityTier, balance) {
       minOpenTier,
       actualBet: Math.min(
         getBetForActivityTier(minOpenTier),
-        config.maxBetUsd,
+        Number(config.maxBetUsd) > 0 ? config.maxBetUsd : Infinity,
         balance,
       ),
     }))

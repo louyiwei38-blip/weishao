@@ -1,7 +1,7 @@
 /**
  * Polymarket bot — entry point
- * Strategies: Vegas EMA144/169 | Magic Nine (STRATEGY=jz)
- * Multi-instance: BOT_INSTANCE + CANDLE_TIMEFRAME (+ optional -jz)
+ * Strategy: 神奇九转 (Magic Nine)
+ * Multi-instance: BOT_INSTANCE + CANDLE_TIMEFRAME; all share BANKROLL_SCOPE=jz
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
@@ -91,8 +91,7 @@ const PENDING_FILE = scopedLogPath(LOGS_DIR, 'pending-bet.json');
 const CYCLE_MS = config.cycleMinutes * 60 * 1000;
 function tgHead(titleHtml) {
   const base = String(config.symbol || '').split('/')[0] || '?';
-  const strat = config.strategy === 'jz' ? '·九转' : '';
-  return `[${base}·${config.timeframe}${strat}] ${titleHtml}`;
+  return `[${base}·${config.timeframe}·九转] ${titleHtml}`;
 }
 
 // Pending bet awaiting settlement. Shape:
@@ -988,7 +987,7 @@ async function runCycle(cycleStartTs) {
       vgEarly.phase === 'in_chain' &&
       (vgEarly.lockedSignal === 'UP' || vgEarly.lockedSignal === 'DOWN');
 
-    // ── in_chain: skip OHLCV/EMA — direction already locked ──
+    // ── in_chain: skip OHLCV — direction already locked ──
     if (inChainCont) {
       const signalObj = buildMgContSignal(
         vgEarly.lockedSignal,
@@ -1016,7 +1015,7 @@ async function runCycle(cycleStartTs) {
       return;
     }
 
-    // ── New signal path: fresh closed candles + OKX EMA (retry in-cycle if not ready) ──
+    // ── New signal path: fresh closed candles (retry in-cycle if not ready) ──
     const dataDeadline = resolveSignalDataDeadlineMs({
       nowMs: Date.now(),
       cycleStartTs,
@@ -1087,7 +1086,7 @@ async function runCycle(cycleStartTs) {
       signalObj = await strategyState.resolveSignal(candles);
 
       if (isSignalDataNotReady(signalObj.reason, signalObj.retryable)) {
-        logger.warn('[main] 信号数据未就绪（EMA/对齐）— 周期内重试', {
+        logger.warn('[main] 信号数据未就绪（K线/对齐）— 周期内重试', {
           attempt: dataAttempt,
           reason: signalObj.reason,
           phase: signalObj.phase,
@@ -1137,7 +1136,7 @@ async function runCycle(cycleStartTs) {
     if (!signalObj) {
       cycleStatus = lastDataError ? 'ohlcv_failed' : 'signal_data_timeout';
       cycleError = lastDataError
-        ?? `等待新鲜 K 线/EMA 对齐超时（attempts=${dataAttempt}）`;
+        ?? `等待新鲜 K 线对齐超时（attempts=${dataAttempt}）`;
       logger.error('[main] 周期内信号数据仍未就绪 — 保留窗口剩余时间不再强开', {
         attempts: dataAttempt,
         error: cycleError,
@@ -1165,7 +1164,7 @@ async function runCycle(cycleStartTs) {
       reason: signalObj.reason,
       phase: signalObj.phase ?? vg.phase,
       lockedSignal: signalObj.lockedSignal ?? vg.lockedSignal,
-      path: 'vegas_entry',
+      path: 'jz_entry',
       dataAttempts: dataAttempt,
     });
 
@@ -1173,7 +1172,7 @@ async function runCycle(cycleStartTs) {
       const btnDecision = await processCycleTradeDecision({
         cycleStartTs,
         projectSignalObj: signalObj,
-        projectSource: 'vegas_entry',
+        projectSource: 'jz_entry',
       });
       if (btnDecision.handled) {
         cycleStatus = btnDecision.result?.status === 'filled' || btnDecision.result?.status === 'resting'
@@ -1198,7 +1197,7 @@ async function runCycle(cycleStartTs) {
     const resultWrap = await processCycleTradeDecision({
       cycleStartTs,
       projectSignalObj: signalObj,
-      projectSource: 'vegas_entry',
+      projectSource: 'jz_entry',
     });
     const result = resultWrap.result ?? { status: 'no_trade' };
     cycleStatus = result.status === 'filled' || result.status === 'resting' ? 'ok' : result.status;
@@ -1610,12 +1609,12 @@ async function applySettlement(pending, { candles } = {}) {
 
   const brAfter = mg.bankroll;
   const haltNote = halted
-    ? `\n⚠️ <b>马丁连亏止损</b> — 等待通道外实体后再检测；连败计数已清零` +
+    ? `\n⚠️ <b>马丁连亏止损</b> — 等待下一次九转；连败计数已清零` +
       `\n本金/净胜负保持` +
       (brAfter?.principal != null ? ` P=$${Number(brAfter.principal).toFixed(2)}` : '') +
       (brAfter?.netCount != null ? ` · N=${brAfter.netCount}` : '')
     : won
-      ? `\n⏹ <b>链路结束</b> — 等待通道外实体后再检测`
+      ? `\n⏹ <b>链路结束</b> — 等待下一次九转`
       : '';
 
   const priceLine = usesChainlinkSettlement()
@@ -1825,9 +1824,8 @@ async function scheduler() {
     `模式: ${config.dryRun ? 'DRY_RUN' : 'LIVE'}\n` +
     `结算: <b>${escapeHtml(settleSourceLabel())}</b> (${escapeHtml(config.settleSource)})\n` +
     `马丁: 默认$${config.tradeBudgetUsd} ×${config.martingaleMultiplier} / 连亏${config.martingaleMaxLosses}` +
-    (config.strategy === 'jz' ? ' (胜结束·输锁1次)' : '') +
-    `\n` +
-    `账本: ${escapeHtml(config.bankrollScope)}\n` +
+    ` (胜结束·输锁1次)\n` +
+    `账本: ${escapeHtml(config.bankrollScope)}（多标的多周期共用）\n` +
     formatBankrollTelegramLines() +
     (startupBalance != null
       ? `启动 Portfolio: $${Number(startupBalance).toFixed(2)}` +

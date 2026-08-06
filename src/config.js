@@ -21,7 +21,7 @@ const PM2_OWNED_KEYS = [
   'NODE_ENV',
   /** Per-instance Telegram forum topic (injected by ecosystem from TELEGRAM_THREAD_*). */
   'TELEGRAM_MESSAGE_THREAD_ID',
-  /** Strategy + bankroll isolation (vegas | jz) */
+  /** Strategy locked to jz; bankroll shared across all instances */
   'STRATEGY',
   'BANKROLL_SCOPE',
   'MARTINGALE_MAX_LOSSES',
@@ -50,6 +50,13 @@ function optional(name, defaultValue) {
   return process.env[name] ?? defaultValue;
 }
 
+/** 0 / negative / non-finite → Infinity (no hard USD cap). */
+export function resolveUsdCap(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return Infinity;
+  return n;
+}
+
 function num(name, defaultValue) {
   const v = process.env[name];
   return v !== undefined ? Number(v) : defaultValue;
@@ -72,12 +79,15 @@ function timeframeToMinutes(tf) {
 
 const timeframe = optional('CANDLE_TIMEFRAME', '5m');
 const derivedCycleMinutes = timeframeToMinutes(timeframe) ?? 5;
-/** vegas = 维加斯通道；jz = 神奇九转（独立账本 / 补队列） */
-const strategy = optional('STRATEGY', 'vegas').toLowerCase();
-const bankrollScope = optional(
-  'BANKROLL_SCOPE',
-  strategy === 'jz' ? 'jz' : 'vegas',
-).toLowerCase();
+/** Live strategy is always 神奇九转; all symbol×TF instances share one ledger. */
+const strategyRaw = optional('STRATEGY', 'jz').toLowerCase();
+if (strategyRaw && strategyRaw !== 'jz') {
+  console.warn(
+    `[config] STRATEGY=${strategyRaw} ignored — only jz (神奇九转) is supported`,
+  );
+}
+const strategy = 'jz';
+const bankrollScope = optional('BANKROLL_SCOPE', 'jz').toLowerCase();
 
 const config = {
   // Polymarket
@@ -148,10 +158,11 @@ const config = {
     return out.length ? out : ['5m'];
   })(),
   timeframe,
-  candleLimit: num('CANDLE_FETCH_LIMIT', 200),
+  /** Enough closed bars for 九转 Setup (≥13) + headroom */
+  candleLimit: num('CANDLE_FETCH_LIMIT', 250),
   /** New-signal delay after UTC boundary; timeframe-aware default (5m→3s, 15m→4s, 1h→5s). */
   signalDelayMs: num('SIGNAL_DELAY_MS', defaultSignalDelayMs(timeframe)),
-  /** in_chain MG_CONT: short delay (no candle/EMA needed). Fallback when settle fast-path misses. */
+  /** in_chain MG_CONT: short delay (no candle needed). Fallback when settle fast-path misses. */
   inChainSignalDelayMs: num('IN_CHAIN_SIGNAL_DELAY_MS', 100),
   /** Prefetch Gamma/CLOB/balance this many ms before the next boundary. */
   prewarmMs: num('PREWARM_MS', 5000),
@@ -159,9 +170,9 @@ const config = {
   mgContFastPath: bool('MG_CONT_FAST_PATH', true),
   /** Skip order if fewer than this many ms remain in the cycle window. */
   minTradeRemainingMs: num('MIN_TRADE_REMAINING_MS', 15_000),
-  /** New-signal path: retry interval when candle stale / EMA not aligned. */
+  /** New-signal path: retry interval when candle stale / not aligned. */
   signalDataRetryMs: num('SIGNAL_DATA_RETRY_MS', 800),
-  /** New-signal path: max wait for fresh candle + aligned EMA (still within cycle). */
+  /** New-signal path: max wait for fresh candle (still within cycle). */
   signalDataMaxWaitMs: num('SIGNAL_DATA_MAX_WAIT_MS', 60_000),
 
   /**
@@ -179,7 +190,8 @@ const config = {
   tradeBudgetUsd: num('TRADE_BUDGET_USD', 5),
   maxDailyLossUsd: num('MAX_DAILY_LOSS_USD', 10000),
   minBalanceUsd: num('MIN_BALANCE_USD', 0),
-  maxBetUsd: num('MAX_BET_USD', 30),
+  /** Per-order hard cap; `0` = unlimited (still clamped by Cash) */
+  maxBetUsd: num('MAX_BET_USD', 0),
   /** Polymarket crypto taker fee rate (see docs.polymarket.com/trading/fees) */
   cryptoTakerFeeRate: num('CRYPTO_TAKER_FEE_RATE', 0.07),
   /** Subtract entry taker fee from PnL / stats / daily loss tracking */
@@ -194,10 +206,10 @@ const config = {
   bankroll: {
     /** Equity step per net win (also used in target = P + N * step) */
     stepUsd: num('BANKROLL_STEP_USD', 10),
-    /** Hard cap on catch-up target profit T = layer + step */
-    catchUpProfitCapUsd: num('BANKROLL_CATCHUP_T_CAP', 20),
-    /** Cap on computed stake per order */
-    stakeMaxUsd: num('BANKROLL_STAKE_MAX_USD', 30),
+    /** Cap on catch-up target profit T = layer + step; `0` = unlimited */
+    catchUpProfitCapUsd: num('BANKROLL_CATCHUP_T_CAP', 0),
+    /** Cap on computed stake per order; `0` = unlimited */
+    stakeMaxUsd: num('BANKROLL_STAKE_MAX_USD', 0),
   },
   orderType: optional('ORDER_TYPE', 'GTC'),
   orderFillAttempts: num('ORDER_FILL_ATTEMPTS', 8),
@@ -219,13 +231,13 @@ const config = {
   dryRun: bool('DRY_RUN', false),
   logLevel: optional('LOG_LEVEL', 'INFO'),
 
-  /** vegas | jz — selects signal engine + TG tag; jz uses separate bankroll file */
+  /** Always jz (神奇九转). Bankroll file: bankroll-state-{scope}.json (default jz). */
   strategy,
   bankrollScope,
 
-  // Martingale — jz defaults to 2 (entry + 1 same-dir lock then halt)
+  // Martingale — entry + 1 same-dir lock then halt
   martingaleMultiplier: num('MARTINGALE_MULTIPLIER', 1),
-  martingaleMaxLosses: num('MARTINGALE_MAX_LOSSES', strategy === 'jz' ? 2 : 5),
+  martingaleMaxLosses: num('MARTINGALE_MAX_LOSSES', 2),
 
   // Telegram notifications (one forum group + per-instance topic thread)
   telegram: {
