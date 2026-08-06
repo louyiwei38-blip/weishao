@@ -1,5 +1,6 @@
 /**
  * Inline keyboard + callback_data for Telegram control buttons.
+ * Reset button removed — TG pushes have no inline keyboard.
  */
 import config from '../config.js';
 
@@ -44,12 +45,7 @@ function decodeInstanceId(compact) {
   return s;
 }
 
-export function buildInlineKeyboard(instanceId = config.instanceId) {
-  const exp = Date.now() + VALIDITY_MS();
-  const resetInst = config.telegram.resetInstanceId;
-  return {
-    inline_keyboard: [
-      [{ text: '🔄 重置本金/净胜负', callback_data: buildCallbackData('reset', resetInst, exp) }],
-    ],
-  };
+/** No inline buttons on TG pushes (reset removed). */
+export function buildInlineKeyboard(_instanceId = config.instanceId) {
+  return null;
 }

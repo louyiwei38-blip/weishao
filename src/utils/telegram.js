@@ -81,6 +81,9 @@ export async function notifyTelegram(text, opts = {}) {
       logger.warn('[telegram] inline buttons unavailable', { error: err?.message });
     }
   }
+  if (!replyMarkup?.inline_keyboard?.length) {
+    replyMarkup = null;
+  }
 
   const maxAttempts = 4;
   let threadId = messageThreadId;

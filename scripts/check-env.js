@@ -66,6 +66,33 @@ console.log('\n--- Trading universe (PM2) ---');
   );
 }
 
+console.log('\n--- Telegram forum topics ---');
+{
+  const instances = buildInstances(process.env);
+  let ok = 0;
+  let miss = 0;
+  for (const inst of instances) {
+    const key = `TELEGRAM_THREAD_${inst.id.replace(/-/g, '_').toUpperCase()}`;
+    const n = Number(process.env[key]);
+    if (Number.isFinite(n) && n > 0) {
+      ok += 1;
+      console.log(`OK   ${key}=${n}`);
+    } else {
+      miss += 1;
+      console.log(`MISS ${key}`);
+    }
+  }
+  if (miss) {
+    console.log(
+      `\nWARN  ${miss} topic id(s) missing → messages go to General. Fix:\n` +
+        `  node scripts/setup-telegram-topics.js --status\n` +
+        `  (or create+save: npm run setup:tg-topics)`,
+    );
+  } else if (instances.length) {
+    console.log(`OK  all ${ok} TELEGRAM_THREAD_* set`);
+  }
+}
+
 console.log('\n--- Recommended ---');
 status('OHLCV_EXCHANGE');
 

@@ -139,11 +139,10 @@ async function handleCallbackQuery(query) {
     return;
   }
 
-  const { action, instanceId } = parsed;
+  const { action } = parsed;
 
   if (action === 'reset') {
-    enqueueCommand(instanceId, { action: 'reset', queryId, from: query.from?.username ?? null });
-    await answerCallbackQuery(queryId, '已排队：重置本金/净胜负');
+    await answerCallbackQuery(queryId, '重置按钮已停用');
     return;
   }
 
