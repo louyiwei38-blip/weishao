@@ -1,10 +1,6 @@
 'use strict';
 
-const {
-  parseTradingSymbolBases,
-  parseCandleTimeframes,
-  parseStrategies,
-} = require('./tradingUniverse.cjs');
+const { buildInstances, parseStrategies } = require('./tradingUniverse.cjs');
 
 function sanitizePrefix(raw) {
   const p = String(raw || 'V3')
@@ -22,8 +18,8 @@ function threadIdFor(instanceId, env) {
 }
 
 /**
- * Build PM2 apps: symbols × timeframes × 神奇九转.
- * All apps share BANKROLL_SCOPE=jz (one P/N/补队列 across BTC/ETH × 5m/15m/1h).
+ * Build PM2 apps from TRADING_STREAMS (or legacy SYMBOLS × TFs).
+ * All apps share BANKROLL_SCOPE=jz (one P/N/补队列).
  */
 function buildEcosystemApps(env, opts) {
   const cwd = opts.cwd;
@@ -40,15 +36,15 @@ function buildEcosystemApps(env, opts) {
     time: true,
   };
 
-  function app(base, tf, minutes) {
-    const id = base.toLowerCase() + '-' + tf;
+  function app(inst) {
+    const id = inst.id;
     const threadId = threadIdFor(id, env);
     const pm2Name = pm2Prefix + '-' + id;
     const instanceEnv = {
       BOT_INSTANCE: id,
-      CANDLE_TIMEFRAME: tf,
-      MARKET_CYCLE_MINUTES: String(minutes),
-      TRADING_SYMBOL: base + '/USDT',
+      CANDLE_TIMEFRAME: inst.tf,
+      MARKET_CYCLE_MINUTES: String(inst.minutes),
+      TRADING_SYMBOL: inst.base + '/USDT',
       STRATEGY: 'jz',
       BANKROLL_SCOPE: 'jz',
       // Entry + 1 same-direction lock, then halt
@@ -65,13 +61,22 @@ function buildEcosystemApps(env, opts) {
     };
   }
 
-  const symbols = parseTradingSymbolBases(env);
-  const timeframes = parseCandleTimeframes(env);
+  const instances = buildInstances(env);
   const strategies = parseStrategies(env); // always ['jz']
-  const apps = symbols.flatMap((base) =>
-    timeframes.map(([tf, minutes]) => app(base, tf, minutes)),
-  );
-  return { apps, prefix: pm2Prefix, symbols, timeframes, strategies };
+  const symbols = [...new Set(instances.map((i) => i.base))];
+  const timeframes = [...new Set(instances.map((i) => i.tf))].map((tf) => {
+    const minutes = instances.find((i) => i.tf === tf).minutes;
+    return [tf, minutes];
+  });
+  const apps = instances.map((inst) => app(inst));
+  return {
+    apps,
+    prefix: pm2Prefix,
+    symbols,
+    timeframes,
+    strategies,
+    streams: instances.map((i) => i.id),
+  };
 }
 
 module.exports = { buildEcosystemApps, sanitizePrefix };

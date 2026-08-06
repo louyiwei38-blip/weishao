@@ -1,9 +1,8 @@
 /**
- * PM2 — multi-symbol × multi-timeframe · 神奇九转 · 共用账本
+ * PM2 — multi-stream · 神奇九转 · 共用账本
  *
  * Only edit .env:
- *   TRADING_SYMBOLS=BTC,ETH
- *   CANDLE_TIMEFRAMES=5m,15m,1h
+ *   TRADING_STREAMS=btc-5m,btc-15m,btc-1h,eth-5m,eth-15m,eth-1h,bnb-15m,bnb-1h,xrp-15m,xrp-1h,sol-15m,sol-1h
  *   PM2_NAME_PREFIX=V3          # 第二钱包同机部署时用 W2
  *
  * All apps: STRATEGY=jz, BANKROLL_SCOPE=jz (logs/bankroll-state-jz.json)

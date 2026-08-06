@@ -62,7 +62,7 @@ console.log('\n--- Trading universe (PM2) ---');
 {
   const instances = buildInstances(process.env);
   console.log(
-    `OK  TRADING_SYMBOLS → ${instances.length} process(es): ${instances.map((i) => i.id).join(', ')}`,
+    `OK  TRADING_STREAMS → ${instances.length} process(es): ${instances.map((i) => i.id).join(', ')}`,
   );
 }
 

@@ -1,9 +1,10 @@
 /**
  * 神奇九转 · 全局共用账本
- *   BTC 5m/15m/1h + ETH 5m/15m/1h → 同一本 P/N/补队列
- *   每路独立 Setup / ml=2 链；同刻结算顺序：BTC→ETH，再 5m→15m→1h
+ *   多标的 × 5m/15m/1h → 同一本 P/N/补队列
+ *   每路独立 Setup / ml=2 链；同刻结算：标的顺序 → 5m→15m→1h
  *
  *   node scripts/backtest-jz-global-shared.js --from=2020-01-01
+ *   node scripts/backtest-jz-global-shared.js --symbols=XRP,BNB,SOL --from=2020-01-01 --sol-from=2022-01-01
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
@@ -17,13 +18,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const OUT_DIR = join(ROOT, 'logs');
 
-const SYMBOLS = [
-  { symbol: 'BTC/USDT', base: 'btc' },
-  { symbol: 'ETH/USDT', base: 'eth' },
-];
 const TIMEFRAMES = ['5m', '15m', '1h'];
 const TF_ORDER = { '5m': 0, '15m': 1, '1h': 2 };
-const SYM_ORDER = { btc: 0, eth: 1 };
 
 function argStr(name, fallback = null) {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
@@ -39,10 +35,65 @@ function argBool(name, fallback) {
   return hit.split('=')[1].toLowerCase() !== 'false';
 }
 
+function parseStreamKey(raw) {
+  const s = String(raw || '')
+    .trim()
+    .toLowerCase();
+  const m = s.match(/^([a-z0-9]+)-(5m|15m|1h)$/);
+  if (!m) throw new Error(`bad stream key: ${raw}`);
+  return { base: m[1], timeframe: m[2], key: `${m[1]}-${m[2]}` };
+}
+
+function resolveStreams() {
+  const raw = argStr('streams');
+  if (raw) {
+    const list = raw
+      .split(',')
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .map(parseStreamKey);
+    const seen = new Set();
+    for (const s of list) {
+      if (seen.has(s.key)) throw new Error(`duplicate stream ${s.key}`);
+      seen.add(s.key);
+    }
+    return list;
+  }
+  const symbols = (argStr('symbols', 'BTC,ETH') || 'BTC,ETH')
+    .split(',')
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
+  const tfs = (argStr('timeframes', '5m,15m,1h') || '5m,15m,1h')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return symbols.flatMap((sym) =>
+    tfs.map((tf) => parseStreamKey(`${sym.toLowerCase()}-${tf}`)),
+  );
+}
+
+const STREAMS = resolveStreams();
+const SYMBOLS = [
+  ...new Map(
+    STREAMS.map((s) => [s.base, { symbol: `${s.base.toUpperCase()}/USDT`, base: s.base }]),
+  ).values(),
+];
+const SYM_ORDER = Object.fromEntries(SYMBOLS.map((s, i) => [s.base, i]));
+
 const FROM_MS = Date.parse(`${argStr('from', '2020-01-01')}T00:00:00.000Z`);
 const TO_MS = argStr('to')
   ? Date.parse(argStr('to').includes('T') ? argStr('to') : `${argStr('to')}T23:59:59.999Z`)
   : Date.now();
+
+/** Per-symbol start override: --sol-from=2022-01-01 */
+function symbolFromMs(base) {
+  const override = argStr(`${base}-from`) || argStr(`${base}From`);
+  if (override) {
+    return Date.parse(override.includes('T') ? override : `${override}T00:00:00.000Z`);
+  }
+  return FROM_MS;
+}
+
 const BASE_BET = argNum('base', 5);
 const STEP = argNum('step', 5);
 const PRINCIPAL = argNum('principal', 10_000);
@@ -202,6 +253,7 @@ function collectJzIntents(candles, { symbol, base, timeframe }, fromMs, toMs) {
 }
 
 function emptyMonthRow() {
+  const bySymbol = Object.fromEntries(SYMBOLS.map((s) => [s.base, 0]));
   return {
     n: 0,
     wins: 0,
@@ -213,8 +265,7 @@ function emptyMonthRow() {
     maxDd: 0,
     lossStreak: 0,
     maxLossStreak: 0,
-    btc: 0,
-    eth: 0,
+    bySymbol,
     byStream: {},
   };
 }
@@ -256,8 +307,7 @@ function summarize(trades, bankroll, meta, fromMs, toMs) {
     row.equity += t.pnlUsd;
     row.peak = Math.max(row.peak, row.equity);
     row.maxDd = Math.min(row.maxDd, row.equity - row.peak);
-    if (t.base === 'btc') row.btc += 1;
-    else row.eth += 1;
+    row.bySymbol[t.base] = (row.bySymbol[t.base] || 0) + 1;
     row.byStream[t.stream] = (row.byStream[t.stream] || 0) + 1;
     byMonth.set(key, row);
   }
@@ -289,31 +339,45 @@ function summarize(trades, bankroll, meta, fromMs, toMs) {
       winRate: list.length ? w / list.length : 0,
       netWL: w - (list.length - w),
       pnlUsd: list.reduce((s, t) => s + t.pnlUsd, 0),
+      from: new Date(symbolFromMs(base)).toISOString(),
     };
   }
 
   const yearly = new Map();
   for (const [month, r] of byMonth) {
     const y = month.slice(0, 4);
-    const row = yearly.get(y) ?? { trades: 0, wins: 0, losses: 0, pnl: 0, btc: 0, eth: 0 };
+    const row =
+      yearly.get(y) ??
+      {
+        trades: 0,
+        wins: 0,
+        losses: 0,
+        pnl: 0,
+        bySymbol: Object.fromEntries(SYMBOLS.map((s) => [s.base, 0])),
+      };
     row.trades += r.n;
     row.wins += r.wins;
     row.losses += r.losses;
     row.pnl += r.pnl;
-    row.btc += r.btc;
-    row.eth += r.eth;
+    for (const base of Object.keys(r.bySymbol)) {
+      row.bySymbol[base] = (row.bySymbol[base] || 0) + r.bySymbol[base];
+    }
     yearly.set(y, row);
   }
 
+  const bases = SYMBOLS.map((s) => s.base);
   return {
     period: {
       from: new Date(fromMs).toISOString(),
       to: new Date(toMs).toISOString(),
       days: Math.round((toMs - fromMs) / 86_400_000),
+      symbolFrom: Object.fromEntries(
+        SYMBOLS.map((s) => [s.base, new Date(symbolFromMs(s.base)).toISOString()]),
+      ),
     },
     params: {
       strategy: 'jz',
-      streams: SYMBOLS.flatMap((s) => TIMEFRAMES.map((tf) => `${s.base}-${tf}`)),
+      streams: STREAMS.map((s) => s.key),
       sharedBankroll: true,
       maxLosses: MAX_LOSSES,
       stepUsd: STEP,
@@ -324,7 +388,7 @@ function summarize(trades, bankroll, meta, fromMs, toMs) {
       entryRandom: `${ENTRY_LO}-${ENTRY_HI}`,
       seed: SEED,
       fee: USE_FEE,
-      order: 'by_signalBarT_then_btc_eth_then_5m_15m_1h',
+      order: `by_signalBarT_then_${bases.join('_')}_then_5m_15m_1h`,
     },
     totals: {
       trades: trades.length,
@@ -360,50 +424,62 @@ function summarize(trades, bankroll, meta, fromMs, toMs) {
       winRate: r.trades ? r.wins / r.trades : 0,
       netWL: r.wins - r.losses,
       pnlUsd: r.pnl,
-      btcTrades: r.btc,
-      ethTrades: r.eth,
+      bySymbol: r.bySymbol,
     })),
-    monthly: [...byMonth.entries()].map(([month, r]) => ({
-      month,
-      trades: r.n,
-      wins: r.wins,
-      losses: r.losses,
-      winRate: r.n ? r.wins / r.n : 0,
-      netWL: r.wins - r.losses,
-      pnlUsd: r.pnl,
-      feesUsd: r.fees,
-      maxDrawdownUsd: r.maxDd,
-      maxLossStreak: r.maxLossStreak,
-      btcTrades: r.btc,
-      ethTrades: r.eth,
-      tradesBtc5m: r.byStream['btc-5m'] || 0,
-      tradesBtc15m: r.byStream['btc-15m'] || 0,
-      tradesBtc1h: r.byStream['btc-1h'] || 0,
-      tradesEth5m: r.byStream['eth-5m'] || 0,
-      tradesEth15m: r.byStream['eth-15m'] || 0,
-      tradesEth1h: r.byStream['eth-1h'] || 0,
-    })),
+    monthly: [...byMonth.entries()].map(([month, r]) => {
+      const out = {
+        month,
+        trades: r.n,
+        wins: r.wins,
+        losses: r.losses,
+        winRate: r.n ? r.wins / r.n : 0,
+        netWL: r.wins - r.losses,
+        pnlUsd: r.pnl,
+        feesUsd: r.fees,
+        maxDrawdownUsd: r.maxDd,
+        maxLossStreak: r.maxLossStreak,
+        bySymbol: r.bySymbol,
+      };
+      for (const base of bases) {
+        for (const tf of TIMEFRAMES) {
+          out[`trades${base[0].toUpperCase()}${base.slice(1)}${tf}`] = r.byStream[`${base}-${tf}`] || 0;
+        }
+      }
+      // also keep flat stream counts
+      out.byStream = { ...r.byStream };
+      return out;
+    }),
   };
 }
 
 async function main() {
-  console.log('=== 神奇九转 · 全局共用账本 (BTC+ETH × 5m/15m/1h) · ml=2 无上限 ===');
+  const bases = SYMBOLS.map((s) => s.base);
+  const fromOverrides = bases
+    .map((b) => {
+      const ms = symbolFromMs(b);
+      if (ms === FROM_MS) return null;
+      return `${b.toUpperCase()}@${new Date(ms).toISOString().slice(0, 10)}`;
+    })
+    .filter(Boolean);
+  const streamKeys = STREAMS.map((s) => s.key);
+  console.log(`=== 神奇九转 · 全局共用账本 (${streamKeys.length} streams) · ml=2 无上限 ===`);
+  console.log(`  streams: ${streamKeys.join(', ')}`);
   console.log(
     `Period ${new Date(FROM_MS).toISOString().slice(0, 10)} → ${new Date(TO_MS).toISOString().slice(0, 10)}` +
-      ` · step=$${STEP} · entry ${ENTRY_LO}-${ENTRY_HI} seed=${SEED}`,
+      ` · step=$${STEP} · entry ${ENTRY_LO}-${ENTRY_HI} seed=${SEED}` +
+      (fromOverrides.length ? ` · overrides ${fromOverrides.join(', ')}` : ''),
   );
 
   const allIntents = [];
   const intentsByStream = {};
-  for (const { symbol, base } of SYMBOLS) {
-    for (const tf of TIMEFRAMES) {
-      const candles = loadCandles(base, tf);
-      const intents = collectJzIntents(candles, { symbol, base, timeframe: tf }, FROM_MS, TO_MS);
-      const key = `${base}-${tf}`;
-      intentsByStream[key] = intents.length;
-      console.log(`  ${key} intents: ${intents.length}`);
-      allIntents.push(...intents);
-    }
+  for (const { base, timeframe: tf, key } of STREAMS) {
+    const symbol = `${base.toUpperCase()}/USDT`;
+    const fromMs = symbolFromMs(base);
+    const candles = loadCandles(base, tf);
+    const intents = collectJzIntents(candles, { symbol, base, timeframe: tf }, fromMs, TO_MS);
+    intentsByStream[key] = intents.length;
+    console.log(`  ${key} intents: ${intents.length} (from ${new Date(fromMs).toISOString().slice(0, 10)})`);
+    allIntents.push(...intents);
   }
 
   allIntents.sort((a, b) => {
@@ -484,10 +560,11 @@ async function main() {
       ` · 最大连亏 ${t.maxLossStreak} · 补单 ${catchUpTrades} · 同刻多流 ${sameBarMulti}`,
   );
   console.log('\n按标的:');
-  for (const base of ['btc', 'eth']) {
+  for (const base of bases) {
     const r = summary.bySymbol[base];
     console.log(
-      `  ${r.symbol}: ${r.trades}笔 wr ${fmtPct(r.winRate)} N ${r.netWL >= 0 ? '+' : ''}${r.netWL} 盈亏 ${fmtUsd(r.pnlUsd)}`,
+      `  ${r.symbol}: ${r.trades}笔 wr ${fmtPct(r.winRate)} N ${r.netWL >= 0 ? '+' : ''}${r.netWL} 盈亏 ${fmtUsd(r.pnlUsd)}` +
+        ` · from ${r.from.slice(0, 10)}`,
     );
   }
   console.log('\n按流:');
@@ -498,17 +575,24 @@ async function main() {
         ` N ${r.netWL >= 0 ? '+' : ''}${r.netWL} 盈亏 ${fmtUsd(r.pnlUsd)}`,
     );
   }
-  console.log('\n年份      开单    胜率   净胜负         盈亏    BTC    ETH');
+  const symHdr = bases.map((b) => b.toUpperCase().padStart(5)).join('  ');
+  console.log(`\n年份      开单    胜率   净胜负         盈亏  ${symHdr}`);
   for (const y of summary.yearly) {
+    const counts = bases.map((b) => String(y.bySymbol[b] || 0).padStart(5)).join('  ');
     console.log(
       `${y.year}  ${String(y.trades).padStart(6)}  ${fmtPct(y.winRate).padStart(7)}  ` +
         `${String(y.netWL >= 0 ? '+' + y.netWL : y.netWL).padStart(6)}  ` +
-        `${fmtUsd(y.pnlUsd).padStart(11)}  ${String(y.btcTrades).padStart(5)}  ${String(y.ethTrades).padStart(5)}`,
+        `${fmtUsd(y.pnlUsd).padStart(11)}  ${counts}`,
     );
   }
 
   if (!existsSync(OUT_DIR)) mkdirSync(OUT_DIR, { recursive: true });
-  const tag = 'btc-eth-5m15m1h-from2020-ml2';
+  const tag =
+    `${bases.join('-')}-5m15m1h-from${new Date(FROM_MS).toISOString().slice(0, 10)}` +
+    (fromOverrides.length
+      ? `-${fromOverrides.map((x) => x.replace('@', '')).join('-')}`
+      : '') +
+    '-ml2';
   const outJson = join(OUT_DIR, `backtest-jz-global-shared-${tag}.json`);
   writeFileSync(outJson, JSON.stringify({ summary, tradeCount: trades.length }, null, 2));
   writeFileSync(

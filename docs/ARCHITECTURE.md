@@ -19,7 +19,7 @@
 
 ## 2. 进程模型
 
-PM2：`TRADING_SYMBOLS` × `CANDLE_TIMEFRAMES` → 多进程（例 `V3-btc-5m`）。
+PM2：`TRADING_STREAMS`（默认 12 流）→ 多进程（例 `V3-btc-5m`、`V3-sol-1h`）。
 
 每进程注入：`STRATEGY=jz`、`BANKROLL_SCOPE=jz`、`MARTINGALE_MAX_LOSSES=2`。
 

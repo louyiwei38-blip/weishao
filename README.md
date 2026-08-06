@@ -1,8 +1,8 @@
 # Polymarket 神奇九转 Bot
 
-OKX USDT 永续 K 线 · **神奇九转** · **多标的 × 多周期**（`.env`：`TRADING_SYMBOLS` × `CANDLE_TIMEFRAMES`）· **共用本金 P / 净胜负 N + 补队列**（全实例同一 `BANKROLL_SCOPE=jz`）· 动态首注 · CLOB V2 · Chainlink/OKX 结算 · GTC 限价
+OKX USDT 永续 K 线 · **神奇九转** · **多流**（`.env`：`TRADING_STREAMS`，默认 12 流）· **共用本金 P / 净胜负 N + 补队列**（全实例同一 `BANKROLL_SCOPE=jz`）· 动态首注 · CLOB V2 · Chainlink/OKX 结算 · GTC 限价
 
-默认建议 `TRADING_SYMBOLS=BTC,ETH`、`CANDLE_TIMEFRAMES=5m,15m,1h`；CLOB 限价/市价下单；默认 **Chainlink** 结算。策略相位 / pending / stats 按实例隔离；**账本全市场共用**一份 `logs/bankroll-state-jz.json`。
+默认 12 流：`btc/eth` 的 5m+15m+1h，`bnb/xrp/sol` 的 15m+1h（**无 bnb-5m**）。CLOB 限价/市价下单；默认 **Chainlink** 结算。策略相位 / pending / stats 按实例隔离；**账本全市场共用**一份 `logs/bankroll-state-jz.json`。
 
 > 架构细节见 **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)** · 部署见 **[DEPLOY.md](./DEPLOY.md)**
 
@@ -47,7 +47,7 @@ TG 前缀例：`[BTC·5m·九转]`。
 |--------|------|
 | 九转（默认 `BANKROLL_SCOPE=jz`） | `logs/bankroll-state-jz.json` |
 
-例：BTC 5m/15m/1h + ETH 5m/15m/1h 六个进程写入同一 P / N / 补队列（文件锁串行化）。
+例：默认 12 个进程写入同一 P / N / 补队列（文件锁串行化）。
 
 | 符号 | 含义 |
 |------|------|
@@ -93,9 +93,8 @@ npm install
 cp .env.example .env          # 模拟盘可 DRY_RUN=true
 node scripts/check-env.js
 
-# 推荐：.env 配置后 PM2 一键开齐
-# TRADING_SYMBOLS=BTC,ETH
-# CANDLE_TIMEFRAMES=5m,15m,1h
+# 推荐：.env 配置后 PM2 一键开齐（默认 12 流）
+# TRADING_STREAMS=btc-5m,btc-15m,btc-1h,eth-5m,eth-15m,eth-1h,bnb-15m,bnb-1h,xrp-15m,xrp-1h,sol-15m,sol-1h
 npm run pm2:dry               # 模拟盘
 npm run pm2:start             # 实盘
 pm2 logs
@@ -115,9 +114,10 @@ npm run start:eth:5m
 ## 标的 / 周期：只改 `.env`
 
 ```env
-TRADING_SYMBOLS=BTC,ETH
-CANDLE_TIMEFRAMES=5m,15m,1h
+TRADING_STREAMS=btc-5m,btc-15m,btc-1h,eth-5m,eth-15m,eth-1h,bnb-15m,bnb-1h,xrp-15m,xrp-1h,sol-15m,sol-1h
 ```
+
+（旧写法仍可用：`TRADING_SYMBOLS` × `CANDLE_TIMEFRAMES` 全笛卡尔积；与 `TRADING_STREAMS` 同时存在时以 streams 为准。）
 
 然后：
 
@@ -128,19 +128,19 @@ npm run pm2:start                # 或 pm2:dry
 npm run setup:tg-topics -- --write-env
 ```
 
-示例进程：`V3-btc-5m`、`V3-btc-15m`、`V3-btc-1h`、`V3-eth-5m`、…（全部九转，共用 `bankroll-state-jz.json`）。
+示例进程：`V3-btc-5m`、`V3-bnb-15m`、`V3-sol-1h`、…（全部九转，共用 `bankroll-state-jz.json`）。
 
-可选话题：`TELEGRAM_THREAD_BTC_5M`、`TELEGRAM_THREAD_ETH_15M` 等。
+可选话题：`TELEGRAM_THREAD_BTC_5M`、`TELEGRAM_THREAD_XRP_15M` 等。
 
 Chainlink 已支持：`BTC / ETH / SOL / BNB / XRP / DOGE`（需 Polymarket 有对应 Up/Down 盘口）。
 
 ---
 
-## PM2（`TRADING_SYMBOLS` × `CANDLE_TIMEFRAMES`）
+## PM2（`TRADING_STREAMS`）
 
 - 共用同一 `.env` 钱包 / CLOB 凭证
 - **账本全实例共用**（`STRATEGY=jz`、`BANKROLL_SCOPE=jz` → `bankroll-state-jz.json`）
-- `BOT_INSTANCE`（如 `btc-5m` / `eth-1h`）隔离 pending / 统计 / 马丁 / 九转相位 / 日志
+- `BOT_INSTANCE`（如 `btc-5m` / `sol-1h`）隔离 pending / 统计 / 马丁 / 九转相位 / 日志
 - Telegram 可用**一个论坛群 + Topics**（见 [DEPLOY.md](./DEPLOY.md)）
 - `MARKET_CYCLE_MINUTES` 可省略：由 `CANDLE_TIMEFRAME` 自动推导（`5m→5`，`15m→15`，`1h→60`）
 - ecosystem 注入 `MARTINGALE_MAX_LOSSES=2`（胜结束 · 输锁 1 次）
@@ -216,8 +216,9 @@ ecosystem.config.cjs                 # PM2：V3-{base}-{tf}
 |------|------|------|
 | `OHLCV_EXCHANGE` | okx | K 线主交易所 |
 | `OHLCV_MARKET_TYPE` | swap | `swap`=USDT 永续；`spot`=现货 |
-| `TRADING_SYMBOLS` | BTC,ETH | **PM2 标的列表** |
-| `CANDLE_TIMEFRAMES` | 5m,15m,1h | **PM2 周期列表** |
+| `TRADING_STREAMS` | 见右 | **PM2 流列表**（默认 12 流，可非全矩阵） |
+| `TRADING_SYMBOLS` | — | 旧：标的列表（无 STREAMS 时与 TFs 笛卡尔积） |
+| `CANDLE_TIMEFRAMES` | — | 旧：周期列表 |
 | `STRATEGY` | jz | 固定神奇九转（写其它值会被忽略） |
 | `BANKROLL_SCOPE` | jz | → `bankroll-state-jz.json`（全实例共用） |
 | `TRADING_SYMBOL` | BTC/USDT | 单进程 slug；PM2 时注入 |
@@ -313,7 +314,7 @@ node scripts/backtest-jz-multitf-shared.js --all --from=2020-01-01
 详见 **[DEPLOY.md](./DEPLOY.md)**。
 
 ```bash
-cp .env.example .env    # 私钥 / Telegram / TRADING_SYMBOLS / CANDLE_TIMEFRAMES
+cp .env.example .env    # 私钥 / Telegram / TRADING_STREAMS
 npm install
 npm run pm2:dry         # 先空跑
 npm run pm2:start
@@ -324,9 +325,9 @@ pm2 save && pm2 startup
 
 ## 注意事项
 
-- 钱包需有足够 **pUSD Cash**；多开（多标的 × 多周期）时注意同时加仓的余额与敞口（共用一本账本）
+- 钱包需有足够 **pUSD Cash**；多开（多流）时注意同时加仓的余额与敞口（共用一本账本）
 - 账本文件：`logs/bankroll-state-jz.json`
 - 国内：`OHLCV_EXCHANGE=okx`；需访问 Gamma / CLOB / OKX，以及 Chainlink RTDS（默认结算）
 - 首次务必 `DRY_RUN` / `pm2:dry` 确认信号与 slug 正常后再实盘
-- 改过 `TRADING_SYMBOLS` / `CANDLE_TIMEFRAMES` 后必须 `pm2 delete all` 再 `pm2:start`（进程列表会变）
+- 改过 `TRADING_STREAMS`（或旧 `TRADING_SYMBOLS` / `CANDLE_TIMEFRAMES`）后必须 `pm2 delete all` 再 `pm2:start`（进程列表会变）
 - `.env` 中旧版 `SESSION_GATE_*`、`ACTIVITY_*`、`VOLATILITY_*` 等实盘不再读取，可删除

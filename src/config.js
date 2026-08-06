@@ -117,13 +117,27 @@ const config = {
   },
 
   // Polymarket / Chainlink slug (not the OHLCV fetch symbol when OHLCV_MARKET_TYPE=swap)
-  // PM2 multi-symbol: set TRADING_SYMBOLS=BTC,ETH in .env; ecosystem injects TRADING_SYMBOL per process
+  // PM2: TRADING_STREAMS=btc-5m,... ; ecosystem injects TRADING_SYMBOL per process
   symbol: optional('TRADING_SYMBOL', 'BTC/USDT'),
   /**
    * Bases for PM2 universe (informational). Live process uses `symbol` only.
-   * Parsed from TRADING_SYMBOLS, else TRADING_SYMBOL.
+   * Parsed from TRADING_STREAMS, else TRADING_SYMBOLS, else TRADING_SYMBOL.
    */
   tradingSymbolBases: (() => {
+    const streams = optional('TRADING_STREAMS', '');
+    if (streams && String(streams).trim()) {
+      const bases = [];
+      const seen = new Set();
+      for (const tok of String(streams).split(/[,;\s]+/)) {
+        const m = String(tok.trim().toLowerCase()).match(/^([a-z0-9]+)-/);
+        if (!m) continue;
+        const base = m[1].toUpperCase();
+        if (seen.has(base)) continue;
+        seen.add(base);
+        bases.push(base);
+      }
+      if (bases.length) return bases;
+    }
     const multi = optional('TRADING_SYMBOLS', '');
     const raw = multi && String(multi).trim()
       ? multi
@@ -144,6 +158,21 @@ const config = {
   })(),
   /** Timeframes for PM2 universe (informational). Live process uses `timeframe`. */
   candleTimeframes: (() => {
+    const streams = optional('TRADING_STREAMS', '');
+    if (streams && String(streams).trim()) {
+      const allowed = new Set(['1m', '5m', '15m', '30m', '1h', '4h']);
+      const out = [];
+      const seen = new Set();
+      for (const tok of String(streams).split(/[,;\s]+/)) {
+        const m = String(tok.trim().toLowerCase()).match(/-([a-z0-9]+)$/);
+        if (!m) continue;
+        const tf = m[1];
+        if (!allowed.has(tf) || seen.has(tf)) continue;
+        seen.add(tf);
+        out.push(tf);
+      }
+      if (out.length) return out;
+    }
     // Default: single timeframe (project runs one symbol × one TF)
     const raw = optional('CANDLE_TIMEFRAMES', '5m');
     const allowed = new Set(['1m', '5m', '15m', '30m', '1h', '4h']);
