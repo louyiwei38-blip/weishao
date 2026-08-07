@@ -10,10 +10,9 @@ import { sleep } from '../utils/retry.js';
 import { formatBeijingTime } from '../utils/datetime.js';
 import { fetchClosedCandleAt } from '../collector/binance.js';
 import {
+  getChainlinkPriceAt,
   getChainlinkOpenPrice,
   getLatestPrice,
-  getSettlementClosePrice,
-  twapWindowForCycleMinutes,
   resolveOutcomeFromPrices,
 } from '../collector/chainlink.js';
 
@@ -69,33 +68,20 @@ export function crossCheckWithCandle(settlement, candle) {
 async function fetchClosePriceAtEnd(cycleStartTs) {
   const endMs = cycleEndMs(cycleStartTs);
   const deadline = Date.now() + config.chainlink.settleMaxWaitMs;
-  const windowS = twapWindowForCycleMinutes(config.cycleMinutes);
-  let lastSnapshot = null;
+  let last = null;
 
   while (Date.now() <= deadline) {
-    const close = getSettlementClosePrice(config.symbol, endMs, config.cycleMinutes);
-    if (close) {
-      if (String(close.kind || '').startsWith('twap')) return close;
-      lastSnapshot = close;
-    }
-    await sleep(400);
+    const snap = getChainlinkPriceAt(config.symbol, endMs);
+    if (snap) return snap;
+    last = getLatestPrice(config.symbol);
+    await sleep(500);
   }
 
-  if (lastSnapshot) {
-    logger.warn('[settle] TWAP 未到 — 回退单点收盘价（可能与 Polymarket 官方不一致）', {
-      windowS,
-      kind: lastSnapshot.kind,
-      price: lastSnapshot.price,
-    });
-    return lastSnapshot;
-  }
-
-  const latest = getLatestPrice(config.symbol);
-  if (latest) {
+  if (last) {
     logger.warn(
-      `[settle] 无周期结束价，回退至最新 tick @ ${formatBeijingTime(latest.ts)}`,
+      `[settle] 无周期结束前的 tick，回退至最新价 @ ${formatBeijingTime(last.ts)}`
     );
-    return { ...latest, kind: 'latest_fallback' };
+    return last;
   }
 
   return null;
@@ -271,17 +257,6 @@ export async function computeChainlinkSettlement(pendingBet) {
   }
 
   const won = directionWon(pendingBet.signal, winningOutcome);
-  const closeKind = closeSnap.kind || 'unknown';
-
-  if (String(closeKind).includes('snapshot') || String(closeKind).includes('latest')) {
-    logger.warn('[settle] 收盘参考非 TWAP — 与 Polymarket 官方可能不一致', {
-      closeKind,
-      closePrice: closeSnap.price,
-      targetPrice: Number(targetPrice),
-      winningOutcome,
-      twapWindowS: twapWindowForCycleMinutes(config.cycleMinutes),
-    });
-  }
 
   return {
     ready: true,
@@ -291,7 +266,6 @@ export async function computeChainlinkSettlement(pendingBet) {
     closePrice: closeSnap.price,
     closeTickTs: closeSnap.ts,
     targetKind,
-    closeKind,
     settleDelta: closeSnap.price - Number(targetPrice),
   };
 }

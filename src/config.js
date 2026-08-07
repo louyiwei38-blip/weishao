@@ -368,16 +368,13 @@ const config = {
   /** Settlement source: okx (OKX 永续 K 线) | chainlink (Polymarket RTDS oracle) */
   settleSource: optional('SETTLE_SOURCE', 'chainlink').toLowerCase(),
 
-  // Chainlink RTDS settlement (Polymarket official oracle + TWAP close since 2026-08-07)
+  // Chainlink RTDS settlement (Polymarket official oracle)
   chainlink: {
-    /** Wait after cycle end before settling (TWAP may publish slightly late) */
-    settleBufferMs: num('CHAINLINK_SETTLE_BUFFER_MS', 3500),
-    settleMaxWaitMs: num('CHAINLINK_SETTLE_MAX_WAIT_MS', 20000),
+    settleBufferMs: num('CHAINLINK_SETTLE_BUFFER_MS', 1500),
+    settleMaxWaitMs: num('CHAINLINK_SETTLE_MAX_WAIT_MS', 15000),
     openWindowMs: num('CHAINLINK_OPEN_WINDOW_MS', 5000),
     bufferMinutes: num('CHAINLINK_BUFFER_MINUTES', 30),
     safetyIntervalMs: num('CHAINLINK_SAFETY_INTERVAL_MS', 60_000),
-    /** Allow TWAP observation timestamp a few ms after cycle end */
-    twapGraceMs: num('CHAINLINK_TWAP_GRACE_MS', 3000),
     /** Skip new orders when settleSource=chainlink and RTDS ticks are missing/stale (default off: open on signal) */
     requireForOpen: bool('CHAINLINK_REQUIRE_FOR_OPEN', false),
     /** Max age of latest Chainlink tick / ingest before open is blocked */

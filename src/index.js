@@ -1632,9 +1632,8 @@ async function applySettlement(pending, { candles } = {}) {
       ? `\n⏹ <b>链路结束</b> — 等待下一次九转`
       : '';
 
-  const closeKind = result.closeKind ? ` · ${result.closeKind}` : '';
   const priceLine = usesChainlinkSettlement()
-    ? `目标价: $${targetPrice.toFixed(2)} → 收盘价: $${closePrice.toFixed(2)}${closeKind}\n`
+    ? `目标价: $${targetPrice.toFixed(2)} → 收盘价: $${closePrice.toFixed(2)}\n`
     : `开盘: $${targetPrice.toFixed(2)} → 收盘: $${closePrice.toFixed(2)}\n`;
 
   const statsEquity = config.bankrollUseStatsEquity
