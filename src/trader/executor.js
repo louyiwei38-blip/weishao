@@ -15,7 +15,7 @@ import { fileURLToPath } from 'url';
 
 import config from '../config.js';
 import logger from '../utils/logger.js';
-import { computeCatchUpTopUp } from '../martingale/bankroll.js';
+import { computeCatchUpTopUp, stakeFromTargetProfit } from '../martingale/bankroll.js';
 import { appendJsonl } from '../utils/jsonl.js';
 import { withRetry, sleep } from '../utils/retry.js';
 import { resolveActualFill, formatFillNote } from './fillSync.js';
@@ -780,13 +780,38 @@ async function submitLimitOrder(client, params, exec) {
     };
   };
 
-  // 1) Always place original sizing stake first
-  const primary = await postOne(originalStake, '主单');
+  // 1) Place stake — if catch-up sized on a worse ask than final book, resize down
+  let primaryStake = originalStake;
+  if (
+    sizing?.mode === 'catch_up' &&
+    Number(sizing?.targetProfitUsd) > 0 &&
+    Number(sizing?.entryPrice) > 0 &&
+    price > 0 &&
+    price < Number(sizing.entryPrice)
+  ) {
+    const recomputed = stakeFromTargetProfit({
+      targetProfitUsd: sizing.targetProfitUsd,
+      entryPrice: price,
+      balance: availableBalance,
+    });
+    if (recomputed.stakeUsd > 0 && recomputed.stakeUsd < primaryStake - 0.009) {
+      logger.info('[executor] 追赶单：盘口变便宜 — 按成交价缩仓', {
+        sizingPrice: sizing.entryPrice,
+        finalPrice: price,
+        originalStake,
+        resizedStake: recomputed.stakeUsd,
+        targetProfitUsd: sizing.targetProfitUsd,
+      });
+      primaryStake = recomputed.stakeUsd;
+    }
+  }
+
+  const primary = await postOne(primaryStake, '主单');
   if (!primary.ok) {
     writeTradelog({
       ...logBase, orderId: primary.orderId ?? null, status: 'failed',
       orderKind: 'limit', reason: primary.skipReason, limitPrice: price,
-      size: primary.size, stakeUsd: originalStake,
+      size: primary.size, stakeUsd: primaryStake,
     });
     orderedThisCycle.add(dedupKey);
     return {
@@ -802,7 +827,7 @@ async function submitLimitOrder(client, params, exec) {
     targetProfitUsd: sizing?.targetProfitUsd,
     sizingPrice: sizing?.entryPrice,
     finalPrice: price,
-    originalStakeUsd: originalStake,
+    originalStakeUsd: primaryStake,
     balance: availableBalance,
   });
 
@@ -857,7 +882,7 @@ async function submitLimitOrder(client, params, exec) {
     limitPrice: price,
     size: totalSize,
     estCost: totalEstCost,
-    stakeUsd: originalStake + (topUpOk ? topUp.stakeUsd : 0),
+    stakeUsd: primaryStake + (topUpOk ? topUp.stakeUsd : 0),
     bankrollAdjust: topPlan.needTopUp ? topPlan.reason : topPlan.reason,
     topUpUsd: topUpOk ? topUp.stakeUsd : 0,
     topUpOrderId: topUpOk ? topUp.orderId : null,

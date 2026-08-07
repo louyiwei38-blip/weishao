@@ -556,6 +556,21 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle', sources
         sizingPrice,
       });
     }
+    // ORDER_PRICE_CAP only used to clip limit price before; catch-up stake = T×p/(1−p)
+    // must use the same capped p, or a 0.92 book ask blows up size while we hang @0.70.
+    {
+      const cap =
+        pricePolicy.maxLimitPrice ??
+        (config.orderPriceCap > 0 ? config.orderPriceCap : null);
+      if (cap > 0 && Number(sizingPrice) > cap) {
+        logger.info('[main] 算仓价按 ORDER_PRICE_CAP 封顶', {
+          rawSizingPrice: sizingPrice,
+          orderPriceCap: cap,
+          signal: signalObj.signal,
+        });
+        sizingPrice = cap;
+      }
+    }
 
     const mgState = martingale.getState();
     const { actualBet, skipReason, sizing } = martingale.prepareOrder(
@@ -1617,8 +1632,9 @@ async function applySettlement(pending, { candles } = {}) {
       ? `\n⏹ <b>链路结束</b> — 等待下一次九转`
       : '';
 
+  const closeKind = result.closeKind ? ` · ${result.closeKind}` : '';
   const priceLine = usesChainlinkSettlement()
-    ? `目标价: $${targetPrice.toFixed(2)} → 收盘价: $${closePrice.toFixed(2)}\n`
+    ? `目标价: $${targetPrice.toFixed(2)} → 收盘价: $${closePrice.toFixed(2)}${closeKind}\n`
     : `开盘: $${targetPrice.toFixed(2)} → 收盘: $${closePrice.toFixed(2)}\n`;
 
   const statsEquity = config.bankrollUseStatsEquity

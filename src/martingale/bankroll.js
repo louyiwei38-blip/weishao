@@ -494,6 +494,32 @@ export function computeStake({ balance, entryPrice, spendCap }) {
     };
   }
 
+  const maxEntry = Number(config.bankroll.catchUpMaxEntryPrice);
+  if (Number.isFinite(maxEntry) && maxEntry > 0 && maxEntry < 1 && p > maxEntry) {
+    const stakeUsd = clampStake(defaultBet);
+    logger.warn('[bankroll] 补仓盘口过贵 — 改用默认首注（避免 T×p/(1−p) 爆炸）', {
+      entryPrice: p,
+      catchUpMaxEntryPrice: maxEntry,
+      layerUsd,
+      targetProfitUsd: T,
+      rawCatchUpStake: round2(T * (p / (1 - p))),
+      fallbackStake: stakeUsd,
+    });
+    return {
+      stakeUsd,
+      shares: sharesOf(stakeUsd, p),
+      mode: 'catch_up_price_capped',
+      targetProfitUsd: T,
+      layerUsd,
+      layerIndex,
+      catchUpQueue: queue,
+      catchUpLabel: `补${layerIndex}`,
+      targetBalance,
+      gapUsd: gap,
+      entryPrice: p,
+    };
+  }
+
   const rawStake = T * (p / (1 - p));
   const stakeUsd = clampStake(rawStake);
   return {
@@ -512,11 +538,11 @@ export function computeStake({ balance, entryPrice, spendCap }) {
 }
 
 /**
- * Recompute stake for full target profit T at a final book price.
+ * Recompute catch-up stake for target profit T at a given token price.
  * Catch-up: stake = T × p/(1−p) where T = layer + step.
  * @param {{ targetProfitUsd: number, entryPrice: number, balance?: number }} args
  */
-function stakeFromTargetProfit({ targetProfitUsd, entryPrice, balance = Infinity }) {
+export function stakeFromTargetProfit({ targetProfitUsd, entryPrice, balance = Infinity }) {
   const T = Number(targetProfitUsd);
   const p = Number(entryPrice);
   const bal = Number(balance);
@@ -742,15 +768,16 @@ export function formatBankrollTelegramLines(sizing = null, { statsEquity = null 
     equityNote +
     qText +
     `\n`;
-  if (sizing?.mode === 'catch_up') {
+  if (sizing?.mode === 'catch_up' || sizing?.mode === 'catch_up_price_capped') {
     const label = sizing.catchUpLabel || `补${sizing.layerIndex || 1}`;
+    const capped = sizing.mode === 'catch_up_price_capped' ? ' · 盘口过贵改默认' : '';
     line +=
       `动态首注: ${label}=$${Number(sizing.layerUsd).toFixed(2)}` +
       ` → T=$${Number(sizing.targetProfitUsd).toFixed(2)}` +
       (sizing.gapUsd != null ? ` (gap$${Number(sizing.gapUsd).toFixed(2)})` : '') +
       ` → $${Number(sizing.stakeUsd).toFixed(2)}` +
       (sizing.shares != null ? ` · ~${sizing.shares.toFixed(2)} shares` : '') +
-      `\n`;
+      `${capped}\n`;
   } else if (sizing) {
     line += `动态首注: 默认 $${Number(sizing.stakeUsd).toFixed(2)}\n`;
   }
