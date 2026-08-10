@@ -57,7 +57,8 @@ OHLCV_EXCHANGE=okx
 TRADING_SYMBOL=BTC/USDT
 TRADE_BUDGET_USD=3
 MIN_BALANCE_USD=0
-ORDER_TYPE=GTC
+ORDER_TYPE=FOK
+ORDER_PRICE_CAP=0.55
 DRY_RUN=false
 ```
 
@@ -78,7 +79,8 @@ FILL_SYNC_MAX_WAIT_MS=8000
 LIMIT_PRICE_OFFSET_TICKS=0
 
 # 价格封顶（可选）
-# ORDER_PRICE_CAP=0.95
+# ORDER_PRICE_CAP=0.55
+# UNFILLED_LIMIT_FORCE_WIN=true
 TRADE_BUDGET_USD=3
 
 # Telegram（可选）
@@ -249,7 +251,7 @@ grep chainlink logs/bot.log | tail -20
 - [ ] 日志有 `RTDS buffer ready`
 - [ ] pUSD 余额 ≥ `MIN_BALANCE_USD`
 - [ ] `OHLCV_EXCHANGE=okx`（国内）
-- [ ] `ORDER_TYPE=GTC` 时已理解限价可能周期内未成交（马丁不变）
+- [ ] `ORDER_TYPE=FOK` + `ORDER_PRICE_CAP=0.55`：ask≤cap 市价 / ask>cap 限价@cap；未成交强制算赢
 
 ---
 
@@ -264,7 +266,7 @@ grep chainlink logs/bot.log | tail -20
 | `pUSD balance below minimum` | 充值或降低 `MIN_BALANCE_USD` |
 | `no BTC 1h market found` / `market_not_found` | 检查 `TRADING_SYMBOL` 与 Polymarket 是否有对应 1h 盘口；等下一周期 |
 | 信号方向与预期不符 | 九转：Buy Setup9→买涨、Sell Setup9→买跌；见 README 策略表 |
-| 盘口超阈值未成交 | 按 `ORDER_PRICE_CAP` 限价挂单，等价格回落；周期内未成交马丁不变 |
+| 盘口超阈值未成交 | 按 `ORDER_PRICE_CAP` 限价挂单；周期结束仍未成交 → 强制算赢（N+1、链路结束） |
 | 限价挂单未成交 | 正常；周期结束未成交不计马丁；可调 `LIMIT_PRICE_OFFSET_TICKS` |
 | `Chainlink vs exchange OHLCV mismatch` | 告警 only；结算以 Chainlink 为准 |
 | FOK `425 service not ready` | 新盘口流动性未就绪；Bot 会自动重试 |

@@ -245,12 +245,22 @@ const config = {
      */
     catchUpMaxEntryPrice: num('BANKROLL_CATCHUP_MAX_ENTRY', 0.75),
   },
-  orderType: optional('ORDER_TYPE', 'GTC'),
+  /**
+   * FOK/FAK + ORDER_PRICE_CAP → cap-threshold mode:
+   *   ask ≤ cap → market; ask > cap → GTC limit @ cap.
+   * GTC alone → always limit at best ask (cap only clips).
+   */
+  orderType: optional('ORDER_TYPE', 'FOK'),
   orderFillAttempts: num('ORDER_FILL_ATTEMPTS', 8),
   /** FOK retry gap — keep short so failed eats retry quickly inside the window. */
   orderRetryDelayMs: num('ORDER_RETRY_DELAY_MS', 1000),
   /** Limit order: tick offset from best ask (0 = at best ask) */
   limitPriceOffsetTicks: num('LIMIT_PRICE_OFFSET_TICKS', 0),
+  /**
+   * Cap-threshold resting GTC never fills by settle time → force win:
+   * N+1, chain ends (idle), $0 pnl. Set false to void unfilled (legacy).
+   */
+  unfilledLimitForceWin: bool('UNFILLED_LIMIT_FORCE_WIN', true),
   /** Short poll after order post (ms) */
   fillSyncPollMs: num('FILL_SYNC_POLL_MS', 500),
   /** Max wait for fill sync after limit/market post (ms) */
@@ -322,11 +332,11 @@ const config = {
     })(),
   },
 
-  // Risk — symmetric cap for YES/NO limit orders; 0 = no cap
+  // Risk — symmetric cap for YES/NO; FOK+cap = market≤cap / limit@cap when ask>cap; 0 = no cap
   orderPriceCap: (() => {
     if (process.env.ORDER_PRICE_CAP !== undefined) return Number(process.env.ORDER_PRICE_CAP);
     if (process.env.YES_PRICE_MAX !== undefined) return Number(process.env.YES_PRICE_MAX);
-    return 0.95;
+    return 0.55;
   })(),
   /** Session gate config kept for offline backtest scripts; live bot does not use it. */
   sessionGate: {

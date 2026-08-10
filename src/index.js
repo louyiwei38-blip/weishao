@@ -51,6 +51,7 @@ import {
   getDailyLossUsd,
   clearOrderDedup,
   warnOrderPolicyMismatch,
+  cancelOpenOrders,
 } from './trader/executor.js';
 import { fetchCombinedFillFromOrders, formatFillNote, formatPriceOddsLines, formatSettlementTradeLines } from './trader/fillSync.js';
 import {
@@ -698,6 +699,23 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle', sources
 
     if (orderResult.resting) {
       markCycleOrdered(cycleStartTs);
+      const companionOrderIds = orderResult.companionOrderIds || (
+        orderResult.topUpOrderId ? [orderResult.topUpOrderId] : []
+      );
+      // Register pending with $0 so next cycles wait for settle / force-win (blocks MG_CONT).
+      registerPendingBet({
+        cycleStartTs,
+        signal: signalObj.signal,
+        actualBet: 0,
+        orderId: orderResult.orderId,
+        limitPrice: orderResult.limitPrice,
+        entryPrice: orderResult.limitPrice ?? null,
+        fill: null,
+        companionOrderIds,
+        sources,
+        signalId: signalObj.signalId,
+        awaitingFill: true,
+      });
       logger.info('[main] 限价单挂单中 — 监视成交', {
         orderId: orderResult.orderId,
         limitPrice: orderResult.limitPrice,
@@ -711,9 +729,7 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle', sources
         signalReason: signalObj.reason,
         cycleEndMs,
         limitPrice: orderResult.limitPrice,
-        companionOrderIds: orderResult.companionOrderIds || (
-          orderResult.topUpOrderId ? [orderResult.topUpOrderId] : []
-        ),
+        companionOrderIds,
         topUpOrderId: orderResult.topUpOrderId || null,
       });
 
@@ -741,7 +757,8 @@ async function executeTrade({ cycleStartTs, signalObj, source = 'cycle', sources
           formatChainTelegramLines(mgState, sizing) +
           await formatBalanceTelegramLine(bal) +
           `盘口: ${market.slug}\n` +
-          `周期内自动监视成交\n` +
+          `周期内自动监视成交` +
+          (config.unfilledLimitForceWin ? '；未成交则结算强制算赢\n' : '\n') +
           formatStatsTelegramBlock()
         );
       })().catch((err) => {
@@ -1264,6 +1281,7 @@ function registerPendingBet({
   companionOrderIds = [],
   sources = ['project'],
   signalId = null,
+  awaitingFill = false,
 }) {
   // Persist cycle open target so settlement still works after RTDS buffer rolls off
   let targetPrice = null;
@@ -1293,6 +1311,7 @@ function registerPendingBet({
     signalId,
     targetPrice,
     targetKind,
+    awaitingFill: Boolean(awaitingFill) && !(Number(actualBet) > 0),
   };
   markCycleOrdered(cycleStartTs);
   savePending();
@@ -1314,6 +1333,7 @@ function registerPendingBet({
     orderId,
     targetPrice,
     targetKind,
+    awaitingFill: pendingBet.awaitingFill,
   });
 }
 
@@ -1329,6 +1349,7 @@ function updatePendingBetFill({ actualBet, fill, companionOrderIds }) {
     pendingBet.companionOrderIds = companionOrderIds.filter(Boolean);
   }
   pendingBet.entryPrice = fill?.entryPrice ?? pendingBet.entryPrice;
+  if (next > 0) pendingBet.awaitingFill = false;
   savePending();
   logger.info('[main] 待结算注单成交已更新', {
     cycleStartTs: formatBeijingTime(pendingBet.cycleStartTs),
@@ -1337,9 +1358,17 @@ function updatePendingBetFill({ actualBet, fill, companionOrderIds }) {
   });
 }
 
-async function confirmOrderFilled(pending) {
-  if (config.dryRun) return true;
-  if (!pending?.orderId) return Number(pending?.actualBet) > 0;
+/**
+ * Refresh fill amounts on pending. Does not void.
+ * @returns {'filled'|'unfilled'|'error'}
+ */
+async function refreshPendingFill(pending) {
+  if (config.dryRun) {
+    return Number(pending?.actualBet) > 0 ? 'filled' : 'unfilled';
+  }
+  if (!pending?.orderId) {
+    return Number(pending?.actualBet) > 0 ? 'filled' : 'unfilled';
+  }
 
   try {
     const client = await getClobClient();
@@ -1361,8 +1390,9 @@ async function confirmOrderFilled(pending) {
       pending.actualBet = combined.usdcSpent;
       pending.fill = combined;
       pending.entryPrice = combined.entryPrice ?? pending.entryPrice ?? pending.limitPrice ?? null;
+      pending.awaitingFill = false;
       savePending();
-      return true;
+      return 'filled';
     }
 
     if (Number(pending.actualBet) > 0) {
@@ -1370,49 +1400,186 @@ async function confirmOrderFilled(pending) {
         orderId: pending.orderId,
         actualBet: pending.actualBet,
       });
-      return true;
+      return 'filled';
     }
 
-    const snapshot = {
-      cycleStartTs: pending.cycleStartTs,
-      signal: pending.signal,
-      orderId: pending.orderId,
-      actualBet: pending.actualBet,
-    };
-    logger.warn('[settle] 结算时订单未成交 — 作废待结算注单', {
-      orderId: pending.orderId,
-    });
-    const voidOrderIds = [
-      pending.orderId,
-      ...(pending.companionOrderIds || []),
-    ].filter(Boolean);
-    unmarkCycleOrdered(pending.cycleStartTs);
-    markCycleClosed(pending.cycleStartTs);
-    stopRestingFillWatchesForOrders(voidOrderIds);
-    stopRestingFillWatchesForCycle(pending.cycleStartTs);
-    pendingBet = null;
-    savePending();
-    trackWork((async () => {
-      await notifyTelegram(
-        `${tgHead('⚠️ <b>结算跳过</b>（订单未成交，已作废）')}\n` +
-        `窗口: ${formatBeijingTime(snapshot.cycleStartTs)}\n` +
-        `方向: ${snapshot.signal === 'UP' ? '📈 UP' : '📉 DOWN'}\n` +
-        `orderId: <code>${escapeHtml(String(snapshot.orderId || '—'))}</code>\n` +
-        `周期: ${config.timeframe}\n` +
-        formatStatsTelegramBlock(),
-      );
-    })().catch((err) => {
-      logger.warn('[settle] 作废通知 Telegram 失败', { error: err?.message });
-    }));
-    return false;
+    return 'unfilled';
   } catch (err) {
     if (Number(pending.actualBet) > 0) {
       logger.warn('[settle] 成交刷新失败 — 沿用 pending actualBet', { error: err?.message });
-      return true;
+      return 'filled';
     }
     logger.warn('[settle] 成交确认失败', { error: err?.message });
-    return false;
+    return 'error';
   }
+}
+
+function voidUnfilledPending(pending) {
+  const snapshot = {
+    cycleStartTs: pending.cycleStartTs,
+    signal: pending.signal,
+    orderId: pending.orderId,
+  };
+  logger.warn('[settle] 结算时订单未成交 — 作废待结算注单', {
+    orderId: pending.orderId,
+  });
+  const voidOrderIds = [
+    pending.orderId,
+    ...(pending.companionOrderIds || []),
+  ].filter(Boolean);
+  unmarkCycleOrdered(pending.cycleStartTs);
+  markCycleClosed(pending.cycleStartTs);
+  stopRestingFillWatchesForOrders(voidOrderIds);
+  stopRestingFillWatchesForCycle(pending.cycleStartTs);
+  pendingBet = null;
+  savePending();
+  trackWork((async () => {
+    await cancelOpenOrders(voidOrderIds);
+    await notifyTelegram(
+      `${tgHead('⚠️ <b>结算跳过</b>（订单未成交，已作废）')}\n` +
+      `窗口: ${formatBeijingTime(snapshot.cycleStartTs)}\n` +
+      `方向: ${snapshot.signal === 'UP' ? '📈 UP' : '📉 DOWN'}\n` +
+      `orderId: <code>${escapeHtml(String(snapshot.orderId || '—'))}</code>\n` +
+      `周期: ${config.timeframe}\n` +
+      formatStatsTelegramBlock(),
+    );
+  })().catch((err) => {
+    logger.warn('[settle] 作废通知 Telegram 失败', { error: err?.message });
+  }));
+  return false;
+}
+
+/**
+ * Unfilled cap-threshold GTC → force win: N+1, chain idle, $0 pnl.
+ */
+async function applyUnfilledLimitForceWin(pending) {
+  if (!pending || pending !== pendingBet) return false;
+
+  const orderIds = [
+    pending.orderId,
+    ...(pending.companionOrderIds || []),
+  ].filter(Boolean);
+
+  await cancelOpenOrders(orderIds);
+
+  // Last-chance fill after cancel (race: matched while we decided unfilled)
+  const status = await refreshPendingFill(pending);
+  if (status === 'filled' && Number(pending.actualBet) > 0) {
+    logger.info('[settle] 撤单后发现已成交 — 改走正常结算', {
+      actualBet: pending.actualBet,
+      orderId: pending.orderId,
+    });
+    return false; // caller continues normal settle
+  }
+
+  const { signal, cycleStartTs, limitPrice, signalId } = pending;
+  const sources = pending.sources || ['project'];
+  const hadProject = sources.includes('project');
+  const hadButton = sources.includes('button');
+  const windowLabel = formatBeijingTime(cycleStartTs);
+  const side = signal === 'UP' ? '📈 UP' : '📉 DOWN';
+  const won = true;
+  const pnlUsd = 0;
+  const price = limitPrice ?? pending.entryPrice ?? config.orderPriceCap ?? null;
+
+  stats.recordSettlement({ won, pnlUsd });
+
+  let settleEquity = null;
+  if (config.bankrollUseStatsEquity) {
+    settleEquity = martingale.resolveSizingEquity();
+  } else {
+    try {
+      const bd = await getBalanceBreakdown();
+      settleEquity = bd.portfolio;
+    } catch (err) {
+      logger.warn('[settle] 强制算赢 — 拉取 Portfolio 失败', { error: err?.message });
+    }
+  }
+
+  let halted = false;
+  let chainPnlUsd = 0;
+  if (hadProject) {
+    const mgResult = martingale.onSettled(won, pnlUsd, settleEquity);
+    halted = mgResult.halted;
+    chainPnlUsd = mgResult.chainPnlUsd;
+    strategyState.onSettled(won, halted);
+  } else {
+    martingale.bankroll.onSettled(won, settleEquity, pnlUsd);
+  }
+  if (hadButton) {
+    buttonSequence.onSettled(won, pnlUsd);
+  }
+
+  logger.info('[settle] 限价未成交 — 强制算赢', {
+    window: windowLabel,
+    signal,
+    limitPrice: price,
+    orderId: pending.orderId,
+    netCount: martingale.getState()?.bankroll?.netCount,
+    ...stats.formatLogFields(),
+  });
+
+  pendingBet = null;
+  savePending();
+  lastStuckSettleNotifyKey = null;
+  unmarkCycleOrdered(cycleStartTs);
+  markCycleClosed(cycleStartTs);
+  stopRestingFillWatchesForOrders(orderIds);
+  stopRestingFillWatchesForCycle(cycleStartTs);
+
+  writeSettlementLog({
+    ts: new Date().toISOString(),
+    cycleStartTs,
+    timeframe: config.timeframe,
+    instanceId: config.instanceId,
+    signal,
+    signalId: signalId ?? null,
+    actualBet: 0,
+    entryPrice: price,
+    pnlUsd: 0,
+    feeUsd: 0,
+    feeIncluded: true,
+    won: true,
+    winningOutcome: signal,
+    forceWinUnfilled: true,
+    settleSource: 'unfilled_limit_force_win',
+    dryRun: config.dryRun,
+    sources,
+    hadButton,
+  });
+
+  const mg = martingale.getState();
+  const brAfter = mg.bankroll;
+  const statsEquity = config.bankrollUseStatsEquity
+    ? martingale.resolveSizingEquity()
+    : null;
+
+  trackWork((async () => {
+    const balanceLine = await formatBalanceTelegramLine();
+    await notifyTelegram(
+      `${tgHead('✅ <b>结算赢</b>（限价未成交·强制）')}\n` +
+      `窗口: ${windowLabel}\n` +
+      `周期: ${config.timeframe}\n` +
+      `方向: ${side}\n` +
+      `开单价格: <b>$${price != null ? Number(price).toFixed(3) : '—'}</b>（挂单未成交）\n` +
+      `投入: <b>$0.00</b>\n` +
+      `本单盈亏: <b>+$0.00</b>\n` +
+      `本链路盈亏: <b>${stats.formatPnlUsd(chainPnlUsd)}</b>\n` +
+      `结果: <b>FORCE_WIN</b>（未成交按赢记账 · N+1 · 链路结束）\n` +
+      `\n⏹ <b>链路结束</b> — 等待下一次九转` +
+      (brAfter?.netCount != null ? ` · N=${brAfter.netCount}` : '') +
+      `\n连败: ${mg.consecutiveLosses} · 默认首注 $${config.tradeBudgetUsd}\n` +
+      formatBankrollTelegramLines(null, { statsEquity }) +
+      buttonSequence.formatTelegramLines() +
+      `今日亏损: $${getDailyLossUsd().toFixed(2)} / $${config.maxDailyLossUsd}\n` +
+      balanceLine +
+      formatStatsTelegramBlock(),
+    );
+  })().catch((err) => {
+    logger.warn('[settle] 强制算赢 Telegram 推送失败', { error: err?.message });
+  }));
+
+  return true;
 }
 
 function writeSettlementLog(entry) {
@@ -1429,6 +1596,22 @@ function writeSettlementLog(entry) {
  */
 async function applySettlement(pending, { candles } = {}) {
   if (!pending || pending !== pendingBet) return false;
+
+  // Fill check first — unfilled GTC can force-win without waiting on oracle.
+  const fillStatus = await refreshPendingFill(pending);
+  if (fillStatus === 'error' && !(Number(pending.actualBet) > 0)) {
+    return false;
+  }
+  if (!(Number(pending.actualBet) > 0)) {
+    if (config.unfilledLimitForceWin) {
+      const forced = await applyUnfilledLimitForceWin(pending);
+      if (forced) return true;
+      // Late fill discovered during force-win → fall through to normal settle
+      if (!(Number(pending.actualBet) > 0)) return false;
+    } else {
+      return voidUnfilledPending(pending);
+    }
+  }
 
   // Late-fill target capture if open missed storing it
   if (
@@ -1484,10 +1667,6 @@ async function applySettlement(pending, { candles } = {}) {
         }));
       }
     }
-    return false;
-  }
-
-  if (!(await confirmOrderFilled(pending))) {
     return false;
   }
 
@@ -1871,11 +2050,36 @@ async function scheduler() {
     const sameOrder = pendingBet?.orderId === ctx.orderId;
 
     if (ctx.isUpdate || (sameCycle && sameOrder)) {
+      const prevBet = Number(pendingBet?.actualBet) || 0;
       updatePendingBetFill({
         actualBet: ctx.actualBet,
         fill: ctx.fill,
         companionOrderIds,
       });
+      // First fill on a previously resting ($0) pending → notify like new fill
+      if (prevBet <= 0 && Number(ctx.actualBet) > 0) {
+        const side = ctx.signal === 'UP' ? '📈 买涨 UP' : '📉 买跌 DOWN';
+        const fillNote = formatFillNote(ctx.fill);
+        const mgState = martingale.getState();
+        const priceOdds = formatPriceOddsLines({
+          fill: ctx.fill,
+          limitPrice: ctx.limitPrice,
+          signal: ctx.signal,
+          amountUsdc: ctx.actualBet,
+        });
+        await notifyTelegram(
+          `${tgHead('🤖 <b>限价单成交</b>')}\n` +
+          `方向: <b>${side}</b> (${ctx.signalId ?? '—'})\n` +
+          `周期: ${config.timeframe}\n` +
+          (ctx.signalReason ? `原因: ${escapeHtml(ctx.signalReason)}\n` : '') +
+          priceOdds +
+          (fillNote ? `成交明细: ${escapeHtml(fillNote)}\n` : '') +
+          formatChainTelegramLines(mgState) +
+          `窗口: ${formatBeijingTime(ctx.cycleStartTs)}\n` +
+          await formatBalanceTelegramLine() +
+          formatStatsTelegramBlock()
+        );
+      }
       return;
     }
 
@@ -1917,8 +2121,22 @@ async function scheduler() {
     );
   }, {
     onEnded: ({ cycleStartTs, registered, aborted }) => {
-      // Unfilled GTC watch ended without pending — clear already_ordered so future logic stays clean
-      if (!registered && !aborted && Number.isFinite(Number(cycleStartTs))) {
+      if (aborted) return;
+      // Unfilled watch ended: pending (awaitingFill) will force-win at settle wake.
+      // If somehow no pending was registered, clear ordered mark so future cycles stay clean.
+      if (!registered && Number.isFinite(Number(cycleStartTs))) {
+        if (
+          pendingBet &&
+          pendingBet.cycleStartTs === cycleStartTs &&
+          !(Number(pendingBet.actualBet) > 0)
+        ) {
+          logger.info('[fillWatch] 监视结束仍未成交 — 等待结算强制算赢', {
+            cycle: formatBeijingTime(cycleStartTs),
+            orderId: pendingBet.orderId,
+            forceWin: config.unfilledLimitForceWin,
+          });
+          return;
+        }
         unmarkCycleOrdered(cycleStartTs);
         logger.info('[fillWatch] 未成交监视结束 — 已清除周期下单标记', {
           cycle: formatBeijingTime(cycleStartTs),

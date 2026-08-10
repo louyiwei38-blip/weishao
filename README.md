@@ -243,8 +243,9 @@ ecosystem.config.cjs                 # PM2：V3-{base}-{tf}
 | `MARTINGALE_MULTIPLIER` | 1 | 连亏倍数（仓位由动态首注重算） |
 | `MARTINGALE_MAX_LOSSES` | **2** | 入场 + 同向锁单 1 次后 halt（PM2 亦注入） |
 | `MAX_DAILY_LOSS_USD` | 10000 | 日亏损上限（**每实例**） |
-| `ORDER_PRICE_CAP` | 0.95 | `.env.example` 推荐 `0.60`；`0`=不限制 |
-| `ORDER_TYPE` | GTC | `GTC` 限价 / `FOK` 市价 |
+| `ORDER_PRICE_CAP` | 0.55 | ask≤cap 市价；ask>cap 限价@cap；`0`=不限制 |
+| `ORDER_TYPE` | FOK | 与 cap 配合：`FOK`=阈值模式；`GTC`=始终挂 best ask |
+| `UNFILLED_LIMIT_FORCE_WIN` | true | 限价未成交 → 强制算赢（N+1、链路结束、$0） |
 | `DRY_RUN` | false | `true`=模拟下单 |
 | `SETTLE_SOURCE` | chainlink | `okx` / `chainlink` |
 | `INCLUDE_TRADING_FEES` | true | 盈亏统计是否扣 Crypto 吃单费 |

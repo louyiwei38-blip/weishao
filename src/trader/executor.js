@@ -153,10 +153,40 @@ export function warnOrderPolicyMismatch() {
       mode: 'cap_threshold',
       orderType: exec.label,
       orderPriceCap: cap,
-      belowCap: 'market',
+      atOrBelowCap: 'market',
       aboveCap: `limit@${cap}`,
+      unfilledLimitForceWin: config.unfilledLimitForceWin,
     });
   }
+}
+
+/**
+ * Cancel open CLOB orders by id (best-effort). Used when unfilled GTC is force-settled.
+ * @param {string[]} orderIds
+ */
+export async function cancelOpenOrders(orderIds) {
+  const ids = [...new Set((orderIds || []).filter(Boolean))];
+  if (!ids.length || config.dryRun) return { cancelled: [], errors: [] };
+
+  const client = await getClobClient();
+  if (!clobHasL2Creds(client)) {
+    logger.warn('[executor] 无 L2 凭证 — 无法撤单');
+    return { cancelled: [], errors: ids.map((id) => ({ orderId: id, error: 'no_l2' })) };
+  }
+
+  const cancelled = [];
+  const errors = [];
+  for (const orderId of ids) {
+    try {
+      await client.cancelOrder({ orderID: orderId });
+      cancelled.push(orderId);
+      logger.info('[executor] 已撤单', { orderId });
+    } catch (err) {
+      errors.push({ orderId, error: err?.message ?? String(err) });
+      logger.warn('[executor] 撤单失败', { orderId, error: err?.message });
+    }
+  }
+  return { cancelled, errors };
 }
 
 function roundToTick(value, tickSize, up = false) {
@@ -961,7 +991,9 @@ export async function placeOrder(params) {
       orderId: dryId,
       skipped: false,
       resting: useLimitOrder,
-      usdcSpent: actualBet,
+      // Resting dry-run: no fill until (simulated) fill watch — keep 0 so unfilled force-win path works
+      usdcSpent: useLimitOrder ? 0 : actualBet,
+      limitPrice: useLimitOrder ? (effectiveMaxPrice ?? null) : null,
       orderKind: useLimitOrder ? 'limit' : 'market',
       orderType: useLimitOrder ? effectiveExec.label : marketExec.label,
     };

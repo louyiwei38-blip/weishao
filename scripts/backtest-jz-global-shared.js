@@ -99,9 +99,22 @@ const STEP = argNum('step', 5);
 const PRINCIPAL = argNum('principal', 10_000);
 const MAX_LOSSES = argNum('maxLosses', 2);
 const USE_FEE = argBool('fee', true);
-const ENTRY_LO = 0.4;
-const ENTRY_HI = 0.6;
+/** Fixed entry: --entry=0.54 (or --entryPrice=0.54). Omit → random ENTRY_LO–ENTRY_HI. */
+const ENTRY_FIXED_RAW = argStr('entry') ?? argStr('entryPrice');
+const ENTRY_FIXED =
+  ENTRY_FIXED_RAW != null && ENTRY_FIXED_RAW !== ''
+    ? Number(ENTRY_FIXED_RAW)
+    : null;
+if (ENTRY_FIXED != null && !(ENTRY_FIXED > 0 && ENTRY_FIXED < 1)) {
+  throw new Error(`bad --entry=${ENTRY_FIXED_RAW} (need 0 < p < 1)`);
+}
+const ENTRY_LO = argNum('entryLo', 0.4);
+const ENTRY_HI = argNum('entryHi', 0.6);
 const SEED = Math.floor(argNum('seed', 42));
+const ENTRY_LABEL =
+  ENTRY_FIXED != null
+    ? `fixed=${ENTRY_FIXED}`
+    : `${ENTRY_LO}-${ENTRY_HI} seed=${SEED}`;
 
 function makeRng(seed) {
   let t = seed >>> 0;
@@ -385,8 +398,9 @@ function summarize(trades, bankroll, meta, fromMs, toMs) {
       principal: PRINCIPAL,
       tCap: 0,
       stakeMax: 0,
-      entryRandom: `${ENTRY_LO}-${ENTRY_HI}`,
-      seed: SEED,
+      entry: ENTRY_FIXED != null ? ENTRY_FIXED : null,
+      entryRandom: ENTRY_FIXED != null ? null : `${ENTRY_LO}-${ENTRY_HI}`,
+      seed: ENTRY_FIXED != null ? null : SEED,
       fee: USE_FEE,
       order: `by_signalBarT_then_${bases.join('_')}_then_5m_15m_1h`,
     },
@@ -466,7 +480,7 @@ async function main() {
   console.log(`  streams: ${streamKeys.join(', ')}`);
   console.log(
     `Period ${new Date(FROM_MS).toISOString().slice(0, 10)} → ${new Date(TO_MS).toISOString().slice(0, 10)}` +
-      ` · step=$${STEP} · entry ${ENTRY_LO}-${ENTRY_HI} seed=${SEED}` +
+      ` · step=$${STEP} · entry ${ENTRY_LABEL}` +
       (fromOverrides.length ? ` · overrides ${fromOverrides.join(', ')}` : ''),
   );
 
@@ -497,7 +511,10 @@ async function main() {
   }
 
   const rng = makeRng(SEED);
-  const nextEntry = () => ENTRY_LO + rng() * (ENTRY_HI - ENTRY_LO);
+  const nextEntry =
+    ENTRY_FIXED != null
+      ? () => ENTRY_FIXED
+      : () => ENTRY_LO + rng() * (ENTRY_HI - ENTRY_LO);
   const br = new BankrollEngine({
     principal: PRINCIPAL,
     stepUsd: STEP,
@@ -588,10 +605,11 @@ async function main() {
 
   if (!existsSync(OUT_DIR)) mkdirSync(OUT_DIR, { recursive: true });
   const tag =
-    `${bases.join('-')}-5m15m1h-from${new Date(FROM_MS).toISOString().slice(0, 10)}` +
+    `${bases.join('-')}-streams${streamKeys.length}-from${new Date(FROM_MS).toISOString().slice(0, 10)}` +
     (fromOverrides.length
       ? `-${fromOverrides.map((x) => x.replace('@', '')).join('-')}`
       : '') +
+    (ENTRY_FIXED != null ? `-entry${String(ENTRY_FIXED).replace('.', 'p')}` : '') +
     '-ml2';
   const outJson = join(OUT_DIR, `backtest-jz-global-shared-${tag}.json`);
   writeFileSync(outJson, JSON.stringify({ summary, tradeCount: trades.length }, null, 2));
