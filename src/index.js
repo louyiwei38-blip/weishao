@@ -1479,7 +1479,9 @@ async function applyUnfilledLimitForceWin(pending) {
   const windowLabel = formatBeijingTime(cycleStartTs);
   const side = signal === 'UP' ? '📈 UP' : '📉 DOWN';
   const won = true;
-  const pnlUsd = 0;
+  // Force-win: no market stake — credit exactly one step on the ledger (matches N+1), not order PnL.
+  const stepUsd = Number(config.bankroll?.stepUsd) || 0;
+  const pnlUsd = stepUsd > 0 ? stepUsd : 0;
   const price = limitPrice ?? pending.entryPrice ?? config.orderPriceCap ?? null;
 
   stats.recordSettlement({ won, pnlUsd });
@@ -1515,6 +1517,8 @@ async function applyUnfilledLimitForceWin(pending) {
     signal,
     limitPrice: price,
     orderId: pending.orderId,
+    pnlUsd,
+    stepUsd,
     netCount: martingale.getState()?.bankroll?.netCount,
     ...stats.formatLogFields(),
   });
@@ -1536,12 +1540,13 @@ async function applyUnfilledLimitForceWin(pending) {
     signalId: signalId ?? null,
     actualBet: 0,
     entryPrice: price,
-    pnlUsd: 0,
+    pnlUsd,
     feeUsd: 0,
     feeIncluded: true,
     won: true,
     winningOutcome: signal,
     forceWinUnfilled: true,
+    forceWinStepCredit: true,
     settleSource: 'unfilled_limit_force_win',
     dryRun: config.dryRun,
     sources,
@@ -1563,9 +1568,9 @@ async function applyUnfilledLimitForceWin(pending) {
       `方向: ${side}\n` +
       `开单价格: <b>$${price != null ? Number(price).toFixed(3) : '—'}</b>（挂单未成交）\n` +
       `投入: <b>$0.00</b>\n` +
-      `本单盈亏: <b>+$0.00</b>\n` +
+      `本单盈亏: <b>${stats.formatPnlUsd(pnlUsd)}</b>（仅记净胜负步进 $${Number(stepUsd).toFixed(2)}，非开单盈亏）\n` +
       `本链路盈亏: <b>${stats.formatPnlUsd(chainPnlUsd)}</b>\n` +
-      `结果: <b>FORCE_WIN</b>（未成交按赢记账 · N+1 · 链路结束）\n` +
+      `结果: <b>FORCE_WIN</b>（未成交 · N+1 · 账本 +$${Number(stepUsd).toFixed(2)} · 链路结束）\n` +
       `\n⏹ <b>链路结束</b> — 等待下一次九转` +
       (brAfter?.netCount != null ? ` · N=${brAfter.netCount}` : '') +
       `\n连败: ${mg.consecutiveLosses} · 默认首注 $${config.tradeBudgetUsd}\n` +
